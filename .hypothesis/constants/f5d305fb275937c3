@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/services/data_engine/kline_repository.py
+# hypothesis_version: 6.151.9
+
+[1000, 'adj_type', 'amount', 'close', 'freq', 'high', 'limit_down', 'limit_up', 'low', 'open', 'symbol', 'time', 'turnover', 'vol_ratio', 'volume']

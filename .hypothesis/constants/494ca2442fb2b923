@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/core/security.py
+# hypothesis_version: 6.151.9
+
+[b'=', 443, 2147483647, '$', '.', '=', 'HS256', 'JWT', 'alg', 'ascii', 'big', 'exp', 'iat', 'localhost', 'role', 'stub', 'sub', 'typ', 'utf-8']

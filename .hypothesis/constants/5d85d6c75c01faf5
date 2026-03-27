@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/models/trade.py
+# hypothesis_version: 6.151.9
+
+['NOW()', 'gen_random_uuid()', 'mode', 'position', 'symbol', 'trade_order', 'user_id']

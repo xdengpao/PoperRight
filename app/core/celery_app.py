@@ -86,6 +86,13 @@ celery_app.conf.beat_schedule = {
         "options": {"queue": "data_sync"},
     },
 
+    # 资金数据日更：每个交易日 15:30 执行（需求 1.4/1.5）
+    "money-flow-sync-1530": {
+        "task": "app.tasks.data_sync.sync_money_flow",
+        "schedule": crontab(hour=15, minute=30, day_of_week="1-5"),
+        "options": {"queue": "data_sync"},
+    },
+
     # 盘中实时行情同步：交易时段每 10 秒执行（需求 7.5）
     "realtime-market-sync": {
         "task": "app.tasks.data_sync.sync_realtime_market",

@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/services/data_engine/market_adapter.py
+# hypothesis_version: 6.151.9
+
+[10.0, 30.0, 10000000000.0, 1000, '%Y%m%d', ',', '/', '/kline', '/quote/realtime', '1', '15', '15m', '1M', '1d', '1m', '1w', '30', '30m', '5', '5m', '60', '60m', 'Authorization', 'D', 'M', 'MarketDataClient', 'W', 'adj', 'adj_type', 'amount', 'close', 'data', 'datetime', 'end_date', 'high', 'limit_down', 'limit_up', 'low', 'open', 'period', 'start_date', 'symbol', 'symbols', 'time', 'ts', 'turnover', 'vol_ratio', 'volume', '实时行情轮询已停止', '实时行情轮询异常: %s', '行情 API 网络错误 %s: %s']

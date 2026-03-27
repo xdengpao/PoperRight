@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/tasks/base.py
+# hypothesis_version: 6.151.9
+
+[120, 300, 600, 1800, 3600, 'backtest', 'base', 'data_sync', 'review', 'screening']

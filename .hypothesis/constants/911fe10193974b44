@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/services/data_engine/stock_filter.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.5, 3.0, '-50', '0', '1', '70', 'DELISTED', 'HIGH_PLEDGE', 'NEW_STOCK', 'PROFIT_LOSS', 'ST', 'SUSPENDED', 'close', 'date', 'high', 'low', 'open', 'reason', 'symbol', 'volume', '永久剔除名单共 %d 只', '永久剔除名单同步完成，新增 %d 条']

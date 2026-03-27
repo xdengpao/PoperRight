@@ -1,0 +1,4 @@
+# file: /Users/poper/src/PoperRight/app/models/__init__.py
+# hypothesis_version: 6.151.9
+
+['AppUser', 'AuditLog', 'BacktestRun', 'Kline', 'KlineBar', 'PermanentExclusion', 'Position', 'ScreenResult', 'StockInfo', 'StockList', 'StrategyTemplate', 'TradeOrder']
