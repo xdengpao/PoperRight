@@ -4,6 +4,9 @@ import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [vue()],
+  experimental: {
+    skipSsrTransform: true,
+  },
   test: {
     // 使用 jsdom 模拟浏览器环境（兼容 Chrome/Firefox/Edge，需求 20）
     environment: 'jsdom',

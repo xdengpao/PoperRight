@@ -23,28 +23,48 @@
         </div>
         <div class="config-item">
           <label for="bt-capital">初始资金 (元)</label>
-          <input id="bt-capital" v-model.number="form.initialCapital" type="number" class="input" />
+          <input id="bt-capital" v-model.number="form.initialCapital" type="number" min="10000" step="10000" class="input" />
         </div>
         <div class="config-item">
           <label for="bt-buy-fee">买入手续费率</label>
-          <input id="bt-buy-fee" v-model.number="form.commissionBuy" type="number" step="0.0001" class="input" />
+          <input id="bt-buy-fee" v-model.number="form.commissionBuy" type="number" step="0.0001" min="0" class="input" />
+          <span class="hint">默认 0.03%</span>
         </div>
         <div class="config-item">
           <label for="bt-sell-fee">卖出手续费率</label>
-          <input id="bt-sell-fee" v-model.number="form.commissionSell" type="number" step="0.0001" class="input" />
+          <input id="bt-sell-fee" v-model.number="form.commissionSell" type="number" step="0.0001" min="0" class="input" />
+          <span class="hint">默认 0.13%（含印花税）</span>
         </div>
         <div class="config-item">
           <label for="bt-slippage">滑点比例</label>
-          <input id="bt-slippage" v-model.number="form.slippage" type="number" step="0.0001" class="input" />
+          <input id="bt-slippage" v-model.number="form.slippage" type="number" step="0.0001" min="0" class="input" />
+          <span class="hint">默认 0.1%</span>
         </div>
       </div>
       <div class="form-actions">
-        <button class="btn" @click="runBacktest" :disabled="running">
+        <button class="btn btn-primary" @click="runBacktest" :disabled="running" aria-label="开始回测">
+          <span v-if="running" class="spinner" aria-hidden="true"></span>
           {{ running ? '回测中...' : '开始回测' }}
         </button>
-        <button class="btn btn-outline" @click="runOptimize" :disabled="optimizing">
+        <button class="btn btn-outline" @click="runOptimize" :disabled="optimizing || running">
           {{ optimizing ? '优化中...' : '参数优化' }}
         </button>
+      </div>
+
+      <!-- 进度状态 -->
+      <div v-if="running || runStatus" class="progress-bar-wrap" aria-live="polite">
+        <div class="progress-label">
+          <span>{{ runStatusText }}</span>
+          <span v-if="runProgress > 0">{{ runProgress }}%</span>
+        </div>
+        <div class="progress-track">
+          <div
+            class="progress-fill"
+            :class="runStatusClass"
+            :style="{ width: runProgress + '%' }"
+          ></div>
+        </div>
+        <p v-if="runError" class="run-error">{{ runError }}</p>
       </div>
     </section>
 
@@ -60,15 +80,57 @@
     </section>
 
     <!-- 收益曲线 / 最大回撤图表 -->
-    <section v-if="result" class="chart-section" aria-label="回测图表">
-      <h2 class="section-title">收益曲线 & 最大回撤</h2>
-      <div ref="equityChartRef" class="chart" role="img" aria-label="收益曲线图"></div>
+    <section v-if="result" class="chart-section card" aria-label="回测图表">
+      <h2 class="section-title">收益曲线 &amp; 最大回撤</h2>
+      <div ref="equityChartRef" class="chart" role="img" aria-label="收益曲线与最大回撤图"></div>
+    </section>
+
+    <!-- 交易流水明细 -->
+    <section v-if="result && tradeRecords.length" class="card" aria-label="交易流水明细">
+      <div class="section-header">
+        <h2 class="section-title">交易流水明细</h2>
+        <span class="record-count">共 {{ tradeRecords.length }} 笔</span>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" aria-label="交易流水明细表">
+          <thead>
+            <tr>
+              <th scope="col">时间</th>
+              <th scope="col">股票代码</th>
+              <th scope="col">方向</th>
+              <th scope="col">数量（股）</th>
+              <th scope="col">价格（元）</th>
+              <th scope="col">金额（元）</th>
+              <th scope="col">手续费（元）</th>
+              <th scope="col">状态</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(t, i) in tradeRecords" :key="i">
+              <td>{{ t.created_at?.slice(0, 16) ?? '—' }}</td>
+              <td class="mono">{{ t.symbol }}</td>
+              <td>
+                <span class="direction-badge" :class="t.direction === 'BUY' ? 'buy' : 'sell'">
+                  {{ t.direction === 'BUY' ? '买入' : '卖出' }}
+                </span>
+              </td>
+              <td>{{ t.quantity?.toLocaleString() ?? '—' }}</td>
+              <td>{{ t.price?.toFixed(2) ?? '—' }}</td>
+              <td>{{ t.amount != null ? t.amount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) : '—' }}</td>
+              <td>{{ t.commission?.toFixed(2) ?? '—' }}</td>
+              <td>
+                <span class="status-badge" :class="t.status?.toLowerCase()">{{ t.status ?? '—' }}</span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <!-- 参数优化结果 -->
     <section v-if="optimizeResults.length" class="card" aria-label="参数优化结果">
       <h2 class="section-title">参数优化结果 (Top 10)</h2>
-      <table class="data-table">
+      <table class="data-table" aria-label="参数优化结果表">
         <thead>
           <tr>
             <th scope="col">排名</th>
@@ -101,17 +163,49 @@ import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
 
-interface StrategyItem { id: string; name: string }
+// ─── 类型定义 ─────────────────────────────────────────────────────────────────
+
+interface StrategyItem {
+  id: string
+  name: string
+}
+
+interface TradeOrder {
+  symbol: string
+  direction: 'BUY' | 'SELL'
+  quantity: number
+  price: number
+  amount: number
+  commission: number
+  status: string
+  created_at: string
+}
+
 interface BacktestResult {
-  annual_return: number; total_return: number; win_rate: number
-  profit_loss_ratio: number; max_drawdown: number; sharpe_ratio: number
-  calmar_ratio: number; total_trades: number; avg_holding_days: number
-  equity_curve: [string, number][]; drawdown_curve?: [string, number][]
+  annual_return: number
+  total_return: number
+  win_rate: number
+  profit_loss_ratio: number
+  max_drawdown: number
+  sharpe_ratio: number
+  calmar_ratio: number
+  total_trades: number
+  avg_holding_days: number
+  equity_curve: [string, number][]
+  trade_records: TradeOrder[]
 }
+
 interface OptimizeResult {
-  params: Record<string, number>; annual_return: number
-  sharpe_ratio: number; max_drawdown: number; overfit: boolean
+  params: Record<string, number>
+  annual_return: number
+  sharpe_ratio: number
+  max_drawdown: number
+  overfit: boolean
 }
+
+type RunStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed'
+
+// ─── 状态 ─────────────────────────────────────────────────────────────────────
 
 const strategies = ref<StrategyItem[]>([])
 const running = ref(false)
@@ -119,16 +213,42 @@ const optimizing = ref(false)
 const result = ref<BacktestResult | null>(null)
 const optimizeResults = ref<OptimizeResult[]>([])
 const equityChartRef = ref<HTMLElement | null>(null)
+const runStatus = ref<RunStatus>('idle')
+const runProgress = ref(0)
+const runError = ref('')
+
 let chartInstance: echarts.ECharts | null = null
+let resizeObserver: ResizeObserver | null = null
+let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 const form = reactive({
   strategyId: '',
   startDate: '2022-01-01',
   endDate: '2024-01-01',
-  initialCapital: 1000000,
+  initialCapital: 1_000_000,
   commissionBuy: 0.0003,
   commissionSell: 0.0013,
   slippage: 0.001,
+})
+
+// ─── 计算属性 ─────────────────────────────────────────────────────────────────
+
+const tradeRecords = computed<TradeOrder[]>(() => result.value?.trade_records ?? [])
+
+const runStatusText = computed(() => {
+  switch (runStatus.value) {
+    case 'pending': return '等待回测任务启动...'
+    case 'running': return '回测执行中，请稍候...'
+    case 'success': return '回测完成'
+    case 'failed': return '回测失败'
+    default: return ''
+  }
+})
+
+const runStatusClass = computed(() => {
+  if (runStatus.value === 'success') return 'fill-success'
+  if (runStatus.value === 'failed') return 'fill-error'
+  return 'fill-active'
 })
 
 const metricsCards = computed(() => {
@@ -137,20 +257,28 @@ const metricsCards = computed(() => {
   return [
     { label: '年化收益率', display: (r.annual_return * 100).toFixed(2) + '%', colorClass: r.annual_return >= 0 ? 'up' : 'down' },
     { label: '累计收益率', display: (r.total_return * 100).toFixed(2) + '%', colorClass: r.total_return >= 0 ? 'up' : 'down' },
-    { label: '胜率', display: (r.win_rate * 100).toFixed(1) + '%', colorClass: '' },
-    { label: '盈亏比', display: r.profit_loss_ratio.toFixed(2), colorClass: '' },
+    { label: '胜率', display: (r.win_rate * 100).toFixed(1) + '%', colorClass: r.win_rate >= 0.5 ? 'up' : '' },
+    { label: '盈亏比', display: r.profit_loss_ratio.toFixed(2), colorClass: r.profit_loss_ratio >= 1.5 ? 'up' : '' },
     { label: '最大回撤', display: (r.max_drawdown * 100).toFixed(2) + '%', colorClass: 'down' },
     { label: '夏普比率', display: r.sharpe_ratio.toFixed(2), colorClass: r.sharpe_ratio >= 1 ? 'up' : '' },
-    { label: '卡玛比率', display: r.calmar_ratio.toFixed(2), colorClass: '' },
+    { label: '卡玛比率', display: r.calmar_ratio.toFixed(2), colorClass: r.calmar_ratio >= 1 ? 'up' : '' },
     { label: '总交易次数', display: String(r.total_trades), colorClass: '' },
     { label: '平均持仓天数', display: r.avg_holding_days.toFixed(1), colorClass: '' },
   ]
 })
 
+// ─── 回测执行（支持异步任务轮询）────────────────────────────────────────────
+
 async function runBacktest() {
+  if (running.value) return
   running.value = true
+  runStatus.value = 'pending'
+  runProgress.value = 5
+  runError.value = ''
+  result.value = null
+
   try {
-    const res = await apiClient.post<BacktestResult>('/backtest/run', {
+    const res = await apiClient.post<BacktestResult | { task_id: string }>('/backtest/run', {
       strategy_id: form.strategyId || undefined,
       start_date: form.startDate,
       end_date: form.endDate,
@@ -159,12 +287,74 @@ async function runBacktest() {
       commission_sell: form.commissionSell,
       slippage: form.slippage,
     })
-    result.value = res.data
-    await nextTick()
-    renderEquityChart()
-  } catch { /* handle error */ }
-  running.value = false
+
+    // 如果直接返回结果（同步模式）
+    if ('equity_curve' in res.data) {
+      result.value = res.data as BacktestResult
+      runStatus.value = 'success'
+      runProgress.value = 100
+      await nextTick()
+      renderEquityChart()
+    } else {
+      // 异步任务模式：轮询结果
+      const taskId = (res.data as { task_id: string }).task_id
+      runStatus.value = 'running'
+      runProgress.value = 20
+      await pollResult(taskId)
+    }
+  } catch (e: unknown) {
+    runStatus.value = 'failed'
+    runError.value = e instanceof Error ? e.message : '回测启动失败，请重试'
+  } finally {
+    running.value = false
+  }
 }
+
+async function pollResult(taskId: string) {
+  const maxAttempts = 60
+  let attempts = 0
+
+  const poll = async (): Promise<void> => {
+    if (attempts >= maxAttempts) {
+      runStatus.value = 'failed'
+      runError.value = '回测超时，请检查策略配置后重试'
+      return
+    }
+    attempts++
+    // 进度从 20% 到 90% 线性增长
+    runProgress.value = Math.min(20 + Math.floor((attempts / maxAttempts) * 70), 90)
+
+    try {
+      const res = await apiClient.get<BacktestResult & { status?: string }>(`/backtest/${taskId}/result`)
+      const data = res.data
+
+      if (data.status === 'PENDING' || data.status === 'RUNNING') {
+        pollTimer = setTimeout(poll, 2000)
+        return
+      }
+
+      if (data.status === 'FAILED') {
+        runStatus.value = 'failed'
+        runError.value = '回测任务执行失败'
+        return
+      }
+
+      // 成功
+      result.value = data
+      runStatus.value = 'success'
+      runProgress.value = 100
+      await nextTick()
+      renderEquityChart()
+    } catch {
+      // 结果尚未就绪，继续轮询
+      pollTimer = setTimeout(poll, 2000)
+    }
+  }
+
+  await poll()
+}
+
+// ─── 参数优化 ─────────────────────────────────────────────────────────────────
 
 async function runOptimize() {
   optimizing.value = true
@@ -180,96 +370,239 @@ async function runOptimize() {
   optimizing.value = false
 }
 
+// ─── ECharts 图表渲染 ─────────────────────────────────────────────────────────
+
+/** 从净值曲线计算最大回撤序列 */
+function calcDrawdownSeries(equityCurve: [string, number][]): number[] {
+  let peak = -Infinity
+  return equityCurve.map(([, v]) => {
+    if (v > peak) peak = v
+    return peak > 0 ? ((v - peak) / peak) * 100 : 0
+  })
+}
+
 function renderEquityChart() {
   if (!chartInstance || !result.value) return
   const eq = result.value.equity_curve
+  if (!eq || eq.length === 0) return
+
   const dates = eq.map((e) => e[0])
   const values = eq.map((e) => e[1])
-  const dd = result.value.drawdown_curve ?? []
+  const drawdowns = calcDrawdownSeries(eq)
 
   chartInstance.setOption({
     backgroundColor: 'transparent',
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['收益曲线', '回撤曲线'], textStyle: { color: '#8b949e' }, top: 0 },
-    grid: { left: 60, right: 20, top: 40, bottom: 30 },
-    xAxis: { type: 'category', data: dates, axisLabel: { color: '#8b949e' } },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#1c2128',
+      borderColor: '#30363d',
+      textStyle: { color: '#e6edf3', fontSize: 12 },
+      formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
+        if (!Array.isArray(params)) return ''
+        const date = params[0]?.axisValue ?? ''
+        let html = `<div style="margin-bottom:4px;color:#8b949e">${date}</div>`
+        for (const p of params) {
+          const val = typeof p.value === 'number' ? p.value.toFixed(4) : p.value
+          const unit = p.seriesName === '最大回撤' ? '%' : ''
+          html += `<div><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${p.color};margin-right:6px"></span>${p.seriesName}: <b>${val}${unit}</b></div>`
+        }
+        return html
+      },
+    },
+    legend: {
+      data: ['净值曲线', '最大回撤'],
+      textStyle: { color: '#8b949e' },
+      top: 4,
+      right: 10,
+    },
+    grid: { left: 60, right: 60, top: 40, bottom: 30 },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      axisLabel: { color: '#8b949e', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#30363d' } },
+      splitLine: { show: false },
+    },
     yAxis: [
-      { type: 'value', name: '净值', splitLine: { lineStyle: { color: '#21262d' } }, axisLabel: { color: '#8b949e' } },
-      { type: 'value', name: '回撤%', splitLine: { show: false }, axisLabel: { color: '#8b949e' } },
+      {
+        type: 'value',
+        name: '净值',
+        nameTextStyle: { color: '#8b949e' },
+        splitLine: { lineStyle: { color: '#21262d' } },
+        axisLabel: { color: '#8b949e', formatter: (v: number) => v.toFixed(2) },
+      },
+      {
+        type: 'value',
+        name: '回撤%',
+        nameTextStyle: { color: '#8b949e' },
+        splitLine: { show: false },
+        axisLabel: { color: '#8b949e', formatter: (v: number) => v.toFixed(1) + '%' },
+        max: 0,
+      },
     ],
     series: [
-      { name: '收益曲线', type: 'line', data: values, smooth: true, lineStyle: { color: '#58a6ff' }, itemStyle: { color: '#58a6ff' }, symbol: 'none' },
-      { name: '回撤曲线', type: 'line', data: dd.map((d) => d[1]), yAxisIndex: 1, smooth: true, lineStyle: { color: '#f85149' }, areaStyle: { color: '#f8514922' }, itemStyle: { color: '#f85149' }, symbol: 'none' },
+      {
+        name: '净值曲线',
+        type: 'line',
+        data: values,
+        smooth: true,
+        lineStyle: { color: '#58a6ff', width: 2 },
+        itemStyle: { color: '#58a6ff' },
+        symbol: 'none',
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(88,166,255,0.2)' },
+            { offset: 1, color: 'rgba(88,166,255,0)' },
+          ]),
+        },
+      },
+      {
+        name: '最大回撤',
+        type: 'line',
+        data: drawdowns,
+        yAxisIndex: 1,
+        smooth: true,
+        lineStyle: { color: '#f85149', width: 1.5 },
+        areaStyle: { color: 'rgba(248,81,73,0.15)' },
+        itemStyle: { color: '#f85149' },
+        symbol: 'none',
+      },
     ],
   })
 }
 
+// ─── 策略列表 ─────────────────────────────────────────────────────────────────
+
 async function loadStrategies() {
   try {
     const res = await apiClient.get<StrategyItem[]>('/strategies')
-    strategies.value = res.data
-  } catch { /* handle error */ }
+    strategies.value = Array.isArray(res.data) ? res.data : []
+  } catch { /* API 暂不可用 */ }
+}
+
+// ─── 生命周期 ─────────────────────────────────────────────────────────────────
+
+function initChart(el: HTMLElement) {
+  chartInstance = echarts.init(el, 'dark')
+  resizeObserver = new ResizeObserver(() => chartInstance?.resize())
+  resizeObserver.observe(el)
 }
 
 onMounted(async () => {
   loadStrategies()
   await nextTick()
-  if (equityChartRef.value) {
-    chartInstance = echarts.init(equityChartRef.value)
-  }
+  if (equityChartRef.value) initChart(equityChartRef.value)
 })
 
 watch(equityChartRef, (el) => {
-  if (el && !chartInstance) chartInstance = echarts.init(el)
+  if (el && !chartInstance) initChart(el)
 })
 
-onUnmounted(() => { chartInstance?.dispose() })
+onUnmounted(() => {
+  if (pollTimer) clearTimeout(pollTimer)
+  resizeObserver?.disconnect()
+  chartInstance?.dispose()
+})
 </script>
 
 <style scoped>
+/* ─── 布局 ─────────────────────────────────────────────────────────────────── */
 .backtest-view { max-width: 1200px; }
 .page-title { font-size: 20px; margin-bottom: 20px; color: #e6edf3; }
 .section-title { font-size: 16px; margin-bottom: 12px; color: #e6edf3; }
+.section-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.section-header .section-title { margin-bottom: 0; }
+.record-count { font-size: 13px; color: #8b949e; }
 
+/* ─── 卡片 ─────────────────────────────────────────────────────────────────── */
 .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; }
+
+/* ─── 参数表单 ──────────────────────────────────────────────────────────────── */
 .config-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
 .config-item { display: flex; flex-direction: column; gap: 4px; }
 .config-item label { font-size: 13px; color: #8b949e; }
-.form-actions { display: flex; gap: 8px; margin-top: 16px; }
+.hint { font-size: 11px; color: #484f58; }
+.form-actions { display: flex; gap: 8px; margin-top: 16px; align-items: center; }
 
+/* ─── 输入控件 ──────────────────────────────────────────────────────────────── */
 .input {
-  background: #0d1117; border: 1px solid #30363d; color: #e6edf3; padding: 6px 12px;
-  border-radius: 6px; font-size: 14px;
+  background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+  padding: 6px 12px; border-radius: 6px; font-size: 14px;
 }
-.btn {
-  background: #238636; color: #fff; border: none; padding: 6px 16px;
-  border-radius: 6px; cursor: pointer; font-size: 14px;
-}
-.btn:hover { background: #2ea043; }
-.btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn-outline { background: transparent; border: 1px solid #30363d; color: #8b949e; }
-.btn-outline:hover { color: #e6edf3; border-color: #8b949e; }
+.input:focus { outline: none; border-color: #58a6ff; }
 
+/* ─── 按钮 ─────────────────────────────────────────────────────────────────── */
+.btn { padding: 7px 18px; border-radius: 6px; cursor: pointer; font-size: 14px; border: none; display: inline-flex; align-items: center; gap: 6px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary { background: #238636; color: #fff; }
+.btn-primary:hover:not(:disabled) { background: #2ea043; }
+.btn-outline { background: transparent; border: 1px solid #30363d; color: #8b949e; }
+.btn-outline:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+
+/* ─── 进度条 ────────────────────────────────────────────────────────────────── */
+.progress-bar-wrap { margin-top: 16px; }
+.progress-label { display: flex; justify-content: space-between; font-size: 13px; color: #8b949e; margin-bottom: 6px; }
+.progress-track { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+.progress-fill { height: 100%; border-radius: 3px; transition: width 0.4s ease; }
+.fill-active { background: linear-gradient(90deg, #58a6ff, #79c0ff); animation: pulse 1.5s ease-in-out infinite; }
+.fill-success { background: #3fb950; }
+.fill-error { background: #f85149; }
+.run-error { margin-top: 8px; font-size: 13px; color: #f85149; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+/* ─── 旋转加载图标 ──────────────────────────────────────────────────────────── */
+.spinner {
+  display: inline-block; width: 14px; height: 14px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── 绩效指标 ──────────────────────────────────────────────────────────────── */
 .metrics-section { margin-bottom: 20px; }
 .metrics-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; }
 .metric-card {
   background: #161b22; border: 1px solid #30363d; border-radius: 8px;
-  padding: 14px; display: flex; flex-direction: column; gap: 4px;
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 6px;
 }
 .metric-label { font-size: 12px; color: #8b949e; }
-.metric-value { font-size: 20px; font-weight: 600; color: #e6edf3; }
+.metric-value { font-size: 22px; font-weight: 600; color: #e6edf3; }
+/* A 股配色：涨红跌绿 */
 .up { color: #f85149; }
 .down { color: #3fb950; }
 
-.chart-section { margin-bottom: 20px; }
-.chart { width: 100%; height: 360px; background: #161b22; border-radius: 8px; border: 1px solid #30363d; }
+/* ─── 图表 ─────────────────────────────────────────────────────────────────── */
+.chart-section { padding-bottom: 16px; }
+.chart { width: 100%; height: 380px; }
 
-.data-table { width: 100%; border-collapse: collapse; }
-.data-table th, .data-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; font-size: 14px; }
+/* ─── 交易流水表格 ──────────────────────────────────────────────────────────── */
+.table-wrap { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; min-width: 700px; }
+.data-table th,
+.data-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; font-size: 13px; white-space: nowrap; }
 .data-table th { color: #8b949e; font-weight: 500; }
 .data-table td { color: #e6edf3; }
-.mono { font-family: 'SF Mono', monospace; font-size: 12px; }
+.mono { font-family: 'SF Mono', 'Consolas', monospace; }
 
+.direction-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 600;
+}
+.direction-badge.buy { background: rgba(248,81,73,0.15); color: #f85149; }
+.direction-badge.sell { background: rgba(63,185,80,0.15); color: #3fb950; }
+
+.status-badge {
+  display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px;
+  background: #21262d; color: #8b949e;
+}
+.status-badge.filled { background: rgba(63,185,80,0.15); color: #3fb950; }
+.status-badge.cancelled { background: rgba(248,81,73,0.1); color: #f85149; }
+.status-badge.pending { background: rgba(210,153,34,0.15); color: #d29922; }
+
+/* ─── 参数优化 ──────────────────────────────────────────────────────────────── */
 .overfit-warn { color: #d29922; }
 .overfit-ok { color: #3fb950; }
 </style>

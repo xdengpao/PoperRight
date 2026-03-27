@@ -10,6 +10,18 @@ vi.mock('@/api', () => ({
   },
 }))
 
+// 模拟 wsClient，避免真实 WebSocket 连接
+const mockWsClient = {
+  connect: vi.fn(),
+  disconnect: vi.fn(),
+  onMessage: vi.fn(),
+  offMessage: vi.fn(),
+  reconnect: vi.fn(),
+}
+vi.mock('@/services/wsClient', () => ({
+  wsClient: mockWsClient,
+}))
+
 // ─── 辅助：构造 JWT token ──────────────────────────────────────────────────
 
 function makeJwt(payload: Record<string, unknown>): string {
@@ -59,6 +71,7 @@ describe('useAuthStore', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     localStorage.removeItem('access_token')
+    vi.clearAllMocks()
   })
 
   it('初始状态：未认证', () => {
@@ -99,5 +112,13 @@ describe('useAuthStore', () => {
     const store = useAuthStore()
     store.user = { id: '1', username: 'admin', role: 'ADMIN' }
     expect(store.role).toBe('ADMIN')
+  })
+
+  it('logout 时调用 wsClient.disconnect', () => {
+    const store = useAuthStore()
+    store.token = 'test-token'
+    store.user = { id: '1', username: 'trader', role: 'TRADER' }
+    store.logout()
+    expect(mockWsClient.disconnect).toHaveBeenCalledOnce()
   })
 })

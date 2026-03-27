@@ -4,6 +4,9 @@
 - GET /kline/{symbol}     — 查询 K 线数据
 - GET /stocks             — 查询股票列表（含过滤）
 - GET /market/overview    — 查询大盘概况
+- GET /sync/status        — 查询各数据源同步状态
+- POST /sync              — 手动触发数据同步
+- GET /exclusions         — 查询永久剔除名单
 """
 
 from __future__ import annotations
@@ -86,4 +89,70 @@ async def get_market_overview() -> dict:
         "advance_decline": {"up": 2800, "down": 1500, "flat": 200},
         "limit_stats": {"limit_up": 45, "limit_down": 8},
         "market_sentiment": "NORMAL",
+    }
+
+
+@router.get("/sync/status")
+async def get_sync_status() -> dict:
+    """查询各数据源同步状态。"""
+    return {
+        "items": [
+            {
+                "source": "行情数据",
+                "last_sync_at": datetime(2024, 1, 2, 15, 0).isoformat(),
+                "status": "OK",
+                "record_count": 1250000,
+            },
+            {
+                "source": "基本面数据",
+                "last_sync_at": datetime(2024, 1, 2, 18, 0).isoformat(),
+                "status": "OK",
+                "record_count": 48000,
+            },
+            {
+                "source": "资金流向",
+                "last_sync_at": datetime(2024, 1, 2, 16, 30).isoformat(),
+                "status": "OK",
+                "record_count": 320000,
+            },
+        ]
+    }
+
+
+@router.post("/sync")
+async def trigger_sync() -> dict:
+    """手动触发数据同步任务。"""
+    return {"message": "数据同步任务已触发，请稍后查看同步状态", "task_id": "sync-manual-001"}
+
+
+@router.get("/exclusions")
+async def get_exclusions(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+) -> dict:
+    """查询永久剔除名单。"""
+    return {
+        "total": 3,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            {
+                "symbol": "000001",
+                "name": "*ST 示例",
+                "reason": "ST",
+                "created_at": datetime(2023, 6, 1).isoformat(),
+            },
+            {
+                "symbol": "000002",
+                "name": "退市示例",
+                "reason": "DELISTED",
+                "created_at": datetime(2023, 8, 15).isoformat(),
+            },
+            {
+                "symbol": "000003",
+                "name": "新股示例",
+                "reason": "NEW_STOCK",
+                "created_at": datetime(2024, 1, 1).isoformat(),
+            },
+        ],
     }

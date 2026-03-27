@@ -30,6 +30,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/DashboardView.vue'),
         meta: { title: '大盘概况' },
       },
+      // 数据管理
+      {
+        path: 'data',
+        name: 'DataManage',
+        component: () => import('@/views/DataManageView.vue'),
+        meta: { title: '数据管理' },
+      },
       // 选股功能（需求 3-7）
       {
         path: 'screener',

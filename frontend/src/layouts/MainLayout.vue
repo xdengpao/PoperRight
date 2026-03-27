@@ -94,13 +94,32 @@
       </main>
     </div>
   </div>
+
+  <!-- 全局预警弹出通知 -->
+  <AlertNotification />
+
+  <!-- 全局离线提示条 -->
+  <Teleport to="body">
+    <Transition name="offline-bar">
+      <div v-if="isOffline" class="offline-bar" role="status" aria-live="assertive">
+        <span>⚠️ 网络连接已断开，请检查网络设置</span>
+      </div>
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+
+// --- Offline detection ---
+const isOffline = ref(!navigator.onLine)
+
+function handleOnline() { isOffline.value = false }
+function handleOffline() { isOffline.value = true }
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore, type UserRole } from '@/stores/auth'
 import { useAlertStore, type AlertMessage } from '@/stores/alert'
+import AlertNotification from '@/components/AlertNotification.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -201,10 +220,14 @@ function handleClickOutside(e: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)
+  window.addEventListener('online', handleOnline)
+  window.addEventListener('offline', handleOffline)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', handleClickOutside)
+  window.removeEventListener('online', handleOnline)
+  window.removeEventListener('offline', handleOffline)
 })
 
 // --- User ---
@@ -472,5 +495,31 @@ function handleLogout() {
   flex: 1;
   overflow-y: auto;
   padding: 24px;
+  min-width: 1080px;
+}
+
+/* Offline bar */
+.offline-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10000;
+  background: #d29922;
+  color: #0d1117;
+  text-align: center;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.offline-bar-enter-active,
+.offline-bar-leave-active {
+  transition: transform 0.3s ease, opacity 0.3s ease;
+}
+.offline-bar-enter-from,
+.offline-bar-leave-to {
+  transform: translateY(-100%);
+  opacity: 0;
 }
 </style>

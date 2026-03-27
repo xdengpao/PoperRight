@@ -1,0 +1,22 @@
+/* 最小支持宽度 1280px */
+body {
+  min-width: 1280px;
+}
+
+/* 数据表格水平滚动 */
+.table-wrap {
+  overflow-x: auto;
+}
+
+/* 卡片网格自适应 */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* 图表容器 */
+.chart-container {
+  width: 100%;
+  min-height: 300px;
+}

@@ -1,2 +1,423 @@
-<template><div>选股结果（待实现）</div></template>
-<script setup lang="ts"></script>
+<template>
+  <div class="screener-results">
+    <div class="page-header">
+      <h1 class="page-title">选股结果</h1>
+      <div class="header-actions">
+        <button class="btn btn-outline" @click="loadResults">🔄 刷新</button>
+        <button class="btn btn-export" :disabled="exporting || !results.length" @click="exportExcel">
+          <span v-if="exporting" class="spinner" aria-hidden="true"></span>
+          {{ exporting ? '导出中...' : '📥 导出 Excel' }}
+        </button>
+      </div>
+    </div>
+
+    <!-- 加载中 -->
+    <LoadingSpinner v-if="state.loading" text="加载选股结果中..." />
+
+    <!-- 错误 -->
+    <ErrorBanner v-else-if="state.error" :message="state.error" :retryFn="loadResults" />
+
+    <!-- 空状态 -->
+    <div v-else-if="!results.length" class="empty-state">
+      <div class="empty-icon">📊</div>
+      <p class="empty-text">暂无选股结果</p>
+      <p class="empty-hint">请先在「智能选股」页面执行选股</p>
+      <button class="btn" @click="$router.push('/screener')">前往选股</button>
+    </div>
+
+    <!-- 结果表格 -->
+    <div v-else class="table-wrapper">
+      <!-- 排序控制 -->
+      <div class="sort-bar">
+        <span class="sort-label">排序：</span>
+        <button
+          v-for="col in sortOptions"
+          :key="col.key"
+          :class="['sort-btn', sortKey === col.key && 'active']"
+          @click="toggleSort(col.key)"
+        >
+          {{ col.label }}
+          <span v-if="sortKey === col.key" class="sort-arrow">
+            {{ sortDir === 'asc' ? '↑' : '↓' }}
+          </span>
+        </button>
+        <span class="result-count">共 {{ results.length }} 条</span>
+      </div>
+
+      <table class="result-table" aria-label="选股结果列表">
+        <thead>
+          <tr>
+            <th>股票代码</th>
+            <th>股票名称</th>
+            <th>买入参考价</th>
+            <th>
+              <button class="th-sort-btn" @click="toggleSort('trend_score')">
+                趋势强度
+                <span v-if="sortKey === 'trend_score'" class="sort-arrow">
+                  {{ sortDir === 'asc' ? '↑' : '↓' }}
+                </span>
+              </button>
+            </th>
+            <th>
+              <button class="th-sort-btn" @click="toggleSort('risk_level')">
+                风险等级
+                <span v-if="sortKey === 'risk_level'" class="sort-arrow">
+                  {{ sortDir === 'asc' ? '↑' : '↓' }}
+                </span>
+              </button>
+            </th>
+            <th>触发信号</th>
+            <th>选股时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          <template v-for="row in sortedResults" :key="row.symbol">
+            <!-- 主行 -->
+            <tr
+              class="result-row"
+              :class="{ expanded: expandedSymbols.has(row.symbol) }"
+              @click="toggleExpand(row.symbol)"
+              :aria-expanded="expandedSymbols.has(row.symbol)"
+              tabindex="0"
+              @keyup.enter="toggleExpand(row.symbol)"
+            >
+              <td class="symbol-cell">
+                <span class="expand-icon">{{ expandedSymbols.has(row.symbol) ? '▼' : '▶' }}</span>
+                <span class="symbol-code">{{ row.symbol }}</span>
+              </td>
+              <td class="name-cell">{{ row.name }}</td>
+              <td class="price-cell">¥{{ row.ref_buy_price.toFixed(2) }}</td>
+              <td class="score-cell">
+                <div class="score-bar-wrap">
+                  <div
+                    class="score-bar"
+                    :style="{ width: row.trend_score + '%', background: scoreColor(row.trend_score) }"
+                    :aria-valuenow="row.trend_score"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    role="progressbar"
+                  ></div>
+                  <span class="score-value">{{ row.trend_score }}</span>
+                </div>
+              </td>
+              <td class="risk-cell">
+                <span class="risk-badge" :class="'risk-' + row.risk_level.toLowerCase()">
+                  {{ riskLabel(row.risk_level) }}
+                </span>
+              </td>
+              <td class="signals-cell">
+                <span class="signal-count">{{ row.signals.length }} 个信号</span>
+              </td>
+              <td class="time-cell">{{ formatTime(row.screen_time) }}</td>
+            </tr>
+            <!-- 展开详情行 -->
+            <tr v-if="expandedSymbols.has(row.symbol)" class="detail-row">
+              <td colspan="7">
+                <div class="detail-panel">
+                  <div class="detail-header">触发信号详情</div>
+                  <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
+                  <ul v-else class="signal-list">
+                    <li v-for="(sig, idx) in row.signals" :key="idx" class="signal-item">
+                      <span class="signal-dot"></span>
+                      {{ sig }}
+                    </li>
+                  </ul>
+                </div>
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</template>
+
+<script setup lang="ts">
+import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
+import { apiClient } from '@/api'
+import { usePageState } from '@/composables/usePageState'
+import LoadingSpinner from '@/components/LoadingSpinner.vue'
+import ErrorBanner from '@/components/ErrorBanner.vue'
+
+// ─── 类型定义 ─────────────────────────────────────────────────────────────────
+
+interface ScreenResultRow {
+  symbol: string
+  name: string
+  ref_buy_price: number
+  trend_score: number
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+  signals: string[]
+  screen_time: string
+}
+
+type SortKey = 'trend_score' | 'risk_level'
+type SortDir = 'asc' | 'desc'
+
+// ─── 常量 ─────────────────────────────────────────────────────────────────────
+
+const RISK_ORDER: Record<string, number> = { LOW: 0, MEDIUM: 1, HIGH: 2 }
+
+const sortOptions: { key: SortKey; label: string }[] = [
+  { key: 'trend_score', label: '趋势评分' },
+  { key: 'risk_level', label: '风险等级' },
+]
+
+// ─── 状态 ─────────────────────────────────────────────────────────────────────
+
+const router = useRouter()
+const { state, execute } = usePageState<ScreenResultRow[]>()
+
+const results = computed<ScreenResultRow[]>(() => state.data ?? [])
+const expandedSymbols = ref<Set<string>>(new Set())
+const sortKey = ref<SortKey>('trend_score')
+const sortDir = ref<SortDir>('desc')
+const exporting = ref(false)
+
+// ─── 排序后结果 ───────────────────────────────────────────────────────────────
+
+const sortedResults = computed(() => {
+  const arr = [...results.value]
+  arr.sort((a, b) => {
+    let cmp = 0
+    if (sortKey.value === 'trend_score') {
+      cmp = a.trend_score - b.trend_score
+    } else {
+      cmp = (RISK_ORDER[a.risk_level] ?? 0) - (RISK_ORDER[b.risk_level] ?? 0)
+    }
+    return sortDir.value === 'asc' ? cmp : -cmp
+  })
+  return arr
+})
+
+// ─── 辅助函数 ─────────────────────────────────────────────────────────────────
+
+function riskLabel(level: string): string {
+  return { LOW: '低风险', MEDIUM: '中风险', HIGH: '高风险' }[level] ?? level
+}
+
+function scoreColor(score: number): string {
+  if (score >= 70) return '#3fb950'
+  if (score >= 40) return '#d29922'
+  return '#f85149'
+}
+
+function formatTime(iso: string): string {
+  if (!iso) return '—'
+  return iso.replace('T', ' ').slice(0, 16)
+}
+
+// ─── 交互 ─────────────────────────────────────────────────────────────────────
+
+function toggleExpand(symbol: string) {
+  if (expandedSymbols.value.has(symbol)) {
+    expandedSymbols.value.delete(symbol)
+  } else {
+    expandedSymbols.value.add(symbol)
+  }
+}
+
+function toggleSort(key: SortKey) {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
+  } else {
+    sortKey.value = key
+    sortDir.value = key === 'trend_score' ? 'desc' : 'asc'
+  }
+}
+
+// ─── 数据加载 ─────────────────────────────────────────────────────────────────
+
+async function loadResults() {
+  await execute(async () => {
+    const res = await apiClient.get<{ items?: ScreenResultRow[] } | ScreenResultRow[]>(
+      '/screen/results',
+    )
+    const data = res.data
+    return Array.isArray(data) ? data : (data.items ?? [])
+  })
+}
+
+// ─── 导出 Excel ───────────────────────────────────────────────────────────────
+
+async function exportExcel() {
+  exporting.value = true
+  try {
+    const res = await apiClient.get('/screen/export', { responseType: 'blob' })
+    const blob = new Blob([res.data as BlobPart], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `screener_results_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    // 如果后端返回 JSON（stub），尝试作为 JSON 处理并提示
+    alert('导出功能暂不可用，请稍后再试')
+  } finally {
+    exporting.value = false
+  }
+}
+
+// ─── 初始化 ───────────────────────────────────────────────────────────────────
+
+onMounted(() => {
+  loadResults()
+})
+</script>
+
+<style scoped>
+/* ─── 布局 ─────────────────────────────────────────────────────────────────── */
+.screener-results { max-width: 1200px; }
+
+.page-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 20px; flex-wrap: wrap; gap: 10px;
+}
+.page-title { font-size: 20px; color: #e6edf3; margin: 0; }
+.header-actions { display: flex; gap: 8px; }
+
+/* ─── 空状态 ────────────────────────────────────────────────────────────────── */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 60px 20px; background: #161b22; border: 1px solid #30363d;
+  border-radius: 8px; gap: 10px;
+}
+.empty-icon { font-size: 48px; }
+.empty-text { font-size: 16px; color: #e6edf3; margin: 0; }
+.empty-hint { font-size: 14px; color: #8b949e; margin: 0; }
+
+/* ─── 排序栏 ────────────────────────────────────────────────────────────────── */
+.sort-bar {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 10px 16px; background: #161b22; border: 1px solid #30363d;
+  border-bottom: none; border-radius: 8px 8px 0 0;
+}
+.sort-label { font-size: 13px; color: #8b949e; }
+.sort-btn {
+  background: transparent; border: 1px solid #30363d; color: #8b949e;
+  padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sort-btn:hover { color: #e6edf3; border-color: #8b949e; }
+.sort-btn.active { background: #1f6feb22; color: #58a6ff; border-color: #58a6ff; }
+.sort-arrow { margin-left: 4px; }
+.result-count { margin-left: auto; font-size: 13px; color: #484f58; }
+
+/* ─── 表格容器 ──────────────────────────────────────────────────────────────── */
+.table-wrapper { overflow-x: auto; }
+
+.result-table {
+  width: 100%; border-collapse: collapse;
+  background: #161b22; border: 1px solid #30363d;
+  border-radius: 0 0 8px 8px; overflow: hidden;
+  font-size: 14px;
+}
+
+.result-table thead tr {
+  background: #1c2128; border-bottom: 1px solid #30363d;
+}
+.result-table th {
+  padding: 10px 14px; text-align: left; color: #8b949e;
+  font-weight: 600; font-size: 13px; white-space: nowrap;
+}
+.th-sort-btn {
+  background: none; border: none; color: #8b949e; cursor: pointer;
+  font-size: 13px; font-weight: 600; padding: 0;
+  display: flex; align-items: center; gap: 4px;
+}
+.th-sort-btn:hover { color: #e6edf3; }
+
+/* ─── 主行 ─────────────────────────────────────────────────────────────────── */
+.result-row {
+  border-bottom: 1px solid #21262d; cursor: pointer;
+  transition: background 0.12s;
+}
+.result-row:hover { background: #1c2128; }
+.result-row.expanded { background: #1c2128; }
+.result-row:focus { outline: 2px solid #58a6ff44; outline-offset: -2px; }
+
+.result-table td { padding: 10px 14px; color: #e6edf3; vertical-align: middle; }
+
+.symbol-cell { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.expand-icon { font-size: 10px; color: #484f58; flex-shrink: 0; }
+.symbol-code { font-family: monospace; font-weight: 600; color: #58a6ff; }
+
+.name-cell { color: #e6edf3; }
+.price-cell { font-family: monospace; color: #3fb950; font-weight: 600; }
+
+/* ─── 趋势评分进度条 ────────────────────────────────────────────────────────── */
+.score-cell { min-width: 120px; }
+.score-bar-wrap {
+  display: flex; align-items: center; gap: 8px;
+}
+.score-bar {
+  height: 8px; border-radius: 4px; flex: 1; max-width: 80px;
+  transition: width 0.3s;
+}
+.score-value { font-size: 13px; color: #e6edf3; font-weight: 600; min-width: 24px; }
+
+/* ─── 风险等级徽章 ──────────────────────────────────────────────────────────── */
+.risk-badge {
+  display: inline-block; padding: 2px 10px; border-radius: 10px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.risk-low { background: #1a3a2a; color: #3fb950; border: 1px solid #3fb95044; }
+.risk-medium { background: #3a2a1a; color: #d29922; border: 1px solid #d2992244; }
+.risk-high { background: #3a1a1a; color: #f85149; border: 1px solid #f8514944; }
+
+.signals-cell { color: #8b949e; }
+.signal-count { font-size: 13px; }
+.time-cell { font-size: 12px; color: #484f58; white-space: nowrap; }
+
+/* ─── 展开详情行 ────────────────────────────────────────────────────────────── */
+.detail-row { background: #0d1117; }
+.detail-row td { padding: 0; }
+
+.detail-panel {
+  padding: 14px 20px 14px 40px;
+  border-top: 1px solid #21262d;
+}
+.detail-header {
+  font-size: 13px; font-weight: 600; color: #8b949e;
+  margin-bottom: 10px;
+}
+.detail-empty { font-size: 13px; color: #484f58; }
+
+.signal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.signal-item {
+  display: flex; align-items: center; gap: 6px;
+  background: #161b22; border: 1px solid #30363d;
+  padding: 4px 12px; border-radius: 4px; font-size: 13px; color: #e6edf3;
+}
+.signal-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: #58a6ff; flex-shrink: 0;
+}
+
+/* ─── 按钮 ─────────────────────────────────────────────────────────────────── */
+.btn {
+  background: #238636; color: #fff; border: none; padding: 7px 16px;
+  border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover:not(:disabled) { background: #2ea043; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-outline {
+  background: transparent; border: 1px solid #30363d; color: #8b949e;
+}
+.btn-outline:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.btn-export { background: #1f6feb; }
+.btn-export:hover:not(:disabled) { background: #388bfd; }
+
+/* ─── 旋转加载 ──────────────────────────────────────────────────────────────── */
+.spinner {
+  display: inline-block; width: 13px; height: 13px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>

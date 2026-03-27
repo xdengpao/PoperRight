@@ -1,6 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { apiClient } from '@/api'
+import { wsClient, type WsMessage } from '@/services/wsClient'
+import { useAlertStore, type AlertMessage, type AlertToast } from '@/stores/alert'
+import { usePositionsStore, type Position } from '@/stores/positions'
 
 export type UserRole = 'TRADER' | 'ADMIN' | 'READONLY'
 
@@ -54,12 +57,52 @@ export const useAuthStore = defineStore('auth', () => {
     token.value = res.data.access_token
     user.value = res.data.user
     localStorage.setItem('access_token', res.data.access_token)
+
+    // 登录成功后建立 WebSocket 连接
+    _setupWsHandlers()
+    wsClient.connect(res.data.user.id, res.data.access_token)
   }
 
   function logout() {
+    wsClient.disconnect()
     token.value = null
     user.value = null
     localStorage.removeItem('access_token')
+  }
+
+  /** 注册 WebSocket 消息处理器 */
+  function _setupWsHandlers() {
+    wsClient.onMessage(_handleWsMessage)
+  }
+
+  function _handleWsMessage(msg: WsMessage) {
+    if (msg.type === 'alert') {
+      const alertStore = useAlertStore()
+      const d = msg.data as Record<string, unknown>
+      const alert: AlertMessage = {
+        id: (d.id as string) ?? crypto.randomUUID(),
+        type: d.type as AlertMessage['type'],
+        symbol: (d.symbol as string) ?? '',
+        message: (d.message as string) ?? '',
+        level: (d.level as AlertMessage['level']) ?? 'INFO',
+        created_at: (d.created_at as string) ?? new Date().toISOString(),
+        read: false,
+        link_to: d.link_to as string | undefined,
+      }
+      alertStore.addAlert(alert)
+      alertStore.pushToast({
+        id: alert.id,
+        type: alert.type ?? 'SYSTEM',
+        symbol: alert.symbol,
+        message: alert.message,
+        level: alert.level,
+        created_at: alert.created_at,
+        link_to: alert.link_to ?? '',
+      } as AlertToast)
+    } else if (msg.type === 'position_update') {
+      const positionsStore = usePositionsStore()
+      positionsStore.updatePosition(msg.data as unknown as Position)
+    }
   }
 
   async function fetchCurrentUser() {
