@@ -2,19 +2,15 @@
 FROM python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
 
 WORKDIR /app
 
-# 安装系统依赖
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc libpq-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-# 安装 Python 依赖
+# 安装 Python 依赖（asyncpg 为纯 Python，无需 gcc/libpq-dev）
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir . && \
-    pip install --no-cache-dir gunicorn
+RUN pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple . && \
+    pip install --no-cache-dir -i https://pypi.tuna.tsinghua.edu.cn/simple gunicorn
 
 # 复制应用代码
 COPY app/ ./app/

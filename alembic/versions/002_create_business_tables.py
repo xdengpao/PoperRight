@@ -84,10 +84,7 @@ def upgrade() -> None:
             config      JSONB NOT NULL,
             is_active   BOOLEAN DEFAULT FALSE,
             created_at  TIMESTAMPTZ DEFAULT NOW(),
-            updated_at  TIMESTAMPTZ DEFAULT NOW(),
-            CONSTRAINT max_strategies CHECK (
-                (SELECT COUNT(*) FROM strategy_template st WHERE st.user_id = strategy_template.user_id) <= 20
-            )
+            updated_at  TIMESTAMPTZ DEFAULT NOW()
         )
     """)
 

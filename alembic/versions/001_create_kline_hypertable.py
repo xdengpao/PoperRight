@@ -38,8 +38,15 @@ def upgrade() -> None:
         )
     """)
 
-    # 2. 将 kline 转换为 TimescaleDB 超表，按 time 列分区
-    op.execute("SELECT create_hypertable('kline', 'time', if_not_exists => TRUE)")
+    # 2. 将 kline 转换为 TimescaleDB 超表（仅在 TimescaleDB 上执行）
+    op.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+                PERFORM create_hypertable('kline', 'time', if_not_exists => TRUE);
+            END IF;
+        END $$;
+    """)
 
     # 3. 创建复合索引，支持按股票代码、频率、时间范围快速查询
     op.execute("CREATE INDEX IF NOT EXISTS ix_kline_symbol_freq_time ON kline (symbol, freq, time DESC)")

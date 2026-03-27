@@ -3,6 +3,8 @@ import axios, {
   type InternalAxiosRequestConfig,
   type AxiosResponse,
 } from 'axios'
+import router from '@/router'
+import { useAuthStore } from '@/stores/auth'
 
 // ─── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -33,7 +35,7 @@ apiClient.interceptors.request.use(
   (error: unknown) => Promise.reject(error),
 )
 
-// ─── 响应拦截器：统一错误处理 ─────────────────────────────────────────────────
+// ─── 响应拦截器：统一错误处理（需求 21.3） ────────────────────────────────────
 
 apiClient.interceptors.response.use(
   (response: AxiosResponse) => response,
@@ -48,11 +50,16 @@ apiClient.interceptors.response.use(
     switch (status) {
       case 400:
         return Promise.reject(new Error(data?.detail ?? '请求参数错误'))
-      case 401:
-        // Token 过期，清除本地凭证并跳转登录
-        localStorage.removeItem('access_token')
-        window.location.href = '/login'
+      case 401: {
+        // Token 过期或无效，清除 auth 状态并跳转登录页（需求 21.3）
+        const authStore = useAuthStore()
+        authStore.logout()
+        const currentPath = router.currentRoute.value.fullPath
+        if (currentPath !== '/login') {
+          router.push({ name: 'Login', query: { redirect: currentPath } })
+        }
         return Promise.reject(new Error('登录已过期，请重新登录'))
+      }
       case 403:
         return Promise.reject(new Error('权限不足，无法执行此操作'))
       case 404:

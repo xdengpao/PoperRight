@@ -496,6 +496,526 @@ class OrderRequest:
 
 ---
 
+## 前端交互界面设计（需求 21）
+
+### 概述
+
+WebUI 是系统面向用户的唯一交互入口，基于 Vue 3 + TypeScript + Pinia 构建的单页应用（SPA）。前端通过 RESTful API 与后端通信，通过 WebSocket 接收实时预警推送。所有页面均需登录认证后方可访问，菜单和操作按钮根据用户角色（TRADER / ADMIN / READONLY）动态渲染。
+
+### 前端架构
+
+```mermaid
+graph TD
+    subgraph 前端应用
+        Router[Vue Router 路由守卫]
+        Auth[认证模块 Login/Register]
+        Layout[MainLayout 主布局]
+        Views[功能页面组件]
+        Stores[Pinia 状态管理]
+        API[Axios API 层]
+        WS[WebSocket 客户端]
+        Notify[预警通知组件]
+    end
+
+    subgraph 后端服务
+        REST[FastAPI REST API]
+        WSServer[WebSocket Server]
+    end
+
+    Auth --> Router
+    Router --> Layout
+    Layout --> Views
+    Views --> Stores
+    Stores --> API
+    API --> REST
+    WS --> WSServer
+    WS --> Notify
+    WS --> Stores
+    Notify --> Layout
+```
+
+### 路由结构与页面映射
+
+| 路由路径 | 页面组件 | 对应需求 | 角色限制 |
+|---|---|---|---|
+| `/login` | LoginView | 21.1 | 无需认证 |
+| `/register` | RegisterView | 21.2 | 无需认证 |
+| `/` | MainLayout → DashboardView | 21.4 | 全部角色 |
+| `/data` | DataManageView | 21.5 | 全部角色 |
+| `/screener` | ScreenerView | 21.6 | 全部角色 |
+| `/screener/results` | ScreenerResultsView | 21.7 | 全部角色 |
+| `/risk` | RiskView | 21.8 | 全部角色 |
+| `/backtest` | BacktestView | 21.9 | 全部角色 |
+| `/trade` | TradeView | 21.10 | TRADER, ADMIN |
+| `/positions` | PositionsView | 21.11 | TRADER, ADMIN |
+| `/review` | ReviewView | 21.12 | 全部角色 |
+| `/admin` | AdminView | 21.13 | ADMIN |
+
+### 前端组件与接口
+
+#### 1. 认证模块（LoginView / RegisterView）
+
+负责用户登录、注册、Token 管理。
+
+```typescript
+// 登录接口
+interface LoginRequest {
+  username: string
+  password: string
+}
+interface LoginResponse {
+  access_token: string
+  user: { id: string; username: string; role: UserRole }
+}
+
+// 注册接口
+interface RegisterRequest {
+  username: string
+  password: string
+}
+interface RegisterResponse {
+  id: string
+  username: string
+  role: UserRole
+}
+
+// 密码强度校验规则
+interface PasswordValidation {
+  minLength: 8           // 最少 8 位
+  hasUppercase: boolean   // 包含大写字母
+  hasLowercase: boolean   // 包含小写字母
+  hasDigit: boolean       // 包含数字
+}
+```
+
+LoginView 行为：
+- 提交用户名密码调用 `POST /api/v1/auth/login`
+- 成功后将 `access_token` 存入 localStorage，跳转至主页面
+- 失败时在表单下方显示错误提示（如"用户名或密码错误"）
+
+RegisterView 行为：
+- 用户名输入时实时调用 `GET /api/v1/auth/check-username?username=xxx` 校验唯一性
+- 密码输入时实时校验强度并显示校验结果（✓/✗ 标记）
+- 提交调用 `POST /api/v1/auth/register`，成功后跳转至登录页
+
+#### 2. 主布局框架（MainLayout）
+
+统一的页面骨架，包含顶部导航栏、侧边菜单栏、主内容区域。
+
+```typescript
+// 导航菜单项定义
+interface NavItem {
+  path: string
+  label: string
+  icon: string
+  roles?: UserRole[]  // 为空表示所有角色可见
+  group: '数据' | '选股' | '风控' | '交易' | '分析' | '系统'
+}
+
+// 菜单分组
+const menuGroups: Record<string, NavItem[]> = {
+  '数据': [
+    { path: '/dashboard', label: '大盘概况', icon: '📊', group: '数据' },
+    { path: '/data', label: '数据管理', icon: '💾', group: '数据' },
+  ],
+  '选股': [
+    { path: '/screener', label: '智能选股', icon: '🔍', group: '选股' },
+    { path: '/screener/results', label: '选股结果', icon: '📋', group: '选股' },
+  ],
+  '风控': [
+    { path: '/risk', label: '风险控制', icon: '🛡️', group: '风控' },
+  ],
+  '交易': [
+    { path: '/trade', label: '交易执行', icon: '💹', roles: ['TRADER', 'ADMIN'], group: '交易' },
+    { path: '/positions', label: '持仓管理', icon: '💰', roles: ['TRADER', 'ADMIN'], group: '交易' },
+  ],
+  '分析': [
+    { path: '/backtest', label: '策略回测', icon: '📈', group: '分析' },
+    { path: '/review', label: '复盘分析', icon: '📝', group: '分析' },
+  ],
+  '系统': [
+    { path: '/admin', label: '系统管理', icon: '⚙️', roles: ['ADMIN'], group: '系统' },
+  ],
+}
+```
+
+MainLayout 行为：
+- 侧边菜单按 `group` 分组渲染，组内菜单项根据当前用户角色过滤（`roles` 字段）
+- 顶部导航栏右侧显示预警通知铃铛（含未读数 badge）和用户信息/退出按钮
+- 预警通知铃铛点击展开通知面板，显示最近预警列表
+- 主内容区域通过 `<router-view />` 渲染子路由页面
+
+#### 3. 数据管理页面（DataManageView）
+
+```typescript
+// 数据同步状态
+interface SyncStatus {
+  source: string          // 数据源名称
+  last_sync_at: string    // 最后同步时间
+  status: 'OK' | 'ERROR' | 'SYNCING'
+  record_count: number    // 已同步记录数
+}
+
+// 剔除名单项
+interface ExclusionItem {
+  symbol: string
+  name: string
+  reason: string          // 'ST' | 'DELISTED' | 'NEW_STOCK' | ...
+  created_at: string
+}
+```
+
+页面功能：
+- 展示各数据源同步状态表格（行情、基本面、资金流向）
+- 手动触发数据同步按钮（调用 `POST /api/v1/data/sync`）
+- 查看数据清洗结果统计和永久剔除名单列表
+
+#### 4. 选股策略页面（ScreenerView）
+
+已有基础实现，需补充：
+- 策略模板的导入（上传 JSON 文件）和导出（下载 JSON 文件）功能
+- 策略删除确认对话框
+- 因子条件组合的可视化编辑器（支持 AND/OR 逻辑切换）
+- 一键执行选股后自动跳转至选股结果页面
+
+#### 5. 选股结果页面（ScreenerResultsView）
+
+```typescript
+// 选股结果表格列定义
+interface ScreenResultRow {
+  symbol: string           // 股票代码
+  name: string             // 股票名称
+  ref_buy_price: number    // 买入参考价
+  trend_score: number      // 趋势强度评分 0-100
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+  signals: string[]        // 触发信号列表
+  screen_time: string      // 选股时间
+}
+```
+
+页面功能：
+- 表格展示选股结果，支持按趋势评分、风险等级排序
+- 导出为 Excel 文件按钮（调用 `GET /api/v1/screen/results/export`）
+- 点击行可展开信号详情
+
+#### 6. 风险控制页面（RiskView）
+
+```typescript
+// 风控状态概览
+interface RiskOverview {
+  market_risk_level: 'NORMAL' | 'ELEVATED' | 'SUSPENDED'
+  sh_above_ma20: boolean
+  sh_above_ma60: boolean
+  cyb_above_ma20: boolean
+  cyb_above_ma60: boolean
+  current_threshold: number  // 当前趋势打分阈值
+}
+
+// 止损止盈配置
+interface StopConfig {
+  fixed_stop_loss: number    // 固定止损比例
+  trailing_stop: number      // 移动止损回撤比例
+  trend_stop_ma: number      // 趋势止损均线周期
+}
+```
+
+页面功能：
+- 大盘风控状态卡片（显示指数与均线关系、当前阈值）
+- 止损止盈参数配置表单
+- 黑名单/白名单管理（增删查）
+- 仓位风控预警信息列表
+
+#### 7. 回测分析页面（BacktestView）
+
+```typescript
+// 回测参数配置
+interface BacktestParams {
+  strategy_id: string
+  start_date: string
+  end_date: string
+  initial_capital: number
+  commission_buy: number     // 默认 0.03%
+  commission_sell: number    // 默认 0.13%
+  slippage: number           // 默认 0.1%
+}
+
+// 回测绩效指标
+interface BacktestMetrics {
+  annual_return: number
+  total_return: number
+  win_rate: number
+  profit_loss_ratio: number
+  max_drawdown: number
+  sharpe_ratio: number
+  calmar_ratio: number
+  total_trades: number
+  avg_holding_days: number
+}
+```
+
+页面功能：
+- 回测参数配置表单（起止日期选择器、资金/费率输入）
+- 执行回测按钮，运行中显示进度状态
+- ECharts 图表展示收益曲线和最大回撤曲线
+- 9 项绩效指标卡片展示
+- 交易流水明细表格
+
+#### 8. 交易执行页面（TradeView）
+
+```typescript
+// 委托请求
+interface OrderFormData {
+  symbol: string
+  direction: 'BUY' | 'SELL'
+  order_type: 'LIMIT' | 'MARKET'
+  price: number | null
+  quantity: number
+  stop_loss: number | null
+  take_profit: number | null
+}
+
+// 条件单配置
+interface ConditionOrderForm {
+  type: 'BREAKOUT_BUY' | 'STOP_LOSS' | 'TAKE_PROFIT' | 'TRAILING_STOP'
+  symbol: string
+  trigger_price: number
+  order_quantity: number
+}
+```
+
+页面功能：
+- 选股池标的列表，点击可快速填充下单表单（自动带入参考买入价、止损价、止盈价）
+- 限价委托/市价委托下单表单
+- 条件单配置面板
+- 实盘/模拟盘模式切换开关
+- 委托记录和成交记录查询表格
+
+#### 9. 持仓管理页面（PositionsView）
+
+```typescript
+// 持仓展示行
+interface PositionRow {
+  symbol: string
+  name: string
+  quantity: number
+  cost_price: number
+  current_price: number
+  market_value: number
+  pnl: number
+  pnl_pct: number
+  weight: number           // 仓位占比 %
+  trend_status: 'HOLD' | 'WARNING'  // 趋势状态
+}
+```
+
+页面功能：
+- 实时持仓表格（通过 WebSocket 更新当前价格和盈亏）
+- 持仓破位预警信息高亮显示
+- 仓位占比饼图（ECharts）
+
+#### 10. 复盘分析页面（ReviewView）
+
+页面功能：
+- 日度/周度/月度报告切换标签
+- 策略收益柱状图、折线图（ECharts）
+- 风险指标饼图
+- 多策略对比分析（选择多个策略并排展示）
+- 报表导出按钮
+
+#### 11. 系统管理页面（AdminView）
+
+```typescript
+// 用户管理
+interface UserManageRow {
+  id: string
+  username: string
+  role: UserRole
+  is_active: boolean
+  created_at: string
+}
+
+// 系统运行状态
+interface SystemHealth {
+  modules: { name: string; status: 'OK' | 'ERROR'; last_check: string }[]
+  data_sources: { name: string; connected: boolean }[]
+}
+```
+
+页面功能：
+- 用户账号管理表格（新增、删除、角色分配）
+- 操作日志查询（按时间范围、操作类型筛选）
+- 系统运行状态监控面板
+- 数据备份与恢复操作按钮
+
+#### 12. 预警通知组件（AlertNotification）
+
+```typescript
+// 预警通知卡片
+interface AlertNotification {
+  id: string
+  type: 'SCREEN' | 'RISK' | 'TRADE' | 'SYSTEM'
+  symbol: string
+  message: string
+  level: 'INFO' | 'WARNING' | 'DANGER'
+  created_at: string
+  link_to: string          // 点击跳转的路由路径
+}
+```
+
+组件行为：
+- WebSocket 收到预警消息后，在页面右上角弹出通知卡片
+- 卡片显示预警类型图标、股票代码、触发原因
+- 卡片自动 5 秒后消失，支持手动关闭
+- 点击卡片跳转至对应详情页面（如风控预警跳转至 `/risk`）
+- 通知铃铛显示未读预警数量 badge
+
+#### 13. WebSocket 客户端管理
+
+```typescript
+// WebSocket 连接管理
+class WsClient {
+  connect(userId: string, token: string): void
+  disconnect(): void
+  onMessage(handler: (msg: WsMessage) => void): void
+  reconnect(): void  // 断线自动重连（指数退避）
+}
+
+interface WsMessage {
+  type: 'alert' | 'market_overview' | 'position_update' | 'connected'
+  data: Record<string, unknown>
+}
+```
+
+连接策略：
+- 用户登录成功后自动建立 WebSocket 连接
+- 连接断开后自动重连（指数退避：1s → 2s → 4s → 8s → 最大 30s）
+- 用户退出登录时主动断开连接
+- 收到 `alert` 类型消息时触发 AlertStore 和通知弹窗
+- 收到 `position_update` 时更新持仓 Store
+
+#### 14. 加载状态与错误处理
+
+全局约定：
+- 所有数据加载过程中显示 Loading Spinner 组件
+- API 请求失败时显示错误提示条（Error Banner），包含错误信息和"重试"按钮
+- 401 响应自动跳转登录页（已在 Axios 拦截器中实现）
+- 网络断开时显示全局离线提示条
+
+```typescript
+// 通用页面加载状态
+interface PageState<T> {
+  loading: boolean
+  error: string | null
+  data: T | null
+}
+
+// 错误提示组件 props
+interface ErrorBannerProps {
+  message: string
+  retryFn: (() => void) | null
+}
+```
+
+### 前端数据模型（TypeScript 类型）
+
+```typescript
+// 用户角色
+type UserRole = 'TRADER' | 'ADMIN' | 'READONLY'
+
+// 认证用户
+interface AuthUser {
+  id: string
+  username: string
+  role: UserRole
+}
+
+// 选股结果项
+interface ScreenItem {
+  symbol: string
+  name: string
+  ref_buy_price: number
+  trend_score: number
+  risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
+  signals: Record<string, unknown>
+  screen_time: string
+}
+
+// 持仓项
+interface Position {
+  symbol: string
+  name: string
+  quantity: number
+  cost_price: number
+  current_price: number
+  market_value: number
+  pnl: number
+  pnl_pct: number
+  weight: number
+}
+
+// 委托记录
+interface TradeOrder {
+  id: string
+  symbol: string
+  direction: 'BUY' | 'SELL'
+  order_type: 'LIMIT' | 'MARKET' | 'CONDITION'
+  price: number | null
+  quantity: number
+  status: 'PENDING' | 'FILLED' | 'CANCELLED' | 'REJECTED'
+  mode: 'LIVE' | 'PAPER'
+  submitted_at: string
+  filled_at: string | null
+  filled_price: number | null
+}
+
+// 预警消息
+interface AlertMessage {
+  id: string
+  type: 'SCREEN' | 'RISK' | 'TRADE' | 'SYSTEM'
+  symbol: string
+  message: string
+  level: 'INFO' | 'WARNING' | 'DANGER'
+  created_at: string
+  read: boolean
+  link_to: string
+}
+
+// 回测结果
+interface BacktestResult {
+  annual_return: number
+  total_return: number
+  win_rate: number
+  profit_loss_ratio: number
+  max_drawdown: number
+  sharpe_ratio: number
+  calmar_ratio: number
+  total_trades: number
+  avg_holding_days: number
+  equity_curve: [string, number][]
+  trade_records: TradeOrder[]
+}
+
+// 策略模板
+interface StrategyTemplate {
+  id: string
+  name: string
+  config: Record<string, unknown>
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+```
+
+### 响应式布局策略
+
+- 最小支持分辨率：1280px 宽度
+- 侧边菜单固定宽度 200px，主内容区域自适应剩余宽度
+- 数据表格在内容溢出时启用水平滚动
+- 卡片网格使用 CSS Grid `repeat(auto-fill, minmax(280px, 1fr))` 自适应列数
+- 图表组件监听容器 resize 事件自动调整尺寸
+
+---
+
 ## 正确性属性
 
 *属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
@@ -748,6 +1268,62 @@ class OrderRequest:
 
 ---
 
+### 属性 32：登录响应正确性
+
+*对任意*用户名和密码组合，当凭证有效时，登录接口应返回有效的 access_token 和包含 id、username、role 的用户对象；当凭证无效时，登录接口应返回错误状态码且不返回 token。
+
+**验证需求：21.1**
+
+---
+
+### 属性 33：注册校验正确性
+
+*对任意*注册请求，当用户名已被占用时，注册应被拒绝并返回用户名重复错误；当密码不满足强度要求（长度 < 8 位、缺少大写字母、缺少小写字母、缺少数字中的任一条件）时，注册应被拒绝并返回密码强度不足错误；仅当用户名唯一且密码满足全部强度要求时，注册才应成功。
+
+**验证需求：21.2**
+
+---
+
+### 属性 34：路由守卫认证拦截
+
+*对任意*需要认证的路由路径，当用户未持有有效 token 或 token 已过期时，路由守卫应将用户重定向至登录页面，不渲染目标页面内容。
+
+**验证需求：21.3**
+
+---
+
+### 属性 35：前端数据渲染字段完整性
+
+*对任意*选股结果项，渲染后应包含股票代码、名称、买入参考价、趋势强度评分、风险等级、触发信号全部字段且均不为空；*对任意*持仓项，渲染后应包含持仓股数、成本价、当前市值、盈亏金额、盈亏比例、仓位占比全部字段且均不为空。
+
+**验证需求：21.7, 21.11**
+
+---
+
+### 属性 36：角色菜单动态渲染正确性
+
+*对任意*用户角色，侧边菜单渲染结果应仅包含该角色有权访问的菜单项：READONLY 角色的菜单中不应包含交易执行和持仓管理入口；TRADER 角色的菜单中不应包含系统管理入口；ADMIN 角色应能看到全部菜单项。
+
+**验证需求：21.14**
+
+---
+
+### 属性 37：预警通知渲染完整性
+
+*对任意*通过 WebSocket 接收的预警消息，通知卡片应包含预警类型、股票代码、触发原因三个字段且均不为空，且卡片应携带正确的跳转链接路径。
+
+**验证需求：21.16**
+
+---
+
+### 属性 38：API 错误状态管理正确性
+
+*对任意*失败的 API 请求，页面状态应从 loading 转为 error，error 状态应包含非空的错误提示信息，且应提供可调用的重试函数；重试函数调用后页面状态应重新进入 loading。
+
+**验证需求：21.17**
+
+---
+
 ## 错误处理
 
 ### 数据层错误
@@ -791,6 +1367,21 @@ class OrderRequest:
 | 参数优化超时 | 返回已完成的参数组合结果，标注"优化未完成" |
 | 遗传算法不收敛 | 设置最大迭代次数（默认 1000 次），超出后返回当前最优结果 |
 
+### 前端层错误
+
+| 错误场景 | 处理策略 |
+|---|---|
+| 登录失败（401） | 表单下方显示"用户名或密码错误"提示，清空密码输入框 |
+| 注册用户名重复（409/422） | 用户名输入框下方实时显示"用户名已被占用"红色提示 |
+| 密码强度不足 | 密码输入框下方实时显示未满足的强度条件（✗ 标记） |
+| Token 过期（401） | Axios 拦截器自动清除 localStorage token，跳转至登录页 |
+| 权限不足（403） | 显示"权限不足"提示，不执行操作 |
+| API 请求超时/网络断开 | 显示"网络连接失败"错误条，提供重试按钮 |
+| WebSocket 连接断开 | 自动重连（指数退避 1s→2s→4s→8s→30s），重连期间显示"连接中"状态 |
+| WebSocket 认证失败 | 关闭连接，跳转至登录页重新获取 token |
+| 数据加载失败 | 显示 Error Banner 组件，包含错误信息和重试按钮 |
+| Excel 导出失败 | 显示"导出失败"提示，建议用户稍后重试 |
+
 ---
 
 ## 测试策略
@@ -808,7 +1399,8 @@ class OrderRequest:
 | 测试类型 | 工具 |
 |---|---|
 | 单元测试 | pytest |
-| 属性测试 | Hypothesis（Python PBT 库） |
+| 属性测试（后端） | Hypothesis（Python PBT 库） |
+| 属性测试（前端） | fast-check（TypeScript PBT 库） |
 | API 集成测试 | pytest + httpx |
 | 前端测试 | Vitest + Vue Test Utils |
 | 性能测试 | Locust |
@@ -856,6 +1448,39 @@ def test_data_cleaning_invariant(stocks):
 - 属性测试：属性 29（角色权限）、属性 30（操作日志）、属性 31（备份恢复）
 - 单元测试：系统异常报警示例、用户权限分配示例
 
+**WebUI（前端交互界面）**
+- 属性测试（Vitest + fast-check）：属性 32（登录响应）、属性 33（注册校验）、属性 34（路由守卫）、属性 35（数据渲染完整性）、属性 36（角色菜单渲染）、属性 37（预警通知渲染）、属性 38（错误状态管理）
+- 单元测试（Vitest + Vue Test Utils）：LoginView 登录成功/失败交互示例、RegisterView 表单校验示例、MainLayout 菜单分组渲染示例、AlertNotification 弹窗显示/关闭/跳转示例、WebSocket 断线重连示例、各功能页面基础渲染示例
+
+前端属性测试使用 fast-check 库（TypeScript PBT 库），每个属性测试最少运行 100 次迭代。每个属性测试必须通过注释标注对应的设计文档属性编号：
+
+```typescript
+// Feature: a-share-quant-trading-system, Property 36: 角色菜单动态渲染正确性
+import fc from 'fast-check'
+
+test('角色菜单动态渲染正确性', () => {
+  fc.assert(
+    fc.property(
+      fc.constantFrom('TRADER', 'ADMIN', 'READONLY'),
+      (role) => {
+        const visibleItems = filterMenuByRole(menuGroups, role)
+        if (role === 'READONLY') {
+          expect(visibleItems.every(i => !i.roles?.length || i.roles.includes('READONLY'))).toBe(true)
+          expect(visibleItems.some(i => i.path === '/trade')).toBe(false)
+        }
+        if (role === 'TRADER') {
+          expect(visibleItems.some(i => i.path === '/admin')).toBe(false)
+        }
+        if (role === 'ADMIN') {
+          expect(visibleItems.some(i => i.path === '/admin')).toBe(true)
+        }
+      }
+    ),
+    { numRuns: 100 }
+  )
+})
+```
+
 ### 性能测试
 
 使用 Locust 模拟 50 并发用户，验证：
@@ -868,3 +1493,5 @@ def test_data_cleaning_invariant(stocks):
 - 数据接入 → 选股 → 风控 → 预警全链路集成测试
 - 选股 → 下单 → 持仓同步全链路集成测试
 - 回测 → 参数优化 → 过拟合检测全链路集成测试
+- 登录 → 路由守卫 → 角色菜单渲染 → 页面访问全链路集成测试
+- WebSocket 连接 → 预警推送 → 通知弹窗 → 跳转详情全链路集成测试

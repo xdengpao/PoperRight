@@ -10,11 +10,40 @@ interface AuthUser {
   role: UserRole
 }
 
+/**
+ * 解析 JWT payload 中的 exp 字段（秒级 Unix 时间戳）。
+ * 返回 null 表示 token 格式无效或缺少 exp。
+ */
+export function parseTokenExp(token: string): number | null {
+  try {
+    const parts = token.split('.')
+    if (parts.length !== 3) return null
+    // base64url → base64 → JSON
+    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/')
+    const decoded = JSON.parse(atob(payload))
+    if (typeof decoded.exp === 'number') return decoded.exp
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 判断 token 是否仍然有效（存在且未过期）。
+ */
+export function isTokenValid(token: string | null): boolean {
+  if (!token) return false
+  const exp = parseTokenExp(token)
+  if (exp === null) return false
+  // 当前时间（秒）与 exp 比较
+  return exp > Date.now() / 1000
+}
+
 export const useAuthStore = defineStore('auth', () => {
   const token = ref<string | null>(localStorage.getItem('access_token'))
   const user = ref<AuthUser | null>(null)
 
-  const isAuthenticated = computed(() => !!token.value)
+  const isAuthenticated = computed(() => isTokenValid(token.value))
   const role = computed<UserRole>(() => user.value?.role ?? 'READONLY')
 
   async function login(username: string, password: string) {
