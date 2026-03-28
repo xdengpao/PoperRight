@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     max_sector_position: float = 0.30          # 单一板块仓位上限 30%
     default_stop_loss_ratio: float = 0.08      # 默认止损比例 8%
 
+    # 默认管理员
+    default_admin_username: str = "admin"
+    default_admin_password: str = "admin123456"
+
     # 数据保留
     kline_history_years: int = 10
     audit_log_retention_days: int = 365

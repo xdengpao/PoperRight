@@ -3,15 +3,40 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from sqlalchemy import select
 
 from app.core.config import settings
+from app.core.database import AsyncSessionPG
 from app.core.pubsub_relay import pubsub_relay
+from app.core.security import PasswordHasher
+from app.models.user import AppUser
+
+
+async def _ensure_default_admin() -> None:
+    """如果不存在默认管理员，则自动创建"""
+    async with AsyncSessionPG() as session:
+        result = await session.execute(
+            select(AppUser).where(AppUser.username == settings.default_admin_username)
+        )
+        if result.scalar_one_or_none() is None:
+            admin = AppUser(
+                username=settings.default_admin_username,
+                password_hash=PasswordHasher.hash_password(settings.default_admin_password),
+                role="ADMIN",
+                is_active=True,
+            )
+            session.add(admin)
+            await session.commit()
+            print(f"[init] 默认管理员 '{settings.default_admin_username}' 已创建")
+        else:
+            print(f"[init] 管理员 '{settings.default_admin_username}' 已存在，跳过创建")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化资源
     await pubsub_relay.start()
+    await _ensure_default_admin()
     yield
     # 关闭时释放资源
     await pubsub_relay.stop()
