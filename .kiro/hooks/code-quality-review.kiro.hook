@@ -1,0 +1,21 @@
+{
+  "enabled": true,
+  "name": "Code Quality Review on Save",
+  "description": "Analyzes modified source code files for potential improvements when changes are detected. Reviews code for code smells, design patterns, and best practices. Generates suggestions for improving readability, maintainability, and performance while maintaining existing functionality.",
+  "version": "1",
+  "when": {
+    "type": "fileEdited",
+    "patterns": [
+      "*.py",
+      "*.ts",
+      "*.vue",
+      "*.js",
+      "*.tsx",
+      "*.jsx"
+    ]
+  },
+  "then": {
+    "type": "askAgent",
+    "prompt": "Analyze the modified code in the changed file for potential improvements. Focus on:\n\n1. Code smells: Identify any anti-patterns, duplicated logic, overly complex functions, long parameter lists, or dead code.\n2. Design patterns: Suggest applicable design patterns that could improve structure, or flag misused patterns.\n3. Best practices: Check adherence to language-specific best practices and idiomatic conventions.\n4. Readability: Flag unclear naming, missing or misleading comments, and overly nested logic.\n5. Maintainability: Identify tight coupling, missing abstractions, or code that would be hard to extend.\n6. Performance: Spot unnecessary computations, inefficient data structures, or potential memory issues.\n\nProvide concise, actionable suggestions. Do not rewrite the entire file — only highlight specific areas with clear recommendations. Maintain existing functionality."
+  }
+}
