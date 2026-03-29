@@ -279,7 +279,7 @@ class TestCancelOrder:
 # ManualTradeHelper 测试（任务 8.2）
 # ---------------------------------------------------------------------------
 
-from app.core.schemas import ScreenItem, RiskLevel
+from app.core.schemas import ScreenItem, RiskLevel, SignalCategory, SignalDetail
 from app.services.trade_executor import ManualTradeHelper
 
 
@@ -289,7 +289,7 @@ def _make_screen_item(**overrides) -> ScreenItem:
         ref_buy_price=Decimal("10.00"),
         trend_score=85.0,
         risk_level=RiskLevel.LOW,
-        signals={"ma_trend": True},
+        signals=[SignalDetail(category=SignalCategory.MA_TREND, label="ma_trend")],
     )
     defaults.update(overrides)
     return ScreenItem(**defaults)

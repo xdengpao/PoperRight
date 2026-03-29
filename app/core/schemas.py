@@ -84,6 +84,20 @@ class AlertType(str, Enum):
     SYSTEM = "SYSTEM"                   # 系统告警
 
 
+class SignalCategory(str, Enum):
+    """选股信号分类（需求 21.15）"""
+    MA_TREND = "MA_TREND"               # 均线趋势信号
+    MACD = "MACD"                       # MACD 信号
+    BOLL = "BOLL"                       # 布林带信号
+    RSI = "RSI"                         # RSI 信号
+    DMA = "DMA"                         # DMA 信号
+    BREAKOUT = "BREAKOUT"               # 形态突破信号
+    CAPITAL_INFLOW = "CAPITAL_INFLOW"   # 资金流入信号
+    LARGE_ORDER = "LARGE_ORDER"         # 大单活跃信号
+    MA_SUPPORT = "MA_SUPPORT"           # 均线支撑信号
+    SECTOR_STRONG = "SECTOR_STRONG"     # 板块强势信号
+
+
 # ---------------------------------------------------------------------------
 # 行情数据类
 # ---------------------------------------------------------------------------
@@ -114,13 +128,22 @@ class KlineBar:
 
 
 @dataclass
+class SignalDetail:
+    """单条信号详情（需求 21.15）"""
+    category: SignalCategory        # 信号分类
+    label: str                      # 信号标签（如"多头排列"、"MACD 金叉"）
+    is_fake_breakout: bool = False  # 是否为假突破标记
+
+
+@dataclass
 class ScreenItem:
     """单条选股结果"""
     symbol: str
     ref_buy_price: Decimal          # 买入参考价
     trend_score: float              # 趋势强度评分 0-100
     risk_level: RiskLevel           # 风险等级
-    signals: dict = field(default_factory=dict)  # 触发的信号详情
+    signals: list[SignalDetail] = field(default_factory=list)  # 触发的信号详情
+    has_fake_breakout: bool = False  # 是否存在假突破信号
 
 
 @dataclass
@@ -192,6 +215,215 @@ class StrategyConfig:
             weights=data.get("weights", {}),
             ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120, 250]),
             indicator_params=data.get("indicator_params", {}),
+        )
+
+
+@dataclass
+class MaTrendConfig:
+    """均线趋势配置（需求 3 / 21.8）"""
+    ma_periods: list[int] = field(default_factory=lambda: [5, 10, 20, 60, 120])
+    slope_threshold: float = 0.0            # 多头排列斜率阈值
+    trend_score_threshold: int = 80         # 趋势打分纳入初选池阈值
+    support_ma_lines: list[int] = field(default_factory=lambda: [20, 60])
+
+    def to_dict(self) -> dict:
+        return {
+            "ma_periods": self.ma_periods,
+            "slope_threshold": self.slope_threshold,
+            "trend_score_threshold": self.trend_score_threshold,
+            "support_ma_lines": self.support_ma_lines,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MaTrendConfig":
+        return cls(
+            ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120]),
+            slope_threshold=data.get("slope_threshold", 0.0),
+            trend_score_threshold=data.get("trend_score_threshold", 80),
+            support_ma_lines=data.get("support_ma_lines", [20, 60]),
+        )
+
+
+@dataclass
+class IndicatorParamsConfig:
+    """技术指标参数配置（需求 4 / 21.9）"""
+    macd_fast: int = 12
+    macd_slow: int = 26
+    macd_signal: int = 9
+    boll_period: int = 20
+    boll_std_dev: float = 2.0
+    rsi_period: int = 14
+    rsi_lower: int = 50
+    rsi_upper: int = 80
+    dma_short: int = 10
+    dma_long: int = 50
+
+    def to_dict(self) -> dict:
+        return {
+            "macd_fast": self.macd_fast,
+            "macd_slow": self.macd_slow,
+            "macd_signal": self.macd_signal,
+            "boll_period": self.boll_period,
+            "boll_std_dev": self.boll_std_dev,
+            "rsi_period": self.rsi_period,
+            "rsi_lower": self.rsi_lower,
+            "rsi_upper": self.rsi_upper,
+            "dma_short": self.dma_short,
+            "dma_long": self.dma_long,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "IndicatorParamsConfig":
+        return cls(
+            macd_fast=data.get("macd_fast", 12),
+            macd_slow=data.get("macd_slow", 26),
+            macd_signal=data.get("macd_signal", 9),
+            boll_period=data.get("boll_period", 20),
+            boll_std_dev=data.get("boll_std_dev", 2.0),
+            rsi_period=data.get("rsi_period", 14),
+            rsi_lower=data.get("rsi_lower", 50),
+            rsi_upper=data.get("rsi_upper", 80),
+            dma_short=data.get("dma_short", 10),
+            dma_long=data.get("dma_long", 50),
+        )
+
+
+@dataclass
+class BreakoutConfig:
+    """形态突破配置（需求 5 / 21.10）"""
+    box_breakout: bool = True               # 箱体突破
+    high_breakout: bool = True              # 前期高点突破
+    trendline_breakout: bool = True         # 下降趋势线突破
+    volume_ratio_threshold: float = 1.5     # 量比倍数阈值
+    confirm_days: int = 1                   # 站稳确认天数
+
+    def to_dict(self) -> dict:
+        return {
+            "box_breakout": self.box_breakout,
+            "high_breakout": self.high_breakout,
+            "trendline_breakout": self.trendline_breakout,
+            "volume_ratio_threshold": self.volume_ratio_threshold,
+            "confirm_days": self.confirm_days,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "BreakoutConfig":
+        return cls(
+            box_breakout=data.get("box_breakout", True),
+            high_breakout=data.get("high_breakout", True),
+            trendline_breakout=data.get("trendline_breakout", True),
+            volume_ratio_threshold=data.get("volume_ratio_threshold", 1.5),
+            confirm_days=data.get("confirm_days", 1),
+        )
+
+
+@dataclass
+class VolumePriceConfig:
+    """量价资金筛选配置（需求 6 / 21.11）"""
+    turnover_rate_min: float = 3.0          # 换手率下限 %
+    turnover_rate_max: float = 15.0         # 换手率上限 %
+    main_flow_threshold: float = 1000.0     # 主力净流入阈值（万元）
+    main_flow_days: int = 2                 # 连续净流入天数
+    large_order_ratio: float = 30.0         # 大单占比阈值 %
+    min_daily_amount: float = 5000.0        # 日均成交额下限（万元）
+    sector_rank_top: int = 30               # 板块排名范围
+
+    def to_dict(self) -> dict:
+        return {
+            "turnover_rate_min": self.turnover_rate_min,
+            "turnover_rate_max": self.turnover_rate_max,
+            "main_flow_threshold": self.main_flow_threshold,
+            "main_flow_days": self.main_flow_days,
+            "large_order_ratio": self.large_order_ratio,
+            "min_daily_amount": self.min_daily_amount,
+            "sector_rank_top": self.sector_rank_top,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "VolumePriceConfig":
+        return cls(
+            turnover_rate_min=data.get("turnover_rate_min", 3.0),
+            turnover_rate_max=data.get("turnover_rate_max", 15.0),
+            main_flow_threshold=data.get("main_flow_threshold", 1000.0),
+            main_flow_days=data.get("main_flow_days", 2),
+            large_order_ratio=data.get("large_order_ratio", 30.0),
+            min_daily_amount=data.get("min_daily_amount", 5000.0),
+            sector_rank_top=data.get("sector_rank_top", 30),
+        )
+
+
+@dataclass
+class StrategyConfig:
+    """选股策略配置"""
+    factors: list[FactorCondition] = field(default_factory=list)
+    logic: Literal["AND", "OR"] = "AND"         # 因子间逻辑运算
+    weights: dict[str, float] = field(default_factory=dict)  # 因子权重
+    ma_periods: list[int] = field(default_factory=lambda: [5, 10, 20, 60, 120, 250])
+    indicator_params: IndicatorParamsConfig = field(default_factory=IndicatorParamsConfig)
+    ma_trend: MaTrendConfig = field(default_factory=MaTrendConfig)
+    breakout: BreakoutConfig = field(default_factory=BreakoutConfig)
+    volume_price: VolumePriceConfig = field(default_factory=VolumePriceConfig)
+
+    def to_dict(self) -> dict:
+        """序列化为可 JSON 存储的字典"""
+        # indicator_params: support both new typed config and legacy plain dict
+        if isinstance(self.indicator_params, IndicatorParamsConfig):
+            ip = self.indicator_params.to_dict()
+        else:
+            ip = self.indicator_params  # type: ignore[assignment]
+        return {
+            "factors": [
+                {
+                    "factor_name": f.factor_name,
+                    "operator": f.operator,
+                    "threshold": f.threshold,
+                    "params": f.params,
+                }
+                for f in self.factors
+            ],
+            "logic": self.logic,
+            "weights": self.weights,
+            "ma_periods": self.ma_periods,
+            "indicator_params": ip,
+            "ma_trend": self.ma_trend.to_dict(),
+            "breakout": self.breakout.to_dict(),
+            "volume_price": self.volume_price.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StrategyConfig":
+        """从字典反序列化（向后兼容旧配置）"""
+        factors = [
+            FactorCondition(
+                factor_name=f["factor_name"],
+                operator=f["operator"],
+                threshold=f.get("threshold"),
+                params=f.get("params", {}),
+            )
+            for f in data.get("factors", [])
+        ]
+        # indicator_params: accept both plain dict (legacy) and structured dict
+        raw_ip = data.get("indicator_params", {})
+        indicator_params = IndicatorParamsConfig.from_dict(raw_ip) if isinstance(raw_ip, dict) else IndicatorParamsConfig()
+
+        raw_ma = data.get("ma_trend")
+        ma_trend = MaTrendConfig.from_dict(raw_ma) if isinstance(raw_ma, dict) else MaTrendConfig()
+
+        raw_bo = data.get("breakout")
+        breakout = BreakoutConfig.from_dict(raw_bo) if isinstance(raw_bo, dict) else BreakoutConfig()
+
+        raw_vp = data.get("volume_price")
+        volume_price = VolumePriceConfig.from_dict(raw_vp) if isinstance(raw_vp, dict) else VolumePriceConfig()
+
+        return cls(
+            factors=factors,
+            logic=data.get("logic", "AND"),
+            weights=data.get("weights", {}),
+            ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120, 250]),
+            indicator_params=indicator_params,
+            ma_trend=ma_trend,
+            breakout=breakout,
+            volume_price=volume_price,
         )
 
 

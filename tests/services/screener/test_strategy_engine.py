@@ -330,6 +330,13 @@ class TestStrategyTemplateManager:
 
     def test_serialization_round_trip(self):
         """序列化 round-trip：to_dict → from_dict 应完全等价"""
+        from app.core.schemas import (
+            BreakoutConfig,
+            IndicatorParamsConfig,
+            MaTrendConfig,
+            VolumePriceConfig,
+        )
+
         config = StrategyConfig(
             factors=[
                 FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0, params={"period": 20}),
@@ -338,7 +345,10 @@ class TestStrategyTemplateManager:
             logic="OR",
             weights={"ma_trend": 2.0, "macd": 1.0},
             ma_periods=[5, 10, 20, 60],
-            indicator_params={"rsi_period": 14},
+            indicator_params=IndicatorParamsConfig(rsi_period=14),
+            ma_trend=MaTrendConfig(ma_periods=[5, 10, 20]),
+            breakout=BreakoutConfig(box_breakout=False),
+            volume_price=VolumePriceConfig(turnover_rate_min=5.0),
         )
         d = config.to_dict()
         restored = StrategyConfig.from_dict(d)
@@ -347,6 +357,9 @@ class TestStrategyTemplateManager:
         assert restored.weights == config.weights
         assert restored.ma_periods == config.ma_periods
         assert restored.indicator_params == config.indicator_params
+        assert restored.ma_trend == config.ma_trend
+        assert restored.breakout == config.breakout
+        assert restored.volume_price == config.volume_price
         assert len(restored.factors) == len(config.factors)
         for orig, rest in zip(config.factors, restored.factors):
             assert rest.factor_name == orig.factor_name

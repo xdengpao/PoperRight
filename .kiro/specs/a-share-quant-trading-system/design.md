@@ -168,6 +168,63 @@ class StrategyConfig:
     weights: dict[str, float]        # 因子权重
     ma_periods: list[int]            # 均线周期
     indicator_params: dict           # 指标参数
+    ma_trend: MaTrendConfig | None   # 均线趋势配置（需求 3）
+    breakout: BreakoutConfig | None  # 形态突破配置（需求 5）
+    volume_price: VolumePriceConfig | None  # 量价资金筛选配置（需求 6）
+```
+
+**均线趋势配置：**
+
+```python
+@dataclass
+class MaTrendConfig:
+    ma_periods: list[int]            # 均线周期组合，默认 [5,10,20,60,120]
+    slope_threshold: float           # 多头排列斜率阈值，默认 0
+    trend_score_threshold: int       # 趋势打分阈值，默认 80
+    support_ma_lines: list[int]      # 均线支撑回调均线，默认 [20,60]
+```
+
+**技术指标参数配置：**
+
+```python
+@dataclass
+class IndicatorParamsConfig:
+    macd_fast: int = 12              # MACD 快线周期
+    macd_slow: int = 26              # MACD 慢线周期
+    macd_signal: int = 9             # MACD 信号线周期
+    boll_period: int = 20            # BOLL 周期
+    boll_std_dev: float = 2.0        # BOLL 标准差倍数
+    rsi_period: int = 14             # RSI 周期
+    rsi_lower: int = 50              # RSI 强势区间下限
+    rsi_upper: int = 80              # RSI 强势区间上限
+    dma_short: int = 10              # DMA 短期周期
+    dma_long: int = 50               # DMA 长期周期
+```
+
+**形态突破配置：**
+
+```python
+@dataclass
+class BreakoutConfig:
+    box_breakout: bool = True        # 箱体突破
+    high_breakout: bool = True       # 前期高点突破
+    trendline_breakout: bool = True  # 下降趋势线突破
+    volume_ratio_threshold: float = 1.5  # 量比倍数阈值
+    confirm_days: int = 1            # 站稳确认天数
+```
+
+**量价资金筛选配置：**
+
+```python
+@dataclass
+class VolumePriceConfig:
+    turnover_rate_min: float = 3.0   # 换手率下限 %
+    turnover_rate_max: float = 15.0  # 换手率上限 %
+    main_flow_threshold: float = 1000.0  # 主力净流入阈值（万元）
+    main_flow_days: int = 2          # 连续净流入天数
+    large_order_ratio: float = 30.0  # 大单占比阈值 %
+    min_daily_amount: float = 5000.0 # 日均成交额下限（万元）
+    sector_rank_top: int = 30        # 板块排名范围
 ```
 
 ### 3. RiskController（风控引擎）
@@ -451,7 +508,8 @@ class ScreenItem:
     ref_buy_price: Decimal
     trend_score: float       # 0-100
     risk_level: Literal["LOW", "MEDIUM", "HIGH"]
-    signals: dict            # 触发信号详情
+    signals: list[dict]      # 触发信号详情，每项含 category/label/is_fake_breakout
+    has_fake_breakout: bool   # 是否存在假突破标记
 
 @dataclass
 class BacktestResult:
@@ -542,14 +600,14 @@ graph TD
 | `/register` | RegisterView | 21.2 | 无需认证 |
 | `/` | MainLayout → DashboardView | 21.4 | 全部角色 |
 | `/data` | DataManageView | 21.5 | 全部角色 |
-| `/screener` | ScreenerView | 21.6 | 全部角色 |
-| `/screener/results` | ScreenerResultsView | 21.7 | 全部角色 |
-| `/risk` | RiskView | 21.8 | 全部角色 |
-| `/backtest` | BacktestView | 21.9 | 全部角色 |
-| `/trade` | TradeView | 21.10 | TRADER, ADMIN |
-| `/positions` | PositionsView | 21.11 | TRADER, ADMIN |
-| `/review` | ReviewView | 21.12 | 全部角色 |
-| `/admin` | AdminView | 21.13 | ADMIN |
+| `/screener` | ScreenerView | 21.6, 21.8–21.14 | 全部角色 |
+| `/screener/results` | ScreenerResultsView | 21.7, 21.15 | 全部角色 |
+| `/risk` | RiskView | 21.16 | 全部角色 |
+| `/backtest` | BacktestView | 21.17 | 全部角色 |
+| `/trade` | TradeView | 21.18 | TRADER, ADMIN |
+| `/positions` | PositionsView | 21.19 | TRADER, ADMIN |
+| `/review` | ReviewView | 21.20 | 全部角色 |
+| `/admin` | AdminView | 21.21 | ADMIN |
 
 ### 前端组件与接口
 
@@ -677,6 +735,170 @@ interface ExclusionItem {
 - 策略删除确认对话框
 - 因子条件组合的可视化编辑器（支持 AND/OR 逻辑切换）
 - 一键执行选股后自动跳转至选股结果页面
+- 策略数量上限校验（20 套），达到上限时禁用新建按钮并显示提示
+
+##### 4a. 均线趋势参数配置面板（需求 21.8 → 需求 3）
+
+```typescript
+// 均线趋势配置数据结构
+interface MaTrendConfig {
+  ma_periods: number[]           // 均线周期组合，默认 [5, 10, 20, 60, 120]
+  slope_threshold: number        // 多头排列斜率阈值，默认 0
+  trend_score_threshold: number  // 趋势打分纳入初选池阈值，默认 80
+  support_ma_lines: number[]     // 均线支撑信号回调均线，默认 [20, 60]
+}
+```
+
+面板功能：
+- 均线周期组合：多选标签输入，支持添加/删除自定义周期值，默认预填 5/10/20/60/120
+- 斜率阈值：数值输入框，步长 0.01，默认 0
+- 趋势打分阈值：滑块控件 0-100，默认 80，实时显示当前值
+- 均线支撑回调均线：复选框组，选项为 20 日 / 60 日，默认全选
+
+##### 4b. 技术指标参数配置面板（需求 21.9 → 需求 4）
+
+```typescript
+// 技术指标参数配置数据结构
+interface IndicatorParamsConfig {
+  macd: {
+    fast_period: number    // 快线周期，默认 12
+    slow_period: number    // 慢线周期，默认 26
+    signal_period: number  // 信号线周期，默认 9
+  }
+  boll: {
+    period: number         // 周期，默认 20
+    std_dev: number        // 标准差倍数，默认 2
+  }
+  rsi: {
+    period: number         // 周期，默认 14
+    lower_bound: number    // 强势区间下限，默认 50
+    upper_bound: number    // 强势区间上限，默认 80
+  }
+  dma: {
+    short_period: number   // 短期周期，默认 10
+    long_period: number    // 长期周期，默认 50
+  }
+}
+```
+
+面板功能：
+- 按指标分组的折叠面板（Accordion），每个指标独立展开/收起
+- MACD 面板：快线周期、慢线周期、信号线周期三个数值输入框
+- BOLL 面板：周期和标准差倍数两个数值输入框
+- RSI 面板：周期输入框 + 强势区间双端滑块（下限/上限）
+- DMA 面板：短期周期和长期周期两个数值输入框
+- 每个参数旁显示默认值提示，支持一键恢复默认值
+
+##### 4c. 形态突破配置面板（需求 21.10 → 需求 5）
+
+```typescript
+// 形态突破配置数据结构
+interface BreakoutConfig {
+  patterns: {
+    box_breakout: boolean           // 箱体突破，默认 true
+    high_breakout: boolean          // 前期高点突破，默认 true
+    trendline_breakout: boolean     // 下降趋势线突破，默认 true
+  }
+  volume_ratio_threshold: number    // 有效突破量比倍数阈值，默认 1.5
+  confirm_days: number              // 突破站稳确认天数，默认 1
+}
+```
+
+面板功能：
+- 三种突破形态的开关复选框（箱体突破 / 前期高点突破 / 下降趋势线突破），默认全部启用
+- 量比倍数阈值：数值输入框，步长 0.1，默认 1.5，标注"倍近 20 日均量"
+- 站稳确认天数：数值输入框，步长 1，最小值 1，默认 1
+
+##### 4d. 量价资金筛选配置面板（需求 21.11 → 需求 6）
+
+```typescript
+// 量价资金筛选配置数据结构
+interface VolumePriceConfig {
+  turnover_rate_min: number         // 换手率下限 %，默认 3
+  turnover_rate_max: number         // 换手率上限 %，默认 15
+  main_flow_threshold: number       // 主力资金净流入阈值（万元），默认 1000
+  main_flow_days: number            // 连续净流入天数，默认 2
+  large_order_ratio: number         // 大单成交占比阈值 %，默认 30
+  min_daily_amount: number          // 日均成交额下限（万元），默认 5000
+  sector_rank_top: number           // 板块涨幅排名筛选范围，默认 30
+}
+```
+
+面板功能：
+- 换手率区间：双端滑块或两个数值输入框（下限/上限），默认 3%-15%
+- 主力资金净流入阈值：数值输入框，单位万元，默认 1000
+- 连续净流入天数：数值输入框，步长 1，默认 2
+- 大单成交占比阈值：数值输入框，单位 %，默认 30
+- 日均成交额下限：数值输入框，单位万元，默认 5000
+- 板块涨幅排名范围：数值输入框，默认前 30
+
+##### 4e. 策略数量上限校验（需求 21.12 → 需求 7.2）
+
+行为：
+- 页面加载策略列表后，检查当前策略数量是否达到 20 套上限
+- 达到上限时：新建策略按钮置灰（disabled），按钮旁显示"已达策略上限（20 套）"提示文字
+- 未达上限时：正常显示新建按钮，无额外提示
+
+##### 4f. 实时选股开关与状态（需求 21.13 → 需求 7.5）
+
+```typescript
+// 实时选股状态
+interface RealtimeScreenState {
+  enabled: boolean                  // 实时选股开关
+  is_trading_hours: boolean         // 当前是否交易时段
+  last_refresh_at: string | null    // 最近刷新时间
+  next_refresh_countdown: number    // 下次刷新倒计时（秒）
+}
+```
+
+行为：
+- 提供实时选股开关（Toggle Switch），默认关闭
+- 开启后判断当前是否在交易时段（9:30-15:00）：
+  - 交易时段内：每 10 秒自动调用 `POST /api/v1/screen/run` 并刷新结果，页面显示倒计时和最近刷新时间
+  - 非交易时段：开关自动禁用，显示"非交易时段"灰色状态提示
+- 关闭开关时停止自动刷新定时器
+
+##### 4g. 盘后自动选股调度状态（需求 21.14 → 需求 7.4）
+
+```typescript
+// 盘后选股调度状态
+interface EodScheduleStatus {
+  next_run_at: string              // 下一次盘后选股预计执行时间
+  last_run_at: string | null       // 最近一次执行时间
+  last_run_duration_ms: number | null  // 最近一次执行耗时（毫秒）
+  last_run_result_count: number | null // 最近一次选出股票数量
+}
+```
+
+行为：
+- 在选股策略页面底部或顶部展示盘后选股调度信息卡片
+- 显示下一次盘后选股的预计执行时间（每个交易日 15:30）
+- 显示最近一次盘后选股的执行时间、耗时和选出股票数量
+- 调用 `GET /api/v1/screen/schedule` 获取调度状态数据
+
+##### 4h. 策略配置数据结构（完整）
+
+```typescript
+// 完整的策略配置，包含所有子面板参数
+interface FullStrategyConfig {
+  // 基础因子配置（已有）
+  logic: 'AND' | 'OR'
+  factors: FactorCondition[]
+  weights: Record<string, number>
+
+  // 均线趋势配置（新增 → 需求 3）
+  ma_trend: MaTrendConfig
+
+  // 技术指标配置（新增 → 需求 4）
+  indicator_params: IndicatorParamsConfig
+
+  // 形态突破配置（新增 → 需求 5）
+  breakout: BreakoutConfig
+
+  // 量价资金筛选配置（新增 → 需求 6）
+  volume_price: VolumePriceConfig
+}
+```
 
 #### 5. 选股结果页面（ScreenerResultsView）
 
@@ -688,8 +910,28 @@ interface ScreenResultRow {
   ref_buy_price: number    // 买入参考价
   trend_score: number      // 趋势强度评分 0-100
   risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
-  signals: string[]        // 触发信号列表
+  signals: SignalDetail[]  // 触发信号列表（分类结构化）
   screen_time: string      // 选股时间
+  has_fake_breakout: boolean // 是否存在假突破标记
+}
+
+// 信号分类详情（需求 21.15 → 需求 3-6）
+type SignalCategory =
+  | 'MA_TREND'          // 均线趋势信号
+  | 'MACD'              // MACD 技术指标信号
+  | 'BOLL'              // BOLL 技术指标信号
+  | 'RSI'               // RSI 技术指标信号
+  | 'DMA'               // DMA 技术指标信号
+  | 'BREAKOUT'          // 形态突破信号
+  | 'CAPITAL_INFLOW'    // 资金流入信号
+  | 'LARGE_ORDER'       // 大单活跃信号
+  | 'MA_SUPPORT'        // 均线支撑信号
+  | 'SECTOR_STRONG'     // 板块强势信号
+
+interface SignalDetail {
+  category: SignalCategory
+  label: string            // 信号显示文本
+  is_fake_breakout: boolean // 是否为假突破（仅 BREAKOUT 类型适用）
 }
 ```
 
@@ -697,6 +939,10 @@ interface ScreenResultRow {
 - 表格展示选股结果，支持按趋势评分、风险等级排序
 - 导出为 Excel 文件按钮（调用 `GET /api/v1/screen/results/export`）
 - 点击行可展开信号详情
+- 信号详情按类型分类展示，每种信号类型使用不同颜色标签区分：
+  - 均线趋势信号（蓝色）、技术指标信号 MACD/BOLL/RSI/DMA（青色）、形态突破信号（绿色）、资金流入信号（橙色）、大单活跃信号（黄色）、均线支撑信号（紫色）、板块强势信号（品红色）
+- 假突破标记：当信号中存在 `is_fake_breakout: true` 的突破信号时，在该信号标签旁以红色醒目样式标注"假突破"警告标签
+- 主行的触发信号列显示信号数量和类型摘要（如"3 个信号：均线趋势 / MACD / 资金流入"）
 
 #### 6. 风险控制页面（RiskView）
 
@@ -936,8 +1182,16 @@ interface ScreenItem {
   ref_buy_price: number
   trend_score: number
   risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
-  signals: Record<string, unknown>
+  signals: SignalDetail[]
   screen_time: string
+  has_fake_breakout: boolean
+}
+
+// 信号分类详情
+interface SignalDetail {
+  category: 'MA_TREND' | 'MACD' | 'BOLL' | 'RSI' | 'DMA' | 'BREAKOUT' | 'CAPITAL_INFLOW' | 'LARGE_ORDER' | 'MA_SUPPORT' | 'SECTOR_STRONG'
+  label: string
+  is_fake_breakout: boolean
 }
 
 // 持仓项
@@ -999,7 +1253,7 @@ interface BacktestResult {
 interface StrategyTemplate {
   id: string
   name: string
-  config: Record<string, unknown>
+  config: FullStrategyConfig
   is_active: boolean
   created_at: string
   updated_at: string
@@ -1296,7 +1550,7 @@ interface StrategyTemplate {
 
 *对任意*选股结果项，渲染后应包含股票代码、名称、买入参考价、趋势强度评分、风险等级、触发信号全部字段且均不为空；*对任意*持仓项，渲染后应包含持仓股数、成本价、当前市值、盈亏金额、盈亏比例、仓位占比全部字段且均不为空。
 
-**验证需求：21.7, 21.11**
+**验证需求：21.7, 21.19**
 
 ---
 
@@ -1304,7 +1558,7 @@ interface StrategyTemplate {
 
 *对任意*用户角色，侧边菜单渲染结果应仅包含该角色有权访问的菜单项：READONLY 角色的菜单中不应包含交易执行和持仓管理入口；TRADER 角色的菜单中不应包含系统管理入口；ADMIN 角色应能看到全部菜单项。
 
-**验证需求：21.14**
+**验证需求：21.22**
 
 ---
 
@@ -1312,7 +1566,7 @@ interface StrategyTemplate {
 
 *对任意*通过 WebSocket 接收的预警消息，通知卡片应包含预警类型、股票代码、触发原因三个字段且均不为空，且卡片应携带正确的跳转链接路径。
 
-**验证需求：21.16**
+**验证需求：21.24**
 
 ---
 
@@ -1320,7 +1574,63 @@ interface StrategyTemplate {
 
 *对任意*失败的 API 请求，页面状态应从 loading 转为 error，error 状态应包含非空的错误提示信息，且应提供可调用的重试函数；重试函数调用后页面状态应重新进入 loading。
 
-**验证需求：21.17**
+**验证需求：21.25**
+
+---
+
+### 属性 39：均线趋势参数配置面板完整性
+
+*对任意*均线趋势参数配置，面板应支持配置均线周期组合（默认 5/10/20/60/120）、多头排列斜率阈值、趋势打分阈值（默认 80）、均线支撑回调均线选择（20 日/60 日）；配置保存后再加载，所有参数值应与保存时完全一致。
+
+**验证需求：21.8**
+
+---
+
+### 属性 40：技术指标参数配置面板完整性
+
+*对任意*技术指标参数配置，面板应为 MACD 提供快线/慢线/信号线周期配置，为 BOLL 提供周期和标准差倍数配置，为 RSI 提供周期和强势区间上下限配置，为 DMA 提供短期和长期周期配置；所有参数应有默认值，配置保存后再加载应与保存时完全一致。
+
+**验证需求：21.9**
+
+---
+
+### 属性 41：形态突破配置面板完整性
+
+*对任意*形态突破配置，面板应支持三种突破形态（箱体/前高/趋势线）的独立启用/禁用，支持量比倍数阈值配置（默认 1.5），支持站稳确认天数配置（默认 1）；配置保存后再加载应与保存时完全一致。
+
+**验证需求：21.10**
+
+---
+
+### 属性 42：量价资金筛选配置面板完整性
+
+*对任意*量价资金筛选配置，面板应支持换手率区间（默认 3%-15%）、主力资金净流入阈值（默认 1000 万）、连续净流入天数（默认 2）、大单占比阈值（默认 30%）、日均成交额下限（默认 5000 万）、板块排名范围（默认前 30）的配置；配置保存后再加载应与保存时完全一致。
+
+**验证需求：21.11**
+
+---
+
+### 属性 43：策略数量上限前端校验
+
+*对任意*用户，当其已保存策略数量达到 20 套时，新建策略按钮应处于禁用状态且页面应显示"已达策略上限（20 套）"提示；当策略数量小于 20 时，新建按钮应处于可用状态且无上限提示。
+
+**验证需求：21.12**
+
+---
+
+### 属性 44：实时选股开关交易时段联动
+
+*对任意*时间点，当实时选股开关开启时：若当前处于交易时段（9:30-15:00），页面应每 10 秒自动刷新选股结果并显示倒计时和最近刷新时间；若当前处于非交易时段，开关应自动禁用并显示"非交易时段"状态提示。
+
+**验证需求：21.13**
+
+---
+
+### 属性 45：选股结果信号分类展示正确性
+
+*对任意*选股结果项，其触发信号应按类型分类展示，区分均线趋势信号、技术指标信号（MACD/BOLL/RSI/DMA）、形态突破信号、资金流入信号、大单活跃信号、均线支撑信号、板块强势信号；当存在假突破标记时，应以醒目红色样式标注"假突破"警告标签。
+
+**验证需求：21.15**
 
 ---
 
@@ -1449,8 +1759,8 @@ def test_data_cleaning_invariant(stocks):
 - 单元测试：系统异常报警示例、用户权限分配示例
 
 **WebUI（前端交互界面）**
-- 属性测试（Vitest + fast-check）：属性 32（登录响应）、属性 33（注册校验）、属性 34（路由守卫）、属性 35（数据渲染完整性）、属性 36（角色菜单渲染）、属性 37（预警通知渲染）、属性 38（错误状态管理）
-- 单元测试（Vitest + Vue Test Utils）：LoginView 登录成功/失败交互示例、RegisterView 表单校验示例、MainLayout 菜单分组渲染示例、AlertNotification 弹窗显示/关闭/跳转示例、WebSocket 断线重连示例、各功能页面基础渲染示例
+- 属性测试（Vitest + fast-check）：属性 32（登录响应）、属性 33（注册校验）、属性 34（路由守卫）、属性 35（数据渲染完整性）、属性 36（角色菜单渲染）、属性 37（预警通知渲染）、属性 38（错误状态管理）、属性 39（均线趋势参数配置）、属性 40（技术指标参数配置）、属性 41（形态突破配置）、属性 42（量价资金筛选配置）、属性 43（策略数量上限校验）、属性 44（实时选股开关联动）、属性 45（信号分类展示）
+- 单元测试（Vitest + Vue Test Utils）：LoginView 登录成功/失败交互示例、RegisterView 表单校验示例、MainLayout 菜单分组渲染示例、AlertNotification 弹窗显示/关闭/跳转示例、WebSocket 断线重连示例、各功能页面基础渲染示例、ScreenerView 各参数面板默认值渲染示例、ScreenerView 策略上限禁用按钮示例、ScreenerView 实时选股开关交互示例、ScreenerResultsView 信号分类标签渲染示例、ScreenerResultsView 假突破警告标签渲染示例
 
 前端属性测试使用 fast-check 库（TypeScript PBT 库），每个属性测试最少运行 100 次迭代。每个属性测试必须通过注释标注对应的设计文档属性编号：
 
@@ -1495,3 +1805,5 @@ test('角色菜单动态渲染正确性', () => {
 - 回测 → 参数优化 → 过拟合检测全链路集成测试
 - 登录 → 路由守卫 → 角色菜单渲染 → 页面访问全链路集成测试
 - WebSocket 连接 → 预警推送 → 通知弹窗 → 跳转详情全链路集成测试
+- 选股策略配置（均线/指标/突破/量价面板）→ 保存策略 → 执行选股 → 结果信号分类展示全链路集成测试
+- 实时选股开关开启 → 交易时段自动刷新 → 非交易时段自动禁用全链路集成测试

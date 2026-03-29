@@ -77,6 +77,28 @@ async def delete_user(user_id: UUID) -> dict:
     return {"id": str(user_id), "deleted": True}
 
 
+class RoleUpdateIn(BaseModel):
+    role: str
+
+
+@router.patch("/users/{user_id}/role")
+async def change_user_role(user_id: UUID, body: RoleUpdateIn) -> dict:
+    """修改用户角色。"""
+    return {"id": str(user_id), "role": body.role, "updated": True}
+
+
+@router.post("/backup")
+async def trigger_backup() -> dict:
+    """触发数据库备份任务。"""
+    return {"message": "备份任务已触发", "status": "pending"}
+
+
+@router.post("/restore")
+async def trigger_restore() -> dict:
+    """触发数据库恢复任务。"""
+    return {"message": "恢复任务已触发", "status": "pending"}
+
+
 # ---------------------------------------------------------------------------
 # 系统健康 & 日志
 # ---------------------------------------------------------------------------

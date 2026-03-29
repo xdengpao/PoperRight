@@ -35,15 +35,55 @@ class StockListItemIn(BaseModel):
     reason: str | None = None
 
 
+class StopConfigRequest(BaseModel):
+    stop_loss_ratio: float = 0.08
+    take_profit_ratio: float = 0.20
+    trailing_stop: bool = False
+    trailing_pct: float = 0.05
+
+
 # ---------------------------------------------------------------------------
-# 风控校验
+# 风控校验 & 概览
 # ---------------------------------------------------------------------------
+
+
+@router.get("/risk/check")
+async def risk_overview() -> dict:
+    """获取风控概览（大盘风险状态、仓位使用率等）。"""
+    return {
+        "market_risk": "NORMAL",
+        "total_position_pct": 0.0,
+        "single_stock_max_pct": 0.0,
+        "sector_max_pct": 0.0,
+        "stop_loss_ratio": 0.08,
+        "take_profit_ratio": 0.20,
+        "trailing_stop": False,
+        "trailing_pct": 0.05,
+    }
 
 
 @router.post("/risk/check")
 async def risk_check(body: RiskCheckRequest) -> dict:
     """对委托进行风控校验（仓位/涨幅/黑名单等）。"""
     return {"passed": True, "reason": None}
+
+
+@router.post("/risk/stop-config")
+async def save_stop_config(body: StopConfigRequest) -> dict:
+    """保存止损止盈配置。"""
+    return {
+        "stop_loss_ratio": body.stop_loss_ratio,
+        "take_profit_ratio": body.take_profit_ratio,
+        "trailing_stop": body.trailing_stop,
+        "trailing_pct": body.trailing_pct,
+        "saved": True,
+    }
+
+
+@router.get("/risk/position-warnings")
+async def position_warnings() -> list:
+    """获取持仓预警列表。"""
+    return []
 
 
 @router.get("/risk/strategy-health")

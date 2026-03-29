@@ -26,6 +26,8 @@ from app.core.schemas import (
     ScreenItem,
     ScreenResult,
     ScreenType,
+    SignalCategory,
+    SignalDetail,
     StrategyConfig,
 )
 from app.services.screener.strategy_engine import StrategyEngine
@@ -105,6 +107,22 @@ class ScreenExecutor:
         """核心选股执行逻辑。"""
         passed = StrategyEngine.screen_stocks(self._config, stocks_data)
 
+        # 因子名称到信号分类的映射
+        _FACTOR_TO_CATEGORY: dict[str, SignalCategory] = {
+            "ma_trend": SignalCategory.MA_TREND,
+            "macd": SignalCategory.MACD,
+            "boll": SignalCategory.BOLL,
+            "rsi": SignalCategory.RSI,
+            "dma": SignalCategory.DMA,
+            "breakout": SignalCategory.BREAKOUT,
+            "money_flow": SignalCategory.CAPITAL_INFLOW,
+            "large_order": SignalCategory.LARGE_ORDER,
+            "ma_support": SignalCategory.MA_SUPPORT,
+            "sector_rank": SignalCategory.SECTOR_STRONG,
+            "sector_trend": SignalCategory.SECTOR_STRONG,
+            "volume_price": SignalCategory.CAPITAL_INFLOW,
+        }
+
         items: list[ScreenItem] = []
         for symbol, eval_result in passed:
             stock_data = stocks_data.get(symbol, {})
@@ -112,10 +130,20 @@ class ScreenExecutor:
             # 确保 trend_score 在 [0, 100]
             trend_score = max(0.0, min(100.0, trend_score))
 
-            signals = {
-                fr.factor_name: {"passed": fr.passed, "value": fr.value}
-                for fr in eval_result.factor_results
-            }
+            # 构建 SignalDetail 列表
+            signals: list[SignalDetail] = []
+            for fr in eval_result.factor_results:
+                if fr.passed:
+                    category = _FACTOR_TO_CATEGORY.get(
+                        fr.factor_name, SignalCategory.MA_TREND
+                    )
+                    signals.append(SignalDetail(
+                        category=category,
+                        label=fr.factor_name,
+                        is_fake_breakout=False,
+                    ))
+
+            has_fake_breakout = any(s.is_fake_breakout for s in signals)
 
             items.append(
                 ScreenItem(
@@ -124,6 +152,7 @@ class ScreenExecutor:
                     trend_score=trend_score,
                     risk_level=_classify_risk(trend_score),
                     signals=signals,
+                    has_fake_breakout=has_fake_breakout,
                 )
             )
 
@@ -163,7 +192,7 @@ def export_screen_result_to_csv(result: ScreenResult) -> bytes:
             str(item.ref_buy_price),
             f"{item.trend_score:.1f}",
             item.risk_level.value,
-            str(item.signals),
+            "; ".join(f"{s.category.value}:{s.label}" for s in item.signals),
         ])
 
     # UTF-8 BOM 让 Excel 正确识别中文

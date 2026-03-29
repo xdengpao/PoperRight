@@ -24,7 +24,7 @@ router = APIRouter(prefix="/backtest", tags=["回测"])
 
 
 class BacktestRunRequest(BaseModel):
-    strategy_id: UUID
+    strategy_id: UUID | None = None
     start_date: date
     end_date: date
     initial_capital: float = 1_000_000.0

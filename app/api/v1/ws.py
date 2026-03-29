@@ -43,6 +43,32 @@ def _verify_token(token: str) -> str | None:
         return None
 
 
+import logging
+
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
+
+from app.core.config import settings
+from app.core.security import JWTManager
+from app.core.websocket_manager import ws_manager
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+def _verify_token(token: str) -> str | None:
+    """
+    验证 JWT token，返回 user_id（sub 字段）。
+    验证失败返回 None。
+    使用与 REST 认证相同的 JWTManager 实现。
+    """
+    payload = JWTManager.verify_token(token, settings.jwt_secret_key)
+    if payload is None:
+        logger.warning("WebSocket auth failed: invalid or expired token")
+        return None
+    return payload.get("sub")
+
+
 @router.websocket("/ws/{user_id}")
 async def websocket_endpoint(
     websocket: WebSocket,

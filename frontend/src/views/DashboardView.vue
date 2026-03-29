@@ -124,7 +124,7 @@ interface KlineData {
 
 async function loadKline() {
   try {
-    const res = await apiClient.get<KlineData[]>(`/kline/${symbol.value}`, {
+    const res = await apiClient.get<KlineData[]>(`/data/kline/${symbol.value}`, {
       params: { freq: freq.value, limit: 120 },
     })
     renderKline(res.data)
@@ -186,7 +186,7 @@ const sectors = ref<SectorData[]>([])
 
 async function loadSectors() {
   try {
-    const res = await apiClient.get<SectorData[]>('/market/sectors')
+    const res = await apiClient.get<SectorData[]>('/data/market/sectors')
     sectors.value = res.data
   } catch {
     /* API not available yet */

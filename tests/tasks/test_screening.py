@@ -168,7 +168,7 @@ class TestScreenExecutor:
             assert isinstance(item.ref_buy_price, Decimal)
             assert 0.0 <= item.trend_score <= 100.0
             assert item.risk_level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH)
-            assert isinstance(item.signals, dict)
+            assert isinstance(item.signals, list)
 
     def test_ref_buy_price_from_close(self):
         """买入参考价应取自 close 字段"""
@@ -203,6 +203,8 @@ class TestScreenExecutor:
 
     def test_signals_dict_populated(self):
         """选股结果的 signals 字段应包含因子评估详情"""
+        from app.core.schemas import SignalCategory, SignalDetail
+
         config = _make_strategy_config()
         stocks = {"000001.SZ": {"ma_trend": 85.0, "close": 15.50}}
         executor = ScreenExecutor(config)
@@ -210,8 +212,12 @@ class TestScreenExecutor:
         result = executor.run_eod_screen(stocks)
 
         item = result.items[0]
-        assert "ma_trend" in item.signals
-        assert item.signals["ma_trend"]["passed"] is True
+        assert isinstance(item.signals, list)
+        assert len(item.signals) == 1
+        sig = item.signals[0]
+        assert isinstance(sig, SignalDetail)
+        assert sig.label == "ma_trend"
+        assert sig.category == SignalCategory.MA_TREND
 
 
 # ---------------------------------------------------------------------------

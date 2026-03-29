@@ -27,3 +27,16 @@ router.include_router(backtest_router)
 router.include_router(trade_router)
 router.include_router(review_router)
 router.include_router(admin_router)
+
+
+# ---------------------------------------------------------------------------
+# 兼容路由：/market/overview → /data/market/overview
+# 部分前端页面可能缓存了旧路径，此处做透传兼容
+# ---------------------------------------------------------------------------
+from fastapi.responses import RedirectResponse
+
+
+@router.get("/market/overview", include_in_schema=False)
+async def market_overview_compat():
+    """兼容旧路径，重定向到 /data/market/overview"""
+    return RedirectResponse(url="/api/v1/data/market/overview", status_code=307)

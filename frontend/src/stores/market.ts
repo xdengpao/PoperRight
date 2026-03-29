@@ -23,7 +23,7 @@ export const useMarketStore = defineStore('market', () => {
   async function fetchOverview() {
     loading.value = true
     try {
-      const res = await apiClient.get<MarketOverview>('/market/overview')
+      const res = await apiClient.get<MarketOverview>('/data/market/overview')
       overview.value = res.data
     } finally {
       loading.value = false

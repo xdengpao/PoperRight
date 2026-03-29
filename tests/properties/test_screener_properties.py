@@ -57,6 +57,8 @@ from app.core.schemas import (
     StrategyConfig,
     RiskLevel,
     ScreenType,
+    SignalCategory,
+    SignalDetail,
 )
 
 
@@ -589,6 +591,25 @@ def test_screen_result_field_completeness(data):
         assert item.risk_level in (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH), (
             f"risk_level 应为有效枚举值，实际={item.risk_level}"
         )
+        # signals 是 list[SignalDetail]
+        assert isinstance(item.signals, list), (
+            f"signals 应为 list，实际类型={type(item.signals)}"
+        )
+        for sig in item.signals:
+            assert isinstance(sig, SignalDetail), (
+                f"signals 元素应为 SignalDetail，实际类型={type(sig)}"
+            )
+            assert isinstance(sig.category, SignalCategory), (
+                f"SignalDetail.category 应为 SignalCategory 枚举"
+            )
+            assert isinstance(sig.label, str) and len(sig.label) > 0, (
+                "SignalDetail.label 不应为空"
+            )
+        # has_fake_breakout 与 signals 中 is_fake_breakout 一致
+        expected_fake = any(s.is_fake_breakout for s in item.signals)
+        assert item.has_fake_breakout == expected_fake, (
+            "has_fake_breakout 应与 signals 中 is_fake_breakout 标记一致"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -665,7 +686,6 @@ def strategy_config_strategy(draw):
         logic=logic,
         weights=weights,
         ma_periods=ma_periods,
-        indicator_params={},
     )
 
 
@@ -699,5 +719,10 @@ def test_strategy_serialization_round_trip(config: StrategyConfig):
     # 验证均线周期
     assert deserialized.ma_periods == config.ma_periods
 
-    # 验证指标参数
+    # 验证指标参数（typed config round-trip）
     assert deserialized.indicator_params == config.indicator_params
+
+    # 验证新增子配置 round-trip
+    assert deserialized.ma_trend == config.ma_trend
+    assert deserialized.breakout == config.breakout
+    assert deserialized.volume_price == config.volume_price

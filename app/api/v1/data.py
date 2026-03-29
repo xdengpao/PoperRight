@@ -82,14 +82,28 @@ async def get_market_overview() -> dict:
     """查询大盘概况（指数、涨跌家数、市场情绪等）。"""
     return {
         "date": date.today().isoformat(),
-        "indices": [
-            {"name": "上证指数", "code": "000001", "close": "3150.00", "change_pct": 0.35},
-            {"name": "创业板指", "code": "399006", "close": "2050.00", "change_pct": -0.12},
-        ],
-        "advance_decline": {"up": 2800, "down": 1500, "flat": 200},
-        "limit_stats": {"limit_up": 45, "limit_down": 8},
+        "sh_index": 3150.00,
+        "sh_change_pct": 0.35,
+        "sz_index": 10200.00,
+        "sz_change_pct": 0.22,
+        "cyb_index": 2050.00,
+        "cyb_change_pct": -0.12,
+        "advance_count": 2800,
+        "decline_count": 1500,
+        "limit_up_count": 45,
+        "limit_down_count": 8,
         "market_sentiment": "NORMAL",
     }
+
+
+@router.get("/market/sectors")
+async def get_market_sectors() -> list:
+    """查询板块涨幅排行。"""
+    return [
+        {"name": "半导体", "change_pct": 3.25, "leader": "中芯国际", "amount": 15_800_000_000},
+        {"name": "新能源", "change_pct": 2.10, "leader": "宁德时代", "amount": 12_300_000_000},
+        {"name": "医药生物", "change_pct": -0.85, "leader": "恒瑞医药", "amount": 8_500_000_000},
+    ]
 
 
 @router.get("/sync/status")

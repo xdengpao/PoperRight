@@ -106,7 +106,8 @@
                 </span>
               </td>
               <td class="signals-cell">
-                <span class="signal-count">{{ row.signals.length }} 个信号</span>
+                <span class="signal-count">{{ signalSummary(row.signals) }}</span>
+                <span v-if="row.has_fake_breakout" class="fake-breakout-badge">⚠ 假突破</span>
               </td>
               <td class="time-cell">{{ formatTime(row.screen_time) }}</td>
             </tr>
@@ -116,12 +117,16 @@
                 <div class="detail-panel">
                   <div class="detail-header">触发信号详情</div>
                   <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
-                  <ul v-else class="signal-list">
-                    <li v-for="(sig, idx) in row.signals" :key="idx" class="signal-item">
-                      <span class="signal-dot"></span>
-                      {{ sig }}
-                    </li>
-                  </ul>
+                  <div v-else class="signal-tags">
+                    <span
+                      v-for="(sig, idx) in row.signals"
+                      :key="idx"
+                      :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category]]"
+                    >
+                      {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.label }}
+                      <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
+                    </span>
+                  </div>
                 </div>
               </td>
             </tr>
@@ -142,14 +147,26 @@ import ErrorBanner from '@/components/ErrorBanner.vue'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
+type SignalCategory =
+  | 'MA_TREND' | 'MACD' | 'BOLL' | 'RSI' | 'DMA'
+  | 'BREAKOUT' | 'CAPITAL_INFLOW' | 'LARGE_ORDER'
+  | 'MA_SUPPORT' | 'SECTOR_STRONG'
+
+interface SignalDetail {
+  category: SignalCategory
+  label: string
+  is_fake_breakout: boolean
+}
+
 interface ScreenResultRow {
   symbol: string
   name: string
   ref_buy_price: number
   trend_score: number
   risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
-  signals: string[]
+  signals: SignalDetail[]
   screen_time: string
+  has_fake_breakout: boolean
 }
 
 type SortKey = 'trend_score' | 'risk_level'
@@ -163,6 +180,40 @@ const sortOptions: { key: SortKey; label: string }[] = [
   { key: 'trend_score', label: '趋势评分' },
   { key: 'risk_level', label: '风险等级' },
 ]
+
+// 信号分类 → 颜色 CSS 类
+const SIGNAL_CATEGORY_CLASS: Record<SignalCategory, string> = {
+  MA_TREND:      'sig-ma-trend',
+  MACD:          'sig-indicator',
+  BOLL:          'sig-indicator',
+  RSI:           'sig-indicator',
+  DMA:           'sig-indicator',
+  BREAKOUT:      'sig-breakout',
+  CAPITAL_INFLOW:'sig-capital',
+  LARGE_ORDER:   'sig-large-order',
+  MA_SUPPORT:    'sig-ma-support',
+  SECTOR_STRONG: 'sig-sector',
+}
+
+// 信号分类中文名
+const SIGNAL_CATEGORY_LABEL: Record<SignalCategory, string> = {
+  MA_TREND:      '均线趋势',
+  MACD:          'MACD',
+  BOLL:          'BOLL',
+  RSI:           'RSI',
+  DMA:           'DMA',
+  BREAKOUT:      '形态突破',
+  CAPITAL_INFLOW:'资金流入',
+  LARGE_ORDER:   '大单活跃',
+  MA_SUPPORT:    '均线支撑',
+  SECTOR_STRONG: '板块强势',
+}
+
+function signalSummary(signals: SignalDetail[]): string {
+  if (!signals.length) return '无信号'
+  const cats = [...new Set(signals.map((s) => SIGNAL_CATEGORY_LABEL[s.category] ?? s.category))]
+  return `${signals.length} 个信号：${cats.slice(0, 3).join(' / ')}${cats.length > 3 ? ' …' : ''}`
+}
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
 
@@ -369,8 +420,6 @@ onMounted(() => {
 .risk-medium { background: #3a2a1a; color: #d29922; border: 1px solid #d2992244; }
 .risk-high { background: #3a1a1a; color: #f85149; border: 1px solid #f8514944; }
 
-.signals-cell { color: #8b949e; }
-.signal-count { font-size: 13px; }
 .time-cell { font-size: 12px; color: #484f58; white-space: nowrap; }
 
 /* ─── 展开详情行 ────────────────────────────────────────────────────────────── */
@@ -387,18 +436,45 @@ onMounted(() => {
 }
 .detail-empty { font-size: 13px; color: #484f58; }
 
-.signal-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
-.signal-item {
-  display: flex; align-items: center; gap: 6px;
-  background: #161b22; border: 1px solid #30363d;
-  padding: 4px 12px; border-radius: 4px; font-size: 13px; color: #e6edf3;
-}
-.signal-dot {
-  width: 6px; height: 6px; border-radius: 50%;
-  background: #58a6ff; flex-shrink: 0;
+/* ─── 信号标签 ──────────────────────────────────────────────────────────────── */
+.signal-tags { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.signal-tag {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 500;
+  border: 1px solid transparent;
 }
 
-/* ─── 按钮 ─────────────────────────────────────────────────────────────────── */
+/* 均线趋势 — 蓝色 */
+.sig-ma-trend    { background: #1f3a5f; color: #58a6ff; border-color: #1f6feb44; }
+/* 技术指标 MACD/BOLL/RSI/DMA — 青色 */
+.sig-indicator   { background: #0d2a2a; color: #39d353; border-color: #39d35344; }
+/* 形态突破 — 绿色 */
+.sig-breakout    { background: #1a3a1a; color: #3fb950; border-color: #3fb95044; }
+/* 资金流入 — 橙色 */
+.sig-capital     { background: #3a2a0a; color: #d29922; border-color: #d2992244; }
+/* 大单活跃 — 黄色 */
+.sig-large-order { background: #2a2a0a; color: #e3b341; border-color: #e3b34144; }
+/* 均线支撑 — 紫色 */
+.sig-ma-support  { background: #2a1a3a; color: #bc8cff; border-color: #bc8cff44; }
+/* 板块强势 — 品红 */
+.sig-sector      { background: #3a0a2a; color: #f778ba; border-color: #f778ba44; }
+
+/* 假突破警告标签 */
+.fake-tag {
+  background: #f85149; color: #fff; font-size: 11px; font-weight: 700;
+  padding: 1px 6px; border-radius: 8px; margin-left: 2px;
+}
+
+/* 主行假突破徽章 */
+.fake-breakout-badge {
+  display: inline-block; margin-left: 6px;
+  background: #3a1a1a; color: #f85149; border: 1px solid #f8514944;
+  font-size: 11px; padding: 1px 7px; border-radius: 8px; font-weight: 600;
+}
+
+.signals-cell { color: #8b949e; white-space: nowrap; }
+.signal-count { font-size: 13px; }
 .btn {
   background: #238636; color: #fff; border: none; padding: 7px 16px;
   border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap;
