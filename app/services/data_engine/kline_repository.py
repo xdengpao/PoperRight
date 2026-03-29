@@ -77,7 +77,7 @@ class KlineRepository:
         rows = [
             {
                 "time": b.time,
-                "symbol": b.symbol,
+                "symbol": b.symbol.split(".")[0] if "." in b.symbol else b.symbol,
                 "freq": b.freq,
                 "open": b.open,
                 "high": b.high,

@@ -44,17 +44,33 @@ class MaTrendConfigIn(BaseModel):
     support_ma_lines: list[int] = Field(default_factory=lambda: [20, 60])
 
 
+class MacdParamsIn(BaseModel):
+    fast_period: int = 12
+    slow_period: int = 26
+    signal_period: int = 9
+
+
+class BollParamsIn(BaseModel):
+    period: int = 20
+    std_dev: float = 2.0
+
+
+class RsiParamsIn(BaseModel):
+    period: int = 14
+    lower_bound: int = 50
+    upper_bound: int = 80
+
+
+class DmaParamsIn(BaseModel):
+    short_period: int = 10
+    long_period: int = 50
+
+
 class IndicatorParamsConfigIn(BaseModel):
-    macd_fast: int = 12
-    macd_slow: int = 26
-    macd_signal: int = 9
-    boll_period: int = 20
-    boll_std_dev: float = 2.0
-    rsi_period: int = 14
-    rsi_lower: int = 50
-    rsi_upper: int = 80
-    dma_short: int = 10
-    dma_long: int = 50
+    macd: MacdParamsIn = Field(default_factory=MacdParamsIn)
+    boll: BollParamsIn = Field(default_factory=BollParamsIn)
+    rsi: RsiParamsIn = Field(default_factory=RsiParamsIn)
+    dma: DmaParamsIn = Field(default_factory=DmaParamsIn)
 
 
 class BreakoutConfigIn(BaseModel):
@@ -102,6 +118,13 @@ class StrategyTemplateUpdate(BaseModel):
     name: str | None = None
     config: StrategyConfigIn | None = None
     is_active: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# 内存策略存储（开发阶段，后续替换为数据库）
+# ---------------------------------------------------------------------------
+
+_strategies: dict[str, dict] = {}  # id -> strategy dict
 
 
 # ---------------------------------------------------------------------------
@@ -228,42 +251,67 @@ async def get_eod_schedule_status(
 async def list_strategies(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-) -> dict:
+) -> list:
     """查询当前用户的策略模板列表。"""
-    return {"total": 0, "page": page, "page_size": page_size, "items": []}
+    items = sorted(_strategies.values(), key=lambda s: s.get("created_at", ""), reverse=True)
+    return items
 
 
 @router.post("/strategies", status_code=201)
 async def create_strategy(body: StrategyTemplateIn) -> dict:
     """创建策略模板。"""
-    return {
-        "id": str(uuid4()),
+    sid = str(uuid4())
+    strategy = {
+        "id": sid,
         "name": body.name,
         "config": body.config.model_dump(),
         "is_active": body.is_active,
         "created_at": datetime.now().isoformat(),
     }
+    _strategies[sid] = strategy
+    return strategy
 
 
 @router.get("/strategies/{strategy_id}")
 async def get_strategy(strategy_id: UUID) -> dict:
     """查询单个策略模板详情。"""
-    return {"id": str(strategy_id), "name": "stub", "config": {}, "is_active": False}
+    sid = str(strategy_id)
+    if sid not in _strategies:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return _strategies[sid]
 
 
 @router.put("/strategies/{strategy_id}")
 async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> dict:
     """更新策略模板。"""
-    return {"id": str(strategy_id), "updated": True}
+    sid = str(strategy_id)
+    if sid not in _strategies:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="策略不存在")
+    s = _strategies[sid]
+    if body.name is not None:
+        s["name"] = body.name
+    if body.config is not None:
+        s["config"] = body.config.model_dump()
+    if body.is_active is not None:
+        s["is_active"] = body.is_active
+    return s
 
 
 @router.delete("/strategies/{strategy_id}")
 async def delete_strategy(strategy_id: UUID) -> dict:
     """删除策略模板。"""
-    return {"id": str(strategy_id), "deleted": True}
+    sid = str(strategy_id)
+    if sid in _strategies:
+        del _strategies[sid]
+    return {"id": sid, "deleted": True}
 
 
 @router.post("/strategies/{strategy_id}/activate")
 async def activate_strategy(strategy_id: UUID) -> dict:
     """激活指定策略模板（将其他策略设为非激活）。"""
-    return {"id": str(strategy_id), "is_active": True}
+    sid = str(strategy_id)
+    for s in _strategies.values():
+        s["is_active"] = (s["id"] == sid)
+    return {"id": sid, "is_active": True}

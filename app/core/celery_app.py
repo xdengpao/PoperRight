@@ -99,4 +99,11 @@ celery_app.conf.beat_schedule = {
         "schedule": 10.0,  # 每 10 秒
         "options": {"queue": "data_sync"},
     },
+
+    # 每日增量 K 线同步：每个交易日 16:00 执行（需求 25.13）
+    "daily-kline-sync-1600": {
+        "task": "app.tasks.data_sync.sync_daily_kline",
+        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+        "options": {"queue": "data_sync"},
+    },
 }

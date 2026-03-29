@@ -38,9 +38,12 @@ graph TD
 
     subgraph 数据接入层
         N[DataEngine 数据引擎]
-        O[行情数据适配器]
+        N0[DataSourceRouter 数据源路由]
+        O1[TushareAdapter 主数据源]
+        O2[AkShareAdapter 备用数据源]
         P[基本面数据适配器]
         Q[资金数据适配器]
+        FC[FormatConverter 格式转换层]
     end
 
     subgraph 存储层
@@ -50,7 +53,8 @@ graph TD
     end
 
     subgraph 外部接口层
-        U[第三方行情 API]
+        U1[Tushare API 主数据源]
+        U2[AkShare SDK 备用数据源]
         V[券商交易 API]
     end
 
@@ -61,10 +65,19 @@ graph TD
     C --> K
     C --> L
     E --> M
-    N --> O
+    N --> N0
+    N0 --> O1
+    N0 --> O2
     N --> P
     N --> Q
-    O --> U
+    O1 --> FC
+    O2 --> FC
+    O1 --> U1
+    O2 --> U2
+    P --> U1
+    P --> U2
+    Q --> U1
+    Q --> U2
     F --> V
     N --> R
     C --> R
@@ -98,7 +111,8 @@ graph LR
     end
 
     subgraph 外部服务
-        DataAPI[行情数据 API]
+        Tushare[Tushare API 主数据源]
+        AkShare[AkShare SDK 备用数据源]
         BrokerAPI[券商 API]
     end
 
@@ -111,7 +125,8 @@ graph LR
     Celery --> PG
     Celery --> Redis
     Beat --> Celery
-    Celery --> DataAPI
+    Celery --> Tushare
+    Celery --> AkShare
     FastAPI --> BrokerAPI
 ```
 
@@ -121,18 +136,342 @@ graph LR
 
 ### 1. DataEngine（数据引擎）
 
-负责所有外部数据的接入、清洗、存储。
+负责所有外部数据的接入、清洗、存储。采用 Tushare 为主数据源、AkShare 为备用数据源的双源架构，通过统一的数据源管理器（DataSourceRouter）实现自动故障转移和格式归一化。
+
+#### 1a. 数据源配置（需求 1.7, 1.8）
+
+数据源相关配置通过 pydantic-settings 从 `.env` 文件读取，代码中不得硬编码任何 API 凭证或地址。
+
+```python
+# app/core/config.py 新增字段
+class Settings(BaseSettings):
+    # ... 已有字段 ...
+
+    # Tushare 数据源配置（需求 1.7）
+    tushare_api_token: str = ""                          # Tushare API Token
+    tushare_api_url: str = "http://api.tushare.pro"      # Tushare API 地址
+
+    # AkShare 数据源配置（需求 1.8）
+    akshare_request_timeout: float = 30.0                # AkShare 请求超时时间（秒）
+    akshare_max_retries: int = 3                         # AkShare 最大重试次数
+```
+
+#### 1b. 数据源适配器抽象层
+
+所有数据源适配器实现统一的抽象接口，便于故障转移时无缝切换：
+
+```python
+from abc import ABC, abstractmethod
+
+class BaseDataSourceAdapter(ABC):
+    """数据源适配器抽象基类"""
+
+    @abstractmethod
+    async def fetch_kline(self, symbol: str, freq: str, start: date, end: date) -> list[KlineBar]: ...
+
+    @abstractmethod
+    async def fetch_fundamentals(self, symbol: str) -> FundamentalsData: ...
+
+    @abstractmethod
+    async def fetch_money_flow(self, symbol: str, trade_date: date) -> MoneyFlowData: ...
+
+    @abstractmethod
+    async def fetch_market_overview(self, trade_date: date) -> MarketOverview: ...
+
+    @abstractmethod
+    async def health_check(self) -> bool: ...
+```
+
+#### 1c. TushareAdapter（主数据源适配器）
+
+通过 HTTP API + Token 认证方式访问 Tushare 平台，负责 K 线行情、财务报表、资金流向数据获取。
+
+```python
+class TushareAdapter(BaseDataSourceAdapter):
+    """
+    Tushare 数据源适配器（主数据源）
+
+    - 通过 settings.tushare_api_token 和 settings.tushare_api_url 访问
+    - 提供 K 线、财务报表、资金流向、市场概览数据
+    - 返回数据经 TushareFormatConverter 转换为统一 KlineBar 结构
+    """
+
+    def __init__(self, api_token: str | None = None, api_url: str | None = None) -> None:
+        self._api_token = api_token or settings.tushare_api_token
+        self._api_url = api_url or settings.tushare_api_url
+        self._converter = TushareFormatConverter()
+
+    async def fetch_kline(self, symbol: str, freq: str, start: date, end: date) -> list[KlineBar]:
+        raw = await self._call_api("daily", ts_code=symbol, start_date=start, end_date=end)
+        return self._converter.to_kline_bars(raw, symbol, freq)
+
+    async def fetch_fundamentals(self, symbol: str) -> FundamentalsData:
+        raw = await self._call_api("fina_indicator", ts_code=symbol)
+        return self._converter.to_fundamentals(raw, symbol)
+
+    async def fetch_money_flow(self, symbol: str, trade_date: date) -> MoneyFlowData:
+        raw = await self._call_api("moneyflow", ts_code=symbol, trade_date=trade_date)
+        return self._converter.to_money_flow(raw, symbol, trade_date)
+
+    async def fetch_market_overview(self, trade_date: date) -> MarketOverview:
+        raw = await self._call_api("index_daily", trade_date=trade_date)
+        return self._converter.to_market_overview(raw, trade_date)
+
+    async def health_check(self) -> bool:
+        try:
+            await self._call_api("trade_cal", exchange="SSE", is_open=1)
+            return True
+        except Exception:
+            return False
+
+    async def _call_api(self, api_name: str, **params) -> dict:
+        """调用 Tushare HTTP API"""
+        ...
+```
+
+#### 1d. AkShareAdapter（备用数据源适配器）
+
+通过 Python SDK 方式调用 AkShare 开源库，作为 Tushare 不可用时的备用数据源。
+
+```python
+class AkShareAdapter(BaseDataSourceAdapter):
+    """
+    AkShare 数据源适配器（备用数据源）
+
+    - 通过 akshare Python SDK 调用，超时时间从 settings.akshare_request_timeout 读取
+    - 提供 K 线行情、资金流向、板块数据、市场情绪数据
+    - 返回数据经 AkShareFormatConverter 转换为统一 KlineBar 结构
+    """
+
+    def __init__(self, timeout: float | None = None) -> None:
+        self._timeout = timeout or settings.akshare_request_timeout
+        self._converter = AkShareFormatConverter()
+
+    async def fetch_kline(self, symbol: str, freq: str, start: date, end: date) -> list[KlineBar]:
+        # 在线程池中执行同步 akshare 调用
+        raw_df = await asyncio.to_thread(
+            ak.stock_zh_a_hist, symbol=symbol, period="daily",
+            start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d"),
+            timeout=self._timeout,
+        )
+        return self._converter.to_kline_bars(raw_df, symbol, freq)
+
+    async def fetch_fundamentals(self, symbol: str) -> FundamentalsData:
+        raw_df = await asyncio.to_thread(
+            ak.stock_financial_analysis_indicator, symbol=symbol,
+            timeout=self._timeout,
+        )
+        return self._converter.to_fundamentals(raw_df, symbol)
+
+    async def fetch_money_flow(self, symbol: str, trade_date: date) -> MoneyFlowData:
+        raw_df = await asyncio.to_thread(
+            ak.stock_individual_fund_flow, stock=symbol, market="sh",
+            timeout=self._timeout,
+        )
+        return self._converter.to_money_flow(raw_df, symbol, trade_date)
+
+    async def fetch_market_overview(self, trade_date: date) -> MarketOverview:
+        raw_df = await asyncio.to_thread(
+            ak.stock_zh_index_daily, symbol="sh000001",
+            timeout=self._timeout,
+        )
+        return self._converter.to_market_overview(raw_df, trade_date)
+
+    async def health_check(self) -> bool:
+        try:
+            await asyncio.to_thread(ak.stock_zh_a_spot_em, timeout=self._timeout)
+            return True
+        except Exception:
+            return False
+```
+
+#### 1e. DataSourceRouter（数据源路由与故障转移管理器）
+
+统一管理 Tushare 和 AkShare 两个数据源，实现优先使用 Tushare、失败自动切换 AkShare 的故障转移逻辑（需求 1.9, 1.10）。
+
+```python
+class DataSourceRouter:
+    """
+    数据源路由器
+
+    - 所有数据请求优先通过 Tushare 获取（需求 1.1）
+    - Tushare 调用失败时自动切换至 AkShare（需求 1.9）
+    - 两个数据源均不可用时记录错误日志并推送告警，停止同步（需求 1.10）
+    """
+
+    def __init__(
+        self,
+        tushare: TushareAdapter | None = None,
+        akshare: AkShareAdapter | None = None,
+        alert_service: AlertService | None = None,
+    ) -> None:
+        self._primary = tushare or TushareAdapter()
+        self._fallback = akshare or AkShareAdapter()
+        self._alert_service = alert_service
+
+    async def fetch_with_fallback(
+        self,
+        method_name: str,
+        *args,
+        **kwargs,
+    ) -> Any:
+        """
+        带故障转移的数据获取。
+
+        1. 优先调用 Tushare（主数据源）
+        2. Tushare 失败 → 自动切换 AkShare（备用数据源）
+        3. 两者均失败 → 记录错误日志 + 推送告警 + 抛出 DataSourceUnavailableError
+        """
+        # 尝试主数据源（Tushare）
+        try:
+            primary_method = getattr(self._primary, method_name)
+            return await primary_method(*args, **kwargs)
+        except Exception as primary_err:
+            logger.warning(
+                "Tushare 数据源调用失败 method=%s: %s，切换至 AkShare",
+                method_name, primary_err,
+            )
+
+        # 尝试备用数据源（AkShare）
+        try:
+            fallback_method = getattr(self._fallback, method_name)
+            return await fallback_method(*args, **kwargs)
+        except Exception as fallback_err:
+            logger.error(
+                "Tushare 和 AkShare 均不可用 method=%s: primary=%s fallback=%s",
+                method_name, primary_err, fallback_err,
+            )
+            # 推送数据源异常告警（需求 1.10）
+            if self._alert_service:
+                await self._alert_service.push_alert(
+                    user_id="system",
+                    alert=Alert(
+                        type="SYSTEM",
+                        level="DANGER",
+                        message=f"数据源异常：Tushare 和 AkShare 均不可用（{method_name}）",
+                    ),
+                )
+            raise DataSourceUnavailableError(
+                f"所有数据源不可用: {method_name}"
+            ) from fallback_err
+
+    async def fetch_kline(self, symbol: str, freq: str, start: date, end: date) -> list[KlineBar]:
+        return await self.fetch_with_fallback("fetch_kline", symbol, freq, start, end)
+
+    async def fetch_fundamentals(self, symbol: str) -> FundamentalsData:
+        return await self.fetch_with_fallback("fetch_fundamentals", symbol)
+
+    async def fetch_money_flow(self, symbol: str, trade_date: date) -> MoneyFlowData:
+        return await self.fetch_with_fallback("fetch_money_flow", symbol, trade_date)
+
+    async def fetch_market_overview(self, trade_date: date) -> MarketOverview:
+        return await self.fetch_with_fallback("fetch_market_overview", trade_date)
+
+
+class DataSourceUnavailableError(Exception):
+    """所有数据源均不可用时抛出"""
+    pass
+```
+
+#### 1f. 统一格式转换层（需求 1.11）
+
+Tushare 和 AkShare 返回的数据字段名称和数据类型不同，通过各自的 FormatConverter 统一映射为系统内部 KlineBar 数据结构。
+
+```python
+class TushareFormatConverter:
+    """
+    Tushare 数据格式转换器
+
+    将 Tushare API 返回的 DataFrame/dict 字段映射为系统内部统一结构。
+    Tushare 字段示例：ts_code, trade_date, open, high, low, close, vol, amount
+    """
+
+    def to_kline_bars(self, raw: dict, symbol: str, freq: str) -> list[KlineBar]:
+        items = raw.get("items", [])
+        fields = raw.get("fields", [])
+        bars = []
+        for row in items:
+            row_dict = dict(zip(fields, row))
+            bars.append(KlineBar(
+                time=datetime.strptime(str(row_dict["trade_date"]), "%Y%m%d"),
+                symbol=symbol,
+                freq=freq,
+                open=Decimal(str(row_dict.get("open", 0))),
+                high=Decimal(str(row_dict.get("high", 0))),
+                low=Decimal(str(row_dict.get("low", 0))),
+                close=Decimal(str(row_dict.get("close", 0))),
+                volume=int(row_dict.get("vol", 0)),
+                amount=Decimal(str(row_dict.get("amount", 0))) * 1000,  # Tushare 单位为千元
+                turnover=Decimal(str(row_dict.get("turnover_rate", 0))),
+                vol_ratio=Decimal(str(row_dict.get("volume_ratio", 0))),
+                limit_up=None,
+                limit_down=None,
+                adj_type=0,
+            ))
+        return bars
+
+    def to_fundamentals(self, raw: dict, symbol: str) -> FundamentalsData: ...
+    def to_money_flow(self, raw: dict, symbol: str, trade_date: date) -> MoneyFlowData: ...
+    def to_market_overview(self, raw: dict, trade_date: date) -> MarketOverview: ...
+
+
+class AkShareFormatConverter:
+    """
+    AkShare 数据格式转换器
+
+    将 AkShare SDK 返回的 pandas DataFrame 字段映射为系统内部统一结构。
+    AkShare 字段示例：日期, 开盘, 最高, 最低, 收盘, 成交量, 成交额, 换手率
+    """
+
+    def to_kline_bars(self, df: "pd.DataFrame", symbol: str, freq: str) -> list[KlineBar]:
+        bars = []
+        for _, row in df.iterrows():
+            bars.append(KlineBar(
+                time=datetime.strptime(str(row["日期"]), "%Y-%m-%d"),
+                symbol=symbol,
+                freq=freq,
+                open=Decimal(str(row.get("开盘", 0))),
+                high=Decimal(str(row.get("最高", 0))),
+                low=Decimal(str(row.get("最低", 0))),
+                close=Decimal(str(row.get("收盘", 0))),
+                volume=int(row.get("成交量", 0)),
+                amount=Decimal(str(row.get("成交额", 0))),
+                turnover=Decimal(str(row.get("换手率", 0))),
+                vol_ratio=Decimal("0"),  # AkShare 不直接提供量比
+                limit_up=None,
+                limit_down=None,
+                adj_type=0,
+            ))
+        return bars
+
+    def to_fundamentals(self, df: "pd.DataFrame", symbol: str) -> FundamentalsData: ...
+    def to_money_flow(self, df: "pd.DataFrame", symbol: str, trade_date: date) -> MoneyFlowData: ...
+    def to_market_overview(self, df: "pd.DataFrame", trade_date: date) -> MarketOverview: ...
+```
+
+#### 1g. DataEngine 核心接口（更新）
 
 **核心接口：**
 
 ```python
 class DataEngine:
-    async def fetch_kline(symbol: str, freq: str, start: date, end: date) -> list[KlineBar]
-    async def fetch_fundamentals(symbol: str) -> FundamentalsData
-    async def fetch_money_flow(symbol: str, date: date) -> MoneyFlowData
-    async def fetch_market_overview(date: date) -> MarketOverview
-    def clean_and_store(raw_data: RawData) -> CleanResult
-    def get_adjusted_price(symbol: str, adj_type: AdjType) -> list[KlineBar]
+    def __init__(self, router: DataSourceRouter | None = None) -> None:
+        self._router = router or DataSourceRouter()
+
+    async def fetch_kline(self, symbol: str, freq: str, start: date, end: date) -> list[KlineBar]:
+        return await self._router.fetch_kline(symbol, freq, start, end)
+
+    async def fetch_fundamentals(self, symbol: str) -> FundamentalsData:
+        return await self._router.fetch_fundamentals(symbol)
+
+    async def fetch_money_flow(self, symbol: str, date: date) -> MoneyFlowData:
+        return await self._router.fetch_money_flow(symbol, date)
+
+    async def fetch_market_overview(self, date: date) -> MarketOverview:
+        return await self._router.fetch_market_overview(date)
+
+    def clean_and_store(self, raw_data: RawData) -> CleanResult: ...
+    def get_adjusted_price(self, symbol: str, adj_type: AdjType) -> list[KlineBar]: ...
 ```
 
 **数据清洗规则执行器：**
@@ -708,9 +1047,11 @@ MainLayout 行为：
 ```typescript
 // 数据同步状态
 interface SyncStatus {
-  source: string          // 数据源名称
+  source: string          // 数据源名称（Tushare / AkShare）
+  data_type: string       // 数据类型（行情 / 基本面 / 资金流向 / 市场概览）
   last_sync_at: string    // 最后同步时间
-  status: 'OK' | 'ERROR' | 'SYNCING'
+  status: 'OK' | 'ERROR' | 'SYNCING' | 'FALLBACK'  // FALLBACK 表示正在使用备用源
+  active_source: 'tushare' | 'akshare'  // 当前活跃数据源
   record_count: number    // 已同步记录数
 }
 
@@ -724,7 +1065,8 @@ interface ExclusionItem {
 ```
 
 页面功能：
-- 展示各数据源同步状态表格（行情、基本面、资金流向）
+- 展示各数据源同步状态表格（行情、基本面、资金流向），每行标注当前活跃数据源（Tushare 主 / AkShare 备）
+- 当数据源处于 FALLBACK 状态时，以黄色警告样式标注"已切换至备用源"
 - 手动触发数据同步按钮（调用 `POST /api/v1/data/sync`）
 - 查看数据清洗结果统计和永久剔除名单列表
 
@@ -898,6 +1240,108 @@ interface FullStrategyConfig {
   // 量价资金筛选配置（新增 → 需求 6）
   volume_price: VolumePriceConfig
 }
+```
+
+##### 4i. 策略模板编辑与激活交互（需求 22 → 需求 7.2, 7.3）
+
+选股策略页面当前缺少策略编辑回显、保存修改、服务端激活切换功能，需补充以下交互逻辑：
+
+**策略选中与配置回显：**
+
+```typescript
+// 选中策略后加载配置并回填到各面板
+async function selectStrategy(id: string) {
+  if (activeStrategyId.value === id) {
+    activeStrategyId.value = ''
+    resetToDefaults()  // 取消选中时恢复默认配置
+    return
+  }
+  activeStrategyId.value = id
+  try {
+    const res = await apiClient.get<StrategyTemplate>(`/strategies/${id}`)
+    const cfg = res.data.config as FullStrategyConfig
+    // 回填因子条件编辑器
+    config.logic = cfg.logic ?? 'AND'
+    config.factors = (cfg.factors ?? []).map(f => ({
+      type: f.type ?? 'technical',
+      factor_name: f.factor_name,
+      operator: f.operator,
+      threshold: f.threshold,
+      weight: (cfg.weights?.[f.factor_name] ?? 0.5) * 100,
+    }))
+    // 回填均线趋势配置
+    Object.assign(maTrend, cfg.ma_trend ?? {})
+    // 回填技术指标配置
+    if (cfg.indicator_params) {
+      Object.assign(indicatorParams.macd, cfg.indicator_params.macd ?? {})
+      Object.assign(indicatorParams.boll, cfg.indicator_params.boll ?? {})
+      Object.assign(indicatorParams.rsi, cfg.indicator_params.rsi ?? {})
+      Object.assign(indicatorParams.dma, cfg.indicator_params.dma ?? {})
+    }
+    // 回填形态突破配置
+    Object.assign(breakoutConfig, cfg.breakout ?? {})
+    // 回填量价资金筛选配置
+    Object.assign(volumePriceConfig, cfg.volume_price ?? {})
+    // 调用激活接口
+    await apiClient.post(`/strategies/${id}/activate`)
+    await loadStrategies()  // 刷新列表以更新 is_active 状态
+  } catch (e) {
+    pageError.value = '加载策略配置失败'
+  }
+}
+```
+
+**保存修改功能：**
+
+```typescript
+// 保存当前编辑面板配置到已选中策略
+async function saveStrategy() {
+  if (!activeStrategyId.value) return
+  try {
+    await apiClient.put(`/strategies/${activeStrategyId.value}`, {
+      config: buildStrategyConfig(),
+    })
+    await loadStrategies()
+    // 显示保存成功提示
+  } catch (e) {
+    pageError.value = '保存策略失败'
+  }
+}
+```
+
+**策略名称修改功能：**
+
+```typescript
+// 修改策略名称
+async function renameStrategy(id: string, newName: string) {
+  try {
+    await apiClient.put(`/strategies/${id}`, { name: newName })
+    await loadStrategies()
+  } catch (e) {
+    pageError.value = '修改策略名称失败'
+  }
+}
+```
+
+**导入策略前端上限校验：**
+
+```typescript
+// 导入前校验策略数量上限
+async function onImportFile(event: Event) {
+  // ... 文件读取逻辑 ...
+  if (strategies.value.length >= MAX_STRATEGIES) {
+    pageError.value = '已达策略上限（20 套），请删除旧策略后再导入'
+    return
+  }
+  // ... 调用 POST /strategies ...
+}
+```
+
+UI 变更：
+- 策略模板列表中选中策略后，各配置面板自动回填该策略的参数
+- 在因子编辑器区块底部新增"💾 保存修改"按钮（仅当有策略选中时显示）
+- 策略列表项增加"✏️ 重命名"按钮，点击弹出重命名对话框
+- 选中策略时调用 `POST /strategies/{id}/activate` 同步服务端激活状态
 ```
 
 #### 5. 选股结果页面（ScreenerResultsView）
@@ -1634,14 +2078,74 @@ interface StrategyTemplate {
 
 ---
 
+### 属性 46：策略配置回显 round-trip 正确性
+
+*对任意*已保存的策略模板，选中该策略后，前端各配置面板（因子条件、均线趋势、技术指标、形态突破、量价资金）回显的参数值应与后端存储的策略配置完全一致；修改参数后保存，再次选中该策略，回显的参数值应与最近一次保存的值完全一致。
+
+**验证需求：22.1, 22.2**
+
+---
+
+### 属性 47：策略激活状态服务端同步正确性
+
+*对任意*用户，在选股策略页面选中一个策略后，服务端应将该策略标记为活跃（is_active=true），其余策略标记为非活跃（is_active=false）；刷新页面后，活跃策略的选中状态应与服务端一致。
+
+**验证需求：22.3**
+
+---
+
+### 属性 48：导入策略前端上限校验正确性
+
+*对任意*用户，当其已保存策略数量达到 20 套时，通过导入功能上传策略 JSON 文件应被前端拦截并显示上限提示，不应发起后端创建请求。
+
+**验证需求：22.4**
+
+---
+
+### 属性 49：数据源配置驱动初始化
+
+*对任意*有效的 Tushare API Token、Tushare API 地址、AkShare 请求超时时间配置值，TushareAdapter 应使用 Settings 中配置的 `tushare_api_token` 和 `tushare_api_url` 进行初始化，AkShareAdapter 应使用 Settings 中配置的 `akshare_request_timeout` 进行初始化，两个适配器均不应包含硬编码的 API 凭证或地址。
+
+**验证需求：1.7, 1.8**
+
+---
+
+### 属性 50：Tushare 失败自动切换 AkShare
+
+*对任意*数据请求类型（K 线、基本面、资金流向、市场概览）和任意请求参数，当 Tushare 主数据源调用失败时，DataSourceRouter 应自动切换至 AkShare 备用数据源获取同类数据；若 AkShare 返回有效数据，则整体请求应成功返回，不向调用方暴露 Tushare 的失败。
+
+**验证需求：1.9**
+
+---
+
+### 属性 51：双数据源均不可用时的错误处理
+
+*对任意*数据请求，当 Tushare 和 AkShare 两个数据源均不可用时，DataSourceRouter 应抛出 DataSourceUnavailableError 异常，且在抛出前应记录包含两个数据源错误信息的错误日志，并推送 DANGER 级别的数据源异常告警通知。
+
+**验证需求：1.10**
+
+---
+
+### 属性 52：统一格式转换不变量
+
+*对任意*有效的 Tushare 原始数据或 AkShare 原始数据，经过各自的 FormatConverter 转换后，输出的 KlineBar 对象应满足：所有必填字段（time、symbol、freq、open、high、low、close、volume、amount）均不为 None，且 high ≥ low，且 open/high/low/close 均为正数。无论数据来自哪个数据源，转换后的 KlineBar 结构应完全一致。
+
+**验证需求：1.11**
+
+---
+
 ## 错误处理
 
 ### 数据层错误
 
 | 错误场景 | 处理策略 |
 |---|---|
-| 行情数据接口超时/断连 | 自动重试（指数退避，最多 3 次），超时后切换备用数据源，推送系统告警 |
+| Tushare API 调用失败/超时 | 记录警告日志，自动切换至 AkShare 备用数据源获取同类数据（需求 1.9） |
+| AkShare SDK 调用失败/超时 | 记录错误日志，若 Tushare 也不可用则推送数据源异常告警并停止同步（需求 1.10） |
+| Tushare 和 AkShare 均不可用 | 记录错误日志，推送 DANGER 级别告警通知，停止对应数据类型的同步任务直至数据源恢复（需求 1.10） |
+| Tushare API Token 无效/过期 | 返回认证错误，记录日志，自动切换至 AkShare，推送配置异常告警 |
 | 数据格式异常/字段缺失 | 记录错误日志，跳过该条数据，不影响其他数据处理 |
+| 格式转换失败（Tushare/AkShare → KlineBar） | 记录转换错误详情，跳过该条数据，不影响批量处理 |
 | 时序数据库写入失败 | 写入 Redis 缓冲队列，异步重试，保证数据最终一致性 |
 | 除权数据缺失 | 标记该股票复权数据不可用，选股时跳过该股票并记录警告 |
 
@@ -1735,8 +2239,8 @@ def test_data_cleaning_invariant(stocks):
 ### 各模块测试重点
 
 **DataEngine（数据引擎）**
-- 属性测试：属性 1（清洗过滤）、属性 2（复权连续性）、属性 3（插值完整性）、属性 4（归一化范围）
-- 单元测试：各数据适配器的解析逻辑、除权因子计算示例
+- 属性测试：属性 1（清洗过滤）、属性 2（复权连续性）、属性 3（插值完整性）、属性 4（归一化范围）、属性 49（配置驱动初始化）、属性 50（Tushare→AkShare 故障转移）、属性 51（双源不可用错误处理）、属性 52（统一格式转换不变量）
+- 单元测试：TushareAdapter 各接口调用示例、AkShareAdapter 各接口调用示例、DataSourceRouter 故障转移链路示例、TushareFormatConverter 字段映射示例、AkShareFormatConverter 字段映射示例、除权因子计算示例
 
 **StockScreener（选股引擎）**
 - 属性测试：属性 5（均线计算）、属性 6（打分范围）、属性 7（指标信号）、属性 8（逻辑运算）、属性 9（突破判定）、属性 10（量价筛选）、属性 11（资金信号）、属性 12（字段完整性）、属性 13（策略序列化）
@@ -1801,9 +2305,1805 @@ test('角色菜单动态渲染正确性', () => {
 ### 集成测试
 
 - 数据接入 → 选股 → 风控 → 预警全链路集成测试
+- Tushare 主数据源 → 故障切换 AkShare → 格式转换 → 入库全链路集成测试
+- Tushare + AkShare 双源不可用 → 告警推送 → 同步任务停止全链路集成测试
 - 选股 → 下单 → 持仓同步全链路集成测试
 - 回测 → 参数优化 → 过拟合检测全链路集成测试
 - 登录 → 路由守卫 → 角色菜单渲染 → 页面访问全链路集成测试
 - WebSocket 连接 → 预警推送 → 通知弹窗 → 跳转详情全链路集成测试
 - 选股策略配置（均线/指标/突破/量价面板）→ 保存策略 → 执行选股 → 结果信号分类展示全链路集成测试
 - 实时选股开关开启 → 交易时段自动刷新 → 非交易时段自动禁用全链路集成测试
+
+---
+
+## 因子条件编辑器交互优化与配置数据源统一（需求 23）
+
+### 概述
+
+因子条件编辑器原有设计中，因子名称为自由文本输入，且存在多个配置参数的双数据源问题（因子编辑器区块和专项配置面板各自维护独立的 reactive 变量）。本次优化将因子名称改为按类型分组的枚举下拉选择，并统一配置参数的数据源。
+
+### 因子名称枚举定义
+
+```typescript
+/** 每个因子类型下可选的因子名称枚举 */
+const factorNameOptions: Record<FactorType, { value: string; label: string }[]> = {
+  technical: [
+    { value: 'ma_trend', label: '均线趋势评分' },
+    { value: 'macd_signal', label: 'MACD 多头信号' },
+    { value: 'boll_breakout', label: 'BOLL 突破信号' },
+    { value: 'rsi_strength', label: 'RSI 强势信号' },
+    { value: 'dma_signal', label: 'DMA 信号' },
+    { value: 'ma_support', label: '均线支撑信号' },
+    { value: 'box_breakout', label: '箱体突破' },
+    { value: 'high_breakout', label: '前高突破' },
+    { value: 'trendline_breakout', label: '趋势线突破' },
+    { value: 'breakout_score', label: '突破综合评分' },
+  ],
+  capital: [
+    { value: 'capital_inflow', label: '主力资金净流入' },
+    { value: 'large_order_ratio', label: '大单成交占比' },
+    { value: 'north_inflow', label: '北向资金流入' },
+    { value: 'volume_surge', label: '成交量放大倍数' },
+    { value: 'turnover_rate', label: '换手率' },
+  ],
+  fundamental: [
+    { value: 'pe_ttm', label: 'PE（TTM）' },
+    { value: 'pb', label: 'PB' },
+    { value: 'roe', label: 'ROE' },
+    { value: 'net_profit_growth', label: '净利润同比增长率' },
+    { value: 'revenue_growth', label: '营收同比增长率' },
+    { value: 'market_cap', label: '总市值' },
+  ],
+  sector: [
+    { value: 'sector_rank', label: '板块涨幅排名' },
+    { value: 'sector_trend', label: '板块趋势强度' },
+    { value: 'sector_inflow', label: '板块资金流入' },
+    { value: 'sector_count', label: '板块涨停家数' },
+  ],
+}
+```
+
+### 因子名称选择交互
+
+- 因子名称输入控件从 `<input>` 改为 `<select>`，选项根据当前因子类型动态过滤
+- 切换因子类型时自动重置因子名称为该类型的第一个选项
+- 添加因子时默认选中对应类型的第一个因子名称
+
+### 因子类型持久化与向后兼容
+
+- `buildStrategyConfig()` 保存时保留因子的 `type` 字段（不再剥离）
+- 加载旧配置时，若 `type` 字段缺失，通过 `inferFactorType(factor_name)` 从因子名称反查所属类型
+- `inferFactorType` 遍历 `factorNameOptions` 查找匹配的因子名称，未找到时默认返回 `'technical'`
+
+### 配置数据源统一
+
+消除以下双数据源问题：
+
+| 原有双数据源 | 统一后的单一数据源 |
+|---|---|
+| `config.maPeriods`（逗号分隔字符串输入框）+ `maTrend.ma_periods`（标签输入组件） | 仅保留 `maTrend.ma_periods`，`buildStrategyConfig()` 的 `ma_periods` 直接读取 `maTrend.ma_periods` |
+| `config.trendThreshold`（数值输入框）+ `maTrend.trend_score_threshold`（滑块） | 仅保留 `maTrend.trend_score_threshold`，移除因子编辑器区块中的独立输入框 |
+
+### 后端 API 兼容性调整
+
+后端 `IndicatorParamsConfigIn` Pydantic 模型从扁平结构改为嵌套结构，匹配前端发送的 JSON 格式：
+
+```python
+class IndicatorParamsConfigIn(BaseModel):
+    macd: MacdParamsIn = Field(default_factory=MacdParamsIn)
+    boll: BollParamsIn = Field(default_factory=BollParamsIn)
+    rsi: RsiParamsIn = Field(default_factory=RsiParamsIn)
+    dma: DmaParamsIn = Field(default_factory=DmaParamsIn)
+```
+
+策略 CRUD 端点改为内存存储（开发阶段），使创建的策略能被列表和详情接口正确返回。
+
+
+---
+
+## 数据管理页面与双数据源服务适配完善（需求 24）
+
+### 概述
+
+当前数据管理页面（DataManageView）存在以下不足：
+1. 无法查看 Tushare / AkShare 两个数据源的实时连通状态
+2. 同步状态表格不显示实际使用的数据源和故障转移信息
+3. 手动同步只能触发全部任务，不支持按数据类型单独同步
+4. 数据清洗统计区域使用硬编码静态数值，未从数据库查询真实数据
+
+本次设计新增 2 个 API 端点（`GET /data/sources/health`、`GET /data/cleaning/stats`），更新 2 个现有端点（`GET /data/sync/status`、`POST /data/sync`），并在前端 DataManageView 中新增健康状态卡片、同步类型选择器、API 驱动的清洗统计。
+
+### 架构
+
+#### 数据流概览
+
+```mermaid
+sequenceDiagram
+    participant FE as DataManageView
+    participant API as FastAPI /data/*
+    participant TS as TushareAdapter
+    participant AK as AkShareAdapter
+    participant Redis as Redis Cache
+    participant Celery as Celery Tasks
+    participant DB as PostgreSQL
+
+    Note over FE: 页面加载
+    FE->>API: GET /data/sources/health
+    API->>TS: health_check()
+    API->>AK: health_check()
+    TS-->>API: True/False (异常→False)
+    AK-->>API: True/False (异常→False)
+    API-->>FE: DataSourceHealthResponse
+
+    FE->>API: GET /data/sync/status
+    API->>Redis: GET sync:status:*
+    Redis-->>API: 各类型同步状态 (含 data_source, is_fallback)
+    API-->>FE: SyncStatusResponse (含新字段)
+
+    FE->>API: GET /data/cleaning/stats
+    API->>DB: SELECT COUNT(*) FROM stock_info / permanent_exclusion
+    DB-->>API: 统计数据
+    API-->>FE: CleaningStatsResponse
+
+    FE->>API: POST /data/sync {sync_type: "fundamentals"}
+    API->>Celery: sync_fundamentals.delay()
+    Celery-->>API: task_id
+    API-->>FE: {task_id, message}
+```
+
+#### 手动同步触发流程
+
+```mermaid
+flowchart TD
+    A[用户选择同步类型] --> B{sync_type?}
+    B -->|kline| C[sync_realtime_market.delay]
+    B -->|fundamentals| D[sync_fundamentals.delay]
+    B -->|money_flow| E[sync_money_flow.delay]
+    B -->|all / 缺省| F[触发全部三个任务]
+    C --> G[返回 task_id]
+    D --> G
+    E --> G
+    F --> G
+```
+
+### 组件与接口
+
+#### 1. 新增 API：`GET /api/v1/data/sources/health`（需求 24.1, 24.9）
+
+分别调用 TushareAdapter 和 AkShareAdapter 的 `health_check()` 方法，异常时捕获并标记为 disconnected。
+
+```python
+# app/api/v1/data.py 新增
+
+from datetime import datetime
+from pydantic import BaseModel
+
+class DataSourceStatus(BaseModel):
+    name: str                          # "Tushare" | "AkShare"
+    status: str                        # "connected" | "disconnected"
+    checked_at: str                    # ISO 8601 时间戳
+
+class DataSourceHealthResponse(BaseModel):
+    sources: list[DataSourceStatus]
+
+@router.get("/sources/health")
+async def get_sources_health() -> DataSourceHealthResponse:
+    """检查 Tushare 和 AkShare 数据源连通性。"""
+    tushare = TushareAdapter()
+    akshare = AkShareAdapter()
+    now = datetime.now().isoformat()
+
+    results = []
+    for name, adapter in [("Tushare", tushare), ("AkShare", akshare)]:
+        try:
+            ok = await adapter.health_check()
+            results.append(DataSourceStatus(
+                name=name,
+                status="connected" if ok else "disconnected",
+                checked_at=now,
+            ))
+        except Exception:
+            results.append(DataSourceStatus(
+                name=name,
+                status="disconnected",
+                checked_at=now,
+            ))
+
+    return DataSourceHealthResponse(sources=results)
+```
+
+关键设计决策：
+- `health_check()` 本身已有 try/except 返回 bool，但外层再包一层 try/except 防御未预期异常（需求 24.9）
+- 两个 adapter 的 health_check 可并发执行（`asyncio.gather`），但为简化先串行调用，后续可优化
+
+#### 2. 更新 API：`GET /api/v1/data/sync/status`（需求 24.3）
+
+在每条同步状态记录中新增 `data_source` 和 `is_fallback` 字段。同步状态通过 Redis 缓存存储，由 Celery 任务在执行时写入。
+
+```python
+# Redis 缓存键设计
+# sync:status:{data_type} → JSON string
+# 示例: sync:status:fundamentals → {
+#   "source": "基本面数据",
+#   "last_sync_at": "2024-01-02T18:00:00",
+#   "status": "OK",
+#   "record_count": 48000,
+#   "data_source": "Tushare",
+#   "is_fallback": false
+# }
+
+class SyncStatusItem(BaseModel):
+    source: str                        # 数据类型名称
+    last_sync_at: str | None           # 最后同步时间
+    status: str                        # "OK" | "ERROR" | "SYNCING"
+    record_count: int                  # 已同步记录数
+    data_source: str                   # "Tushare" | "AkShare"
+    is_fallback: bool                  # 是否触发了故障转移
+
+class SyncStatusResponse(BaseModel):
+    items: list[SyncStatusItem]
+
+@router.get("/sync/status")
+async def get_sync_status() -> SyncStatusResponse:
+    """查询各数据类型同步状态（含数据源和故障转移信息）。"""
+    from app.core.redis_client import get_redis_client
+    import json
+
+    client = get_redis_client()
+    try:
+        data_types = ["kline", "fundamentals", "money_flow"]
+        type_labels = {
+            "kline": "行情数据",
+            "fundamentals": "基本面数据",
+            "money_flow": "资金流向",
+        }
+        items = []
+        for dt in data_types:
+            raw = await client.get(f"sync:status:{dt}")
+            if raw:
+                info = json.loads(raw)
+                items.append(SyncStatusItem(**info))
+            else:
+                items.append(SyncStatusItem(
+                    source=type_labels.get(dt, dt),
+                    last_sync_at=None,
+                    status="UNKNOWN",
+                    record_count=0,
+                    data_source="N/A",
+                    is_fallback=False,
+                ))
+        return SyncStatusResponse(items=items)
+    finally:
+        await client.aclose()
+```
+
+Celery 任务侧写入同步状态的逻辑（在 `data_sync.py` 中更新）：
+
+```python
+# app/tasks/data_sync.py 中，每个同步任务完成后写入 Redis
+import json
+from app.core.redis_client import cache_set
+
+async def _update_sync_status(
+    data_type: str,
+    source_label: str,
+    status: str,
+    record_count: int,
+    data_source: str,
+    is_fallback: bool,
+) -> None:
+    """将同步状态写入 Redis 缓存。"""
+    await cache_set(
+        f"sync:status:{data_type}",
+        json.dumps({
+            "source": source_label,
+            "last_sync_at": datetime.now().isoformat(),
+            "status": status,
+            "record_count": record_count,
+            "data_source": data_source,
+            "is_fallback": is_fallback,
+        }),
+        ex=86400,  # 24 小时过期
+    )
+```
+
+在 `DataSourceRouter.fetch_with_fallback()` 中，通过返回值或上下文标记实际使用的数据源：
+
+```python
+# DataSourceRouter 扩展：返回数据源标识
+async def fetch_with_fallback(self, method_name: str, *args, **kwargs) -> tuple[Any, str, bool]:
+    """返回 (data, data_source_name, is_fallback)"""
+    try:
+        primary_method = getattr(self._primary, method_name)
+        result = await primary_method(*args, **kwargs)
+        return result, "Tushare", False
+    except Exception:
+        ...
+    try:
+        fallback_method = getattr(self._fallback, method_name)
+        result = await fallback_method(*args, **kwargs)
+        return result, "AkShare", True
+    except Exception:
+        ...
+        raise DataSourceUnavailableError(...)
+```
+
+> 注意：为保持向后兼容，可新增 `fetch_with_fallback_info()` 方法返回三元组，原 `fetch_with_fallback()` 保持不变仅返回数据。
+
+#### 3. 更新 API：`POST /api/v1/data/sync`（需求 24.5）
+
+接受可选 `sync_type` 参数，按类型分发 Celery 任务。
+
+```python
+from pydantic import BaseModel
+
+class SyncRequest(BaseModel):
+    sync_type: str | None = None       # "kline" | "fundamentals" | "money_flow" | "all" | None
+
+class SyncResponse(BaseModel):
+    message: str
+    task_ids: list[str]
+
+@router.post("/sync")
+async def trigger_sync(body: SyncRequest | None = None) -> SyncResponse:
+    """手动触发数据同步任务，支持按类型选择。"""
+    from app.tasks.data_sync import (
+        sync_realtime_market,
+        sync_fundamentals,
+        sync_money_flow,
+    )
+
+    sync_type = (body.sync_type if body else None) or "all"
+    task_ids = []
+
+    task_map = {
+        "kline": (sync_realtime_market, "行情数据"),
+        "fundamentals": (sync_fundamentals, "基本面数据"),
+        "money_flow": (sync_money_flow, "资金流向"),
+    }
+
+    if sync_type == "all":
+        for task_fn, _ in task_map.values():
+            result = task_fn.delay()
+            task_ids.append(result.id)
+    elif sync_type in task_map:
+        task_fn, _ = task_map[sync_type]
+        result = task_fn.delay()
+        task_ids.append(result.id)
+    else:
+        return SyncResponse(
+            message=f"未知的同步类型: {sync_type}",
+            task_ids=[],
+        )
+
+    type_label = "全部" if sync_type == "all" else task_map.get(sync_type, ("", sync_type))[1]
+    return SyncResponse(
+        message=f"{type_label}同步任务已触发，请稍后查看同步状态",
+        task_ids=task_ids,
+    )
+```
+
+#### 4. 新增 API：`GET /api/v1/data/cleaning/stats`（需求 24.7）
+
+从 `stock_info` 和 `permanent_exclusion` 表查询实时清洗统计。
+
+```python
+from sqlalchemy import select, func
+
+class CleaningStatsResponse(BaseModel):
+    total_stocks: int                  # 总股票数
+    valid_stocks: int                  # 有效标的数
+    st_delisted_count: int             # ST/退市剔除数
+    new_stock_count: int               # 新股剔除数
+    suspended_count: int               # 停牌剔除数（permanent_exclusion reason='SUSPENDED'）
+    high_pledge_count: int             # 高质押剔除数
+
+@router.get("/cleaning/stats")
+async def get_cleaning_stats() -> CleaningStatsResponse:
+    """查询实时数据清洗统计信息。"""
+    from app.core.database import AsyncSessionPG
+    from app.models.stock import StockInfo, PermanentExclusion
+
+    async with AsyncSessionPG() as session:
+        # 总股票数
+        total = (await session.execute(
+            select(func.count()).select_from(StockInfo)
+        )).scalar_one()
+
+        # ST/退市数（stock_info 表中 is_st=True 或 is_delisted=True）
+        st_delisted = (await session.execute(
+            select(func.count()).select_from(StockInfo).where(
+                (StockInfo.is_st == True) | (StockInfo.is_delisted == True)
+            )
+        )).scalar_one()
+
+        # 新股剔除数（permanent_exclusion 表 reason='NEW_STOCK'）
+        new_stock = (await session.execute(
+            select(func.count()).select_from(PermanentExclusion).where(
+                PermanentExclusion.reason == "NEW_STOCK"
+            )
+        )).scalar_one()
+
+        # 停牌剔除数
+        suspended = (await session.execute(
+            select(func.count()).select_from(PermanentExclusion).where(
+                PermanentExclusion.reason == "SUSPENDED"
+            )
+        )).scalar_one()
+
+        # 高质押剔除数（pledge_ratio > 70）
+        high_pledge = (await session.execute(
+            select(func.count()).select_from(StockInfo).where(
+                StockInfo.pledge_ratio > 70
+            )
+        )).scalar_one()
+
+        valid = total - st_delisted - new_stock - suspended - high_pledge
+
+    return CleaningStatsResponse(
+        total_stocks=total,
+        valid_stocks=max(valid, 0),
+        st_delisted_count=st_delisted,
+        new_stock_count=new_stock,
+        suspended_count=suspended,
+        high_pledge_count=high_pledge,
+    )
+```
+
+#### 5. 前端变更：DataManageView.vue（需求 24.2, 24.4, 24.6, 24.8, 24.10）
+
+##### 5a. 新增 TypeScript 接口
+
+```typescript
+// 数据源健康状态
+interface DataSourceStatus {
+  name: string                         // "Tushare" | "AkShare"
+  status: 'connected' | 'disconnected'
+  checked_at: string
+}
+
+interface DataSourceHealthResponse {
+  sources: DataSourceStatus[]
+}
+
+// 更新后的同步状态（新增 data_source, is_fallback）
+interface SyncStatus {
+  source: string
+  last_sync_at: string | null
+  status: 'OK' | 'ERROR' | 'SYNCING' | 'UNKNOWN'
+  record_count: number
+  data_source: string                  // "Tushare" | "AkShare" | "N/A"
+  is_fallback: boolean
+}
+
+// 同步请求
+interface SyncRequest {
+  sync_type?: 'kline' | 'fundamentals' | 'money_flow' | 'all'
+}
+
+// 数据清洗统计
+interface CleaningStatsResponse {
+  total_stocks: number
+  valid_stocks: number
+  st_delisted_count: number
+  new_stock_count: number
+  suspended_count: number
+  high_pledge_count: number
+}
+```
+
+##### 5b. 健康状态卡片区域（需求 24.2）
+
+在页面顶部（同步状态表格之前）新增数据源健康状态卡片区域：
+
+```html
+<!-- 数据源健康状态 -->
+<section class="card" aria-label="数据源健康状态">
+  <h2 class="section-title">数据源健康状态</h2>
+  <LoadingSpinner v-if="healthState.loading" text="检测数据源..." />
+  <ErrorBanner v-else-if="healthState.error" :message="healthState.error" :retryFn="fetchHealth" />
+  <div v-else class="health-grid">
+    <div
+      v-for="src in healthState.data?.sources ?? []"
+      :key="src.name"
+      class="health-card"
+      :class="src.status === 'connected' ? 'health-ok' : 'health-err'"
+    >
+      <div class="health-name">{{ src.name }}</div>
+      <div class="health-status">
+        {{ src.status === 'connected' ? '✅ 已连接' : '❌ 已断开' }}
+      </div>
+      <div class="health-time">{{ formatTime(src.checked_at) }}</div>
+    </div>
+  </div>
+</section>
+```
+
+样式：
+- 连通（connected）：绿色背景 `#1a3a1a`，绿色文字 `#3fb950`
+- 断开（disconnected）：红色背景 `#3a1a1a`，红色文字 `#f85149`
+
+##### 5c. 同步类型选择器（需求 24.6）
+
+在手动同步按钮前新增下拉选择框：
+
+```html
+<div class="section-header">
+  <h2 class="section-title">数据源同步状态</h2>
+  <div class="sync-controls">
+    <select v-model="syncType" class="sync-select" aria-label="选择同步类型">
+      <option value="all">全部同步</option>
+      <option value="kline">行情数据</option>
+      <option value="fundamentals">基本面数据</option>
+      <option value="money_flow">资金流向</option>
+    </select>
+    <button class="btn btn-primary" :disabled="syncLoading" @click="triggerSync">
+      {{ syncLoading ? '同步中...' : '手动同步' }}
+    </button>
+  </div>
+</div>
+```
+
+`triggerSync()` 更新为传递 `sync_type` 参数：
+
+```typescript
+const syncType = ref<string>('all')
+
+async function triggerSync() {
+  syncLoading.value = true
+  syncMsg.value = ''
+  try {
+    await apiClient.post('/data/sync', { sync_type: syncType.value })
+    syncMsg.value = '同步任务已触发，请稍后刷新查看状态'
+    syncMsgType.value = 'success'
+    setTimeout(fetchSyncStatus, 2000)
+  } catch (e: unknown) {
+    syncMsg.value = e instanceof Error ? e.message : '触发同步失败，请重试'
+    syncMsgType.value = 'error'
+  } finally {
+    syncLoading.value = false
+    setTimeout(() => { syncMsg.value = '' }, 5000)
+  }
+}
+```
+
+##### 5d. 同步状态表格新增"数据源"列（需求 24.4）
+
+```html
+<thead>
+  <tr>
+    <th scope="col">数据源</th>
+    <th scope="col">数据源</th>  <!-- 新增列：实际使用的数据源 -->
+    <th scope="col">最后同步时间</th>
+    <th scope="col">状态</th>
+    <th scope="col">已同步记录数</th>
+  </tr>
+</thead>
+<tbody>
+  <tr v-for="item in syncStatusState.data?.items ?? []" :key="item.source">
+    <td>{{ item.source }}</td>
+    <td>
+      {{ item.data_source }}
+      <span v-if="item.is_fallback" class="fallback-badge">（故障转移）</span>
+    </td>
+    <td>{{ formatTime(item.last_sync_at) }}</td>
+    <td>
+      <span class="status-badge" :class="statusClass(item.status)">
+        {{ statusLabel(item.status) }}
+      </span>
+    </td>
+    <td>{{ item.record_count.toLocaleString() }}</td>
+  </tr>
+</tbody>
+```
+
+故障转移标注样式：黄色文字 `#d29922`，提示用户该次同步使用了备用数据源。
+
+##### 5e. API 驱动的清洗统计（需求 24.8, 24.10）
+
+替换硬编码的静态数值，改为从 API 获取：
+
+```typescript
+const { state: cleaningState, execute: execCleaning } = usePageState<CleaningStatsResponse>()
+
+async function fetchCleaningStats() {
+  await execCleaning(() =>
+    apiClient.get<CleaningStatsResponse>('/data/cleaning/stats').then(r => r.data),
+  )
+}
+
+onMounted(() => {
+  fetchHealth()
+  fetchSyncStatus()
+  fetchExclusions()
+  fetchCleaningStats()  // 新增
+})
+```
+
+模板中替换硬编码区域：
+
+```html
+<section class="card" aria-label="数据清洗统计">
+  <h2 class="section-title">数据清洗统计</h2>
+  <LoadingSpinner v-if="cleaningState.loading" text="加载清洗统计..." />
+  <ErrorBanner
+    v-else-if="cleaningState.error"
+    :message="cleaningState.error"
+    :retryFn="fetchCleaningStats"
+  />
+  <div v-else class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">总股票数</div>
+      <div class="stat-value">{{ cleaningState.data?.total_stocks?.toLocaleString() ?? '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">有效标的</div>
+      <div class="stat-value highlight">{{ cleaningState.data?.valid_stocks?.toLocaleString() ?? '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">ST / 退市剔除</div>
+      <div class="stat-value warn">{{ cleaningState.data?.st_delisted_count?.toLocaleString() ?? '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">新股剔除</div>
+      <div class="stat-value warn">{{ cleaningState.data?.new_stock_count?.toLocaleString() ?? '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">停牌剔除</div>
+      <div class="stat-value warn">{{ cleaningState.data?.suspended_count?.toLocaleString() ?? '—' }}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">高质押剔除</div>
+      <div class="stat-value warn">{{ cleaningState.data?.high_pledge_count?.toLocaleString() ?? '—' }}</div>
+    </div>
+  </div>
+</section>
+```
+
+### 数据模型
+
+#### 后端 Pydantic 响应模型
+
+```python
+# 可放在 app/api/v1/data.py 中或单独的 schemas 文件
+
+from pydantic import BaseModel
+
+class DataSourceStatus(BaseModel):
+    name: str                          # "Tushare" | "AkShare"
+    status: str                        # "connected" | "disconnected"
+    checked_at: str                    # ISO 8601
+
+class DataSourceHealthResponse(BaseModel):
+    sources: list[DataSourceStatus]
+
+class SyncStatusItem(BaseModel):
+    source: str                        # 数据类型名称
+    last_sync_at: str | None
+    status: str                        # "OK" | "ERROR" | "SYNCING" | "UNKNOWN"
+    record_count: int
+    data_source: str                   # "Tushare" | "AkShare" | "N/A"
+    is_fallback: bool
+
+class SyncStatusResponse(BaseModel):
+    items: list[SyncStatusItem]
+
+class SyncRequest(BaseModel):
+    sync_type: str | None = None       # "kline" | "fundamentals" | "money_flow" | "all"
+
+class SyncResponse(BaseModel):
+    message: str
+    task_ids: list[str]
+
+class CleaningStatsResponse(BaseModel):
+    total_stocks: int
+    valid_stocks: int
+    st_delisted_count: int
+    new_stock_count: int
+    suspended_count: int
+    high_pledge_count: int
+```
+
+#### Redis 缓存键
+
+| 键 | 值格式 | 过期时间 | 写入方 |
+|---|---|---|---|
+| `sync:status:kline` | JSON（SyncStatusItem 字段） | 24h | `sync_realtime_market` 任务 |
+| `sync:status:fundamentals` | JSON（SyncStatusItem 字段） | 24h | `sync_fundamentals` 任务 |
+| `sync:status:money_flow` | JSON（SyncStatusItem 字段） | 24h | `sync_money_flow` 任务 |
+
+#### 数据库查询（清洗统计）
+
+清洗统计不引入新表，直接查询现有 `stock_info` 和 `permanent_exclusion` 表：
+
+| 统计项 | 查询逻辑 |
+|---|---|
+| 总股票数 | `SELECT COUNT(*) FROM stock_info` |
+| ST/退市剔除数 | `SELECT COUNT(*) FROM stock_info WHERE is_st = TRUE OR is_delisted = TRUE` |
+| 新股剔除数 | `SELECT COUNT(*) FROM permanent_exclusion WHERE reason = 'NEW_STOCK'` |
+| 停牌剔除数 | `SELECT COUNT(*) FROM permanent_exclusion WHERE reason = 'SUSPENDED'` |
+| 高质押剔除数 | `SELECT COUNT(*) FROM stock_info WHERE pledge_ratio > 70` |
+| 有效标的数 | `总股票数 - ST/退市 - 新股 - 停牌 - 高质押` |
+
+
+### 正确性属性（需求 24）
+
+*属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
+
+#### 属性 53：健康检查端点返回正确状态
+
+*对任意* TushareAdapter 和 AkShareAdapter 的 `health_check()` 结果组合（True/False/抛出异常），`GET /data/sources/health` 接口应始终返回包含恰好 2 个数据源的响应，每个数据源的 `status` 字段应为 "connected"（当 `health_check()` 返回 True 时）或 "disconnected"（当返回 False 或抛出任何异常时），且 `checked_at` 字段不为空。
+
+**验证需求：24.1, 24.9**
+
+---
+
+#### 属性 54：同步状态响应包含数据源和故障转移字段
+
+*对任意*同步状态记录，`GET /data/sync/status` 接口返回的每条 `SyncStatusItem` 应包含 `data_source` 字段（取值为 "Tushare"、"AkShare" 或 "N/A"）和 `is_fallback` 布尔字段；当 `data_source` 为 "AkShare" 且该次同步是因 Tushare 失败而触发时，`is_fallback` 应为 true。
+
+**验证需求：24.3**
+
+---
+
+#### 属性 55：手动同步按类型分发正确的 Celery 任务
+
+*对任意*有效的 `sync_type` 参数值，`POST /data/sync` 接口应分发正确的 Celery 任务：`sync_type="kline"` 仅触发 `sync_realtime_market`，`sync_type="fundamentals"` 仅触发 `sync_fundamentals`，`sync_type="money_flow"` 仅触发 `sync_money_flow`，`sync_type="all"` 或缺省时触发全部三个任务；返回的 `task_ids` 数量应与触发的任务数量一致。
+
+**验证需求：24.5**
+
+---
+
+#### 属性 56：清洗统计数据库查询正确性
+
+*对任意* `stock_info` 和 `permanent_exclusion` 表的数据状态，`GET /data/cleaning/stats` 接口返回的 `total_stocks` 应等于 `stock_info` 表总行数，`st_delisted_count` 应等于 `is_st=True` 或 `is_delisted=True` 的行数，`new_stock_count` 应等于 `permanent_exclusion` 中 `reason='NEW_STOCK'` 的行数，且 `valid_stocks` 应等于 `total_stocks - st_delisted_count - new_stock_count - suspended_count - high_pledge_count`（下限为 0）。
+
+**验证需求：24.7**
+
+---
+
+#### 属性 57：数据源状态 UI 渲染正确性
+
+*对任意*健康检查响应和同步状态响应的组合，DataManageView 页面应满足：健康状态卡片中，`status="connected"` 的数据源显示绿色"已连接"标识，`status="disconnected"` 的数据源显示红色"已断开"标识；同步状态表格中，每行应显示 `data_source` 列，当 `is_fallback=true` 时该列应包含"（故障转移）"标注文本。
+
+**验证需求：24.2, 24.4**
+
+---
+
+#### 属性 58：清洗统计 UI 展示 API 数据正确性
+
+*对任意*有效的 `CleaningStatsResponse` 数据，DataManageView 页面的数据清洗统计区域应展示与 API 返回值一致的数值（总股票数、有效标的数、ST/退市剔除数、新股剔除数、停牌剔除数、高质押剔除数），不应包含任何硬编码的静态数值。
+
+**验证需求：24.8**
+
+---
+
+### 错误处理（需求 24）
+
+| 错误场景 | 处理策略 |
+|---|---|
+| TushareAdapter.health_check() 抛出异常 | 捕获异常，将该数据源状态标记为 "disconnected"，接口正常返回（需求 24.9） |
+| AkShareAdapter.health_check() 抛出异常 | 同上，捕获异常标记为 "disconnected"（需求 24.9） |
+| Redis 中无同步状态缓存 | 返回 status="UNKNOWN"、data_source="N/A"、is_fallback=false 的默认值 |
+| POST /data/sync 传入无效 sync_type | 返回错误提示信息，不触发任何 Celery 任务 |
+| GET /data/cleaning/stats 数据库查询失败 | 后端返回 500 错误，前端显示 ErrorBanner 组件并提供重试按钮（需求 24.10） |
+| Celery 任务分发失败（Redis 不可用） | POST /data/sync 返回 500 错误，前端显示错误提示 |
+
+### 测试策略（需求 24）
+
+#### 属性测试
+
+**后端（Hypothesis）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 53：健康检查端点返回正确状态 | `tests/properties/test_data_health_properties.py` | 100 |
+| 属性 54：同步状态响应包含数据源字段 | `tests/properties/test_data_sync_status_properties.py` | 100 |
+| 属性 55：手动同步按类型分发任务 | `tests/properties/test_data_sync_dispatch_properties.py` | 100 |
+| 属性 56：清洗统计数据库查询正确性 | `tests/properties/test_cleaning_stats_properties.py` | 100 |
+
+**前端（fast-check + Vitest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 57：数据源状态 UI 渲染正确性 | `frontend/src/views/__tests__/data-source-status.property.test.ts` | 100 |
+| 属性 58：清洗统计 UI 展示 API 数据 | `frontend/src/views/__tests__/cleaning-stats.property.test.ts` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+- 后端：`# Feature: data-manage-dual-source-integration, Property 53: 健康检查端点返回正确状态`
+- 前端：`// Feature: data-manage-dual-source-integration, Property 57: 数据源状态 UI 渲染正确性`
+
+#### 单元测试
+
+**后端：**
+- `GET /data/sources/health` 两个数据源均连通的示例
+- `GET /data/sources/health` 一个连通一个断开的示例
+- `GET /data/sources/health` health_check 抛出异常的边界示例
+- `GET /data/sync/status` Redis 有缓存数据的示例
+- `GET /data/sync/status` Redis 无缓存数据的默认值示例
+- `POST /data/sync` sync_type="fundamentals" 仅触发基本面任务的示例
+- `POST /data/sync` sync_type 缺省触发全部任务的示例
+- `GET /data/cleaning/stats` 正常查询返回正确统计的示例
+- `GET /data/cleaning/stats` 数据库连接失败返回 500 的示例
+
+**前端：**
+- DataManageView 页面加载时调用 4 个 API 的集成示例
+- 健康状态卡片绿色/红色渲染示例
+- 同步类型下拉选择器选项完整性示例
+- 同步状态表格故障转移标注渲染示例
+- 清洗统计区域 API 数据替换硬编码的示例
+- 清洗统计 API 失败时 ErrorBanner 显示和重试的示例
+
+#### 集成测试
+
+- 健康检查 → 数据源状态卡片渲染 → 手动同步（指定类型）→ 同步状态刷新（含数据源列）全链路测试
+- 数据库写入测试数据 → 清洗统计 API 查询 → 前端展示验证全链路测试
+
+
+---
+
+## 需求 25：历史数据批量回填（行情、基本面、资金流向）
+
+### 概述
+
+本节设计历史数据批量回填子系统，支持 K 线行情、基本面、资金流向三种数据类型的批量回填与每日增量同步。系统复用已有的 DataSourceRouter（Tushare 主 / AkShare 备故障转移）、KlineRepository（TimescaleDB 幂等写入）、Redis 缓存辅助和 Celery 异步任务队列，新增 BackfillService 编排层、三个历史回填 Celery 任务、两个 REST API 端点、一个 Celery Beat 定时任务，以及前端 DataManageView 的回填操作区域。
+
+### 架构
+
+```mermaid
+sequenceDiagram
+    participant UI as DataManageView
+    participant API as POST /api/v1/data/backfill
+    participant Redis as Redis
+    participant Celery as Celery Worker
+    participant Router as DataSourceRouter
+    participant TS as TushareAdapter
+    participant AK as AkShareAdapter
+    participant DB as TimescaleDB / PostgreSQL
+
+    UI->>API: POST {data_types, symbols, start_date, end_date, freq}
+    API->>Redis: 检查 backfill:progress → status
+    alt status == running
+        API-->>UI: 409 "已有回填任务正在执行"
+    else
+        API->>Redis: SET backfill:progress {status: pending, total, ...}
+        API->>Celery: dispatch sync_historical_kline / fundamentals / money_flow
+        API-->>UI: 200 {task_ids}
+    end
+
+    loop 每只股票（每批 ≤50，批间 1s）
+        Celery->>Redis: SET backfill:progress {current_symbol, status: running}
+        Celery->>Router: fetch_kline / fetch_fundamentals / fetch_money_flow
+        Router->>TS: 主数据源调用
+        alt Tushare 失败
+            Router->>AK: 备用数据源调用
+        end
+        Router-->>Celery: 数据
+        Celery->>DB: bulk_insert / upsert (ON CONFLICT DO NOTHING)
+        Celery->>Redis: UPDATE backfill:progress {completed++}
+    end
+
+    Celery->>Redis: SET backfill:progress {status: completed/failed}
+
+    loop 每 3 秒轮询
+        UI->>API: GET /api/v1/data/backfill/status
+        API->>Redis: GET backfill:progress
+        API-->>UI: {total, completed, failed, current_symbol, status, data_types}
+    end
+```
+
+### 组件与接口
+
+#### 1. BackfillService（回填编排服务）
+
+位于 `app/services/data_engine/backfill_service.py`，负责参数校验、默认值填充、并发保护和任务分发。
+
+```python
+class BackfillService:
+    """历史数据批量回填编排服务"""
+
+    BATCH_SIZE = 50          # 每批最大股票数
+    BATCH_DELAY = 1.0        # 批次间延迟（秒）
+    REDIS_KEY = "backfill:progress"
+    PROGRESS_TTL = 86400     # 进度信息 24h 过期
+
+    async def start_backfill(
+        self,
+        data_types: list[str] | None = None,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        freq: str = "1d",
+    ) -> dict:
+        """
+        启动回填任务。
+
+        1. 检查是否有正在运行的回填任务（并发保护）
+        2. 填充默认参数（symbols → 全市场，start_date → 10年前）
+        3. 初始化 Redis 进度
+        4. 分发 Celery 任务
+        """
+        ...
+
+    async def get_progress(self) -> dict:
+        """从 Redis 读取回填进度"""
+        ...
+
+    def _resolve_symbols(self, symbols: list[str] | None) -> list[str]:
+        """空列表时查询 StockInfo 全市场有效股票"""
+        ...
+
+    def _resolve_start_date(self, start_date: date | None) -> date:
+        """未传入时使用 settings.kline_history_years 计算默认值"""
+        ...
+```
+
+#### 2. API 端点
+
+新增于 `app/api/v1/data.py`：
+
+```python
+# ── 请求/响应模型 ──
+
+class BackfillRequest(BaseModel):
+    data_types: list[str] | None = None   # ["kline", "fundamentals", "money_flow"]，默认全部
+    symbols: list[str] | None = None      # 留空 = 全市场
+    start_date: date | None = None        # 默认 = today - kline_history_years
+    end_date: date | None = None          # 默认 = today
+    freq: str = "1d"                      # 仅 kline 有效："1d" | "1w" | "1M"
+
+class BackfillResponse(BaseModel):
+    message: str
+    task_ids: list[str]
+
+class BackfillStatusResponse(BaseModel):
+    total: int
+    completed: int
+    failed: int
+    current_symbol: str
+    status: str                           # "pending" | "running" | "completed" | "failed"
+    data_types: list[str]
+
+
+# ── 端点 ──
+
+@router.post("/backfill")
+async def start_backfill(body: BackfillRequest) -> BackfillResponse:
+    """
+    触发历史数据批量回填。
+    - 已有任务运行中 → 返回 409
+    - 否则初始化进度、分发 Celery 任务、返回 task_ids
+    """
+    ...
+
+@router.get("/backfill/status")
+async def get_backfill_status() -> BackfillStatusResponse:
+    """
+    查询回填进度（从 Redis 读取）。
+    - Redis 无数据 → 返回 status="idle"
+    """
+    ...
+```
+
+#### 3. Celery 异步任务
+
+新增于 `app/tasks/data_sync.py`：
+
+```python
+@celery_app.task(name="app.tasks.data_sync.sync_historical_kline", bind=True, queue="data_sync")
+def sync_historical_kline(self, symbols: list[str], start_date: str, end_date: str, freq: str = "1d") -> dict:
+    """
+    历史 K 线回填任务。
+
+    - 按 BATCH_SIZE=50 分批，批间 sleep(1)
+    - 通过 DataSourceRouter.fetch_kline() 获取数据
+    - 通过 KlineRepository.bulk_insert() 写入（ON CONFLICT DO NOTHING 幂等）
+    - 每完成一只股票更新 Redis 进度
+    - 单只股票失败 → failed++，继续下一只
+    """
+    ...
+
+@celery_app.task(name="app.tasks.data_sync.sync_historical_fundamentals", bind=True, queue="data_sync")
+def sync_historical_fundamentals(self, symbols: list[str], start_date: str, end_date: str) -> dict:
+    """
+    历史基本面回填任务。
+
+    - 同样分批处理、进度追踪、容错继续
+    - 通过 DataSourceRouter.fetch_fundamentals() 获取
+    - 写入 PostgreSQL（唯一约束去重）
+    """
+    ...
+
+@celery_app.task(name="app.tasks.data_sync.sync_historical_money_flow", bind=True, queue="data_sync")
+def sync_historical_money_flow(self, symbols: list[str], start_date: str, end_date: str) -> dict:
+    """
+    历史资金流向回填任务。
+
+    - 同样分批处理、进度追踪、容错继续
+    - 通过 DataSourceRouter.fetch_money_flow() 获取
+    - 写入 PostgreSQL（唯一约束去重）
+    """
+    ...
+
+@celery_app.task(name="app.tasks.data_sync.sync_daily_kline", bind=True, queue="data_sync")
+def sync_daily_kline(self) -> dict:
+    """
+    每日增量 K 线同步（Celery Beat 16:00 调度）。
+
+    - 查询全市场有效股票
+    - 回填前一个交易日的日 K 线数据
+    - 复用 sync_historical_kline 的核心逻辑
+    """
+    ...
+```
+
+#### 4. Celery Beat 调度
+
+在 `app/core/celery_app.py` 的 `beat_schedule` 中新增：
+
+```python
+"daily-kline-sync-1600": {
+    "task": "app.tasks.data_sync.sync_daily_kline",
+    "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+    "options": {"queue": "data_sync"},
+},
+```
+
+#### 5. Redis 进度键设计
+
+| 键名 | 类型 | 说明 | TTL |
+|---|---|---|---|
+| `backfill:progress` | Hash (JSON string) | 回填进度信息 | 86400s (24h) |
+
+进度 JSON 结构：
+
+```json
+{
+  "total": 5000,
+  "completed": 1234,
+  "failed": 5,
+  "current_symbol": "600519.SH",
+  "status": "running",
+  "data_types": ["kline", "fundamentals", "money_flow"],
+  "started_at": "2024-01-15T10:30:00",
+  "errors": [
+    {"symbol": "000001.SZ", "error": "DataSourceUnavailableError: ..."}
+  ]
+}
+```
+
+状态机：
+
+```
+idle → pending → running → completed
+                        ↘ failed
+```
+
+- `idle`：无进度数据（Redis 键不存在或已过期）
+- `pending`：API 已接受请求，Celery 任务尚未开始执行
+- `running`：任务正在处理中
+- `completed`：所有股票处理完毕（failed 可能 > 0）
+- `failed`：任务本身异常中断（非单只股票失败）
+
+### 数据模型
+
+本需求不新增数据库表。K 线数据写入已有的 `kline` 超表（TimescaleDB），基本面数据写入 `stock_info` 表，资金流向数据写入已有的资金流向相关表。所有写入均通过已有的 ON CONFLICT DO NOTHING 或唯一约束实现幂等。
+
+回填进度信息存储于 Redis（非持久化），24 小时自动过期。
+
+### 前端组件设计（DataManageView 回填区域）
+
+在 DataManageView.vue 的"数据清洗统计"区域之后、"永久剔除名单"区域之前，新增"历史数据回填"section：
+
+```typescript
+// ── 回填相关类型 ──
+
+interface BackfillRequest {
+  data_types: string[]        // ["kline", "fundamentals", "money_flow"]
+  symbols: string[]           // 留空 = 全市场
+  start_date: string | null   // ISO date
+  end_date: string | null
+  freq: string                // "1d" | "1w" | "1M"
+}
+
+interface BackfillProgress {
+  total: number
+  completed: number
+  failed: number
+  current_symbol: string
+  status: 'idle' | 'pending' | 'running' | 'completed' | 'failed'
+  data_types: string[]
+}
+```
+
+UI 控件：
+- 数据类型多选复选框：行情数据 / 基本面数据 / 资金流向（默认全选）
+- 股票代码输入框：支持逗号分隔多个代码，placeholder="留空表示全市场"
+- 起止日期选择器：`<input type="date">`
+- K 线频率选择：日线 / 周线 / 月线（仅当"行情数据"被选中时显示）
+- "开始回填"按钮：点击调用 `POST /api/v1/data/backfill`
+- 进度展示区域：
+  - 进度条：`completed / total`（百分比）
+  - 当前处理：`current_symbol`
+  - 数据类型：`data_types` 标签
+  - 失败数：`failed`
+  - 状态徽章：`status`
+- 轮询逻辑：任务 running/pending 时每 3 秒调用 `GET /api/v1/data/backfill/status`，completed/failed 后停止
+
+### 正确性属性（需求 25）
+
+*正确性属性是在系统所有合法执行路径上都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规格说明与机器可验证正确性保证之间的桥梁。*
+
+#### Property 59: 回填 API 按数据类型分发对应 Celery 任务
+
+*For any* 合法的 `data_types` 子集（从 `{"kline", "fundamentals", "money_flow"}` 中任意组合），调用 `POST /api/v1/data/backfill` 后，系统分发的 Celery 任务集合应与请求的 `data_types` 一一对应；`data_types` 为空或未传入时应分发全部三种任务。
+
+**Validates: Requirements 25.1**
+
+#### Property 60: 回填参数默认值填充正确性
+
+*For any* 缺省 `symbols` 和/或缺省 `start_date` 的回填请求，BackfillService 应将 `symbols` 填充为 StockInfo 表中全部 `is_st=False AND is_delisted=False` 的有效股票列表，将 `start_date` 填充为 `today - settings.kline_history_years` 年。
+
+**Validates: Requirements 25.2, 25.3**
+
+#### Property 61: 回填任务通过 DataSourceRouter 获取数据并写入正确存储
+
+*For any* 数据类型（kline / fundamentals / money_flow）和任意非空股票列表，对应的回填任务应对每只股票调用 DataSourceRouter 的相应方法获取数据，并将结果写入对应存储（kline → TimescaleDB via KlineRepository，fundamentals / money_flow → PostgreSQL），且 K 线任务应支持 `"1d"` / `"1w"` / `"1M"` 三种频率。
+
+**Validates: Requirements 25.4, 25.5, 25.6**
+
+#### Property 62: 批次大小不超过 50 且批间延迟 ≥ 1 秒
+
+*For any* 长度为 N 的股票列表，回填任务应将其分为 `⌈N/50⌉` 个批次，每批不超过 50 只股票，且相邻批次的处理开始时间间隔不小于 1 秒。
+
+**Validates: Requirements 25.7**
+
+#### Property 63: 回填操作幂等性
+
+*For any* 股票列表和日期范围，对同一数据执行两次回填后的数据库状态应与执行一次完全相同（K 线通过 ON CONFLICT DO NOTHING，基本面和资金流向通过唯一约束去重）。
+
+**Validates: Requirements 25.8**
+
+#### Property 64: 进度追踪 Redis 读写一致性
+
+*For any* 回填进度状态（total, completed, failed, current_symbol, status, data_types），任务写入 Redis 的进度信息通过 `GET /api/v1/data/backfill/status` 读取后，返回的各字段值应与写入值一致。
+
+**Validates: Requirements 25.9, 25.10**
+
+#### Property 65: 单只股票失败不中断任务且 failed 计数正确
+
+*For any* 长度为 N 的股票列表，其中 K 只股票的 DataSourceRouter 调用失败（0 ≤ K ≤ N），任务完成后 `completed + failed` 应等于 N，且 `failed` 应等于 K。
+
+**Validates: Requirements 25.11**
+
+#### Property 66: 并发保护——运行中拒绝新请求
+
+*For any* Redis 中 `backfill:progress` 的 `status` 为 `"running"` 的状态，调用 `POST /api/v1/data/backfill` 应返回 HTTP 409 并包含拒绝提示信息，不分发任何新的 Celery 任务。
+
+**Validates: Requirements 25.12**
+
+#### Property 67: 前端回填控件根据数据类型选择动态显示频率选择器
+
+*For any* 数据类型复选框选择状态，K 线频率选择控件应仅在"行情数据"被勾选时可见；未勾选"行情数据"时频率选择器应隐藏。
+
+**Validates: Requirements 25.14**
+
+#### Property 68: 前端进度展示包含所有必要字段
+
+*For any* 合法的 BackfillProgress 状态对象（total ≥ 0, 0 ≤ completed ≤ total, 0 ≤ failed ≤ total），渲染后的进度区域应包含进度条（百分比）、当前处理股票代码、正在回填的数据类型标签、失败数量和任务状态徽章。
+
+**Validates: Requirements 25.15**
+
+### 错误处理（需求 25）
+
+| 场景 | 处理方式 |
+|---|---|
+| 已有回填任务运行中 | `POST /backfill` 返回 HTTP 409，消息"已有回填任务正在执行，请等待完成后再试" |
+| 单只股票 DataSourceRouter 双源均失败 | 记录错误日志，`failed++`，继续处理下一只股票 |
+| Redis 连接失败（读取进度） | `GET /backfill/status` 返回 `status="idle"` 默认值 |
+| Redis 连接失败（写入进度） | 任务继续执行，进度信息丢失但数据写入不受影响 |
+| `symbols` 包含无效股票代码 | DataSourceRouter 调用失败，按单只股票失败处理 |
+| `freq` 参数非法（非 1d/1w/1M） | API 层 Pydantic 校验拒绝，返回 HTTP 422 |
+| `start_date > end_date` | API 层校验拒绝，返回 HTTP 422 |
+| Celery 任务超时 | 依赖 Celery 的 `task_time_limit` 配置（默认 600s），超时后任务标记为 failed |
+| 前端轮询 API 失败 | 显示 ErrorBanner，保留上次成功的进度数据，下次轮询自动重试 |
+
+### 测试策略（需求 25）
+
+#### 属性测试
+
+**后端（Hypothesis + pytest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 59：回填 API 按数据类型分发任务 | `tests/properties/test_backfill_dispatch_properties.py` | 100 |
+| 属性 60：参数默认值填充正确性 | `tests/properties/test_backfill_defaults_properties.py` | 100 |
+| 属性 61：回填任务数据流正确性 | `tests/properties/test_backfill_task_properties.py` | 100 |
+| 属性 62：批次大小与延迟 | `tests/properties/test_backfill_batching_properties.py` | 100 |
+| 属性 63：回填幂等性 | `tests/properties/test_backfill_idempotent_properties.py` | 100 |
+| 属性 64：进度 Redis 读写一致性 | `tests/properties/test_backfill_progress_properties.py` | 100 |
+| 属性 65：单只失败不中断且计数正确 | `tests/properties/test_backfill_fault_tolerance_properties.py` | 100 |
+| 属性 66：并发保护拒绝新请求 | `tests/properties/test_backfill_concurrency_properties.py` | 100 |
+
+**前端（fast-check + Vitest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 67：频率选择器动态显隐 | `frontend/src/views/__tests__/backfill-freq-toggle.property.test.ts` | 100 |
+| 属性 68：进度展示字段完整性 | `frontend/src/views/__tests__/backfill-progress-display.property.test.ts` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+- 后端：`# Feature: a-share-quant-trading-system, Property 59: 回填 API 按数据类型分发任务`
+- 前端：`// Feature: a-share-quant-trading-system, Property 67: 频率选择器动态显隐`
+
+#### 单元测试
+
+**后端：**
+- `POST /data/backfill` data_types=["kline"] 仅分发 kline 任务的示例
+- `POST /data/backfill` data_types 缺省分发全部三种任务的示例
+- `POST /data/backfill` symbols 为空时查询 StockInfo 全市场的示例
+- `POST /data/backfill` 已有 running 任务时返回 409 的示例
+- `GET /data/backfill/status` Redis 有进度数据的示例
+- `GET /data/backfill/status` Redis 无数据返回 idle 默认值的示例
+- `sync_historical_kline` 正常处理 3 只股票的示例
+- `sync_historical_kline` 其中 1 只失败继续处理的示例
+- `sync_historical_fundamentals` 正常处理的示例
+- `sync_historical_money_flow` 正常处理的示例
+- `sync_daily_kline` Celery Beat 调度配置验证的示例
+- BackfillService 批次划分逻辑（100 只股票 → 2 批）的示例
+
+**前端：**
+- DataManageView 回填区域渲染所有控件的示例
+- 数据类型复选框默认全选的示例
+- 取消勾选"行情数据"后频率选择器隐藏的示例
+- 点击"开始回填"调用 POST API 的示例
+- 回填进行中进度条和状态正确渲染的示例
+- 回填完成后轮询停止的示例
+- 已有任务运行中时显示拒绝提示的示例
+
+#### 集成测试
+
+- 触发回填 → Celery 任务执行 → Redis 进度更新 → 状态 API 查询 → 前端进度展示全链路测试
+- 重复回填同一数据 → 验证数据库无重复记录（幂等性）全链路测试
+
+---
+
+## 需求 25.16–25.17：回填任务停止功能
+
+### 概述
+
+新增回填任务提前终止能力。通过 Redis 信号量机制实现协作式停止：前端调用停止 API → Redis 状态置为 `stopping` → Celery 任务在每只股票处理前检测状态 → 检测到 `stopping` 后停止处理并将状态更新为 `stopped`。已写入数据库的数据保留不回滚。
+
+### 架构
+
+```mermaid
+sequenceDiagram
+    participant UI as DataManageView
+    participant API as POST /api/v1/data/backfill/stop
+    participant Redis as Redis
+    participant Celery as Celery Worker
+
+    UI->>API: POST /data/backfill/stop
+    API->>Redis: GET backfill:progress
+    API->>Redis: SET backfill:progress {status: "stopping"}
+    API-->>UI: 200 {message: "停止信号已发送"}
+
+    loop 每只股票处理前
+        Celery->>Redis: GET backfill:progress → status
+        alt status == "stopping"
+            Celery->>Redis: SET backfill:progress {status: "stopped"}
+            Note over Celery: 退出处理循环
+        else
+            Celery->>Celery: 继续正常处理
+        end
+    end
+
+    UI->>API: GET /data/backfill/status (轮询)
+    API->>Redis: GET backfill:progress
+    API-->>UI: {status: "stopped", completed: N, ...}
+```
+
+### 组件与接口
+
+#### 1. BackfillService 新增 `stop_backfill()` 方法
+
+```python
+async def stop_backfill(self) -> dict:
+    """
+    发送停止信号。
+
+    将 Redis 中 backfill:progress 的 status 设为 "stopping"。
+    仅当当前状态为 running 或 pending 时有效，否则返回提示。
+    """
+    ...
+```
+
+#### 2. REST API 端点
+
+```python
+@router.post("/backfill/stop")
+async def stop_backfill() -> dict:
+    """
+    停止正在执行的回填任务。
+    - 当前无运行中任务 → 返回提示"当前没有正在执行的回填任务"
+    - 否则发送停止信号 → 返回 {message: "停止信号已发送"}
+    """
+    ...
+```
+
+#### 3. Celery 任务停止检测
+
+三个历史回填任务（`sync_historical_kline`、`sync_historical_fundamentals`、`sync_historical_money_flow`）在每只股票处理前检查 Redis 中 `backfill:progress` 的 `status` 字段：
+
+```python
+# 在每只股票处理循环的开头
+progress_raw = await cache_get(REDIS_KEY)
+if progress_raw:
+    progress = json.loads(progress_raw)
+    if progress.get("status") == "stopping":
+        progress["status"] = "stopped"
+        await cache_set(REDIS_KEY, json.dumps(progress), ex=PROGRESS_TTL)
+        logger.info("收到停止信号，回填任务提前终止")
+        return {...}  # 返回当前进度
+```
+
+#### 4. 前端 DataManageView 停止按钮
+
+- 在"开始回填"按钮旁新增"停止回填"按钮
+- 仅当 `backfillProgress.status` 为 `running` 或 `pending` 时显示
+- 点击后调用 `POST /api/v1/data/backfill/stop`
+- 请求期间按钮显示"停止中..."并禁用
+- 任务状态变为 `stopped`/`completed`/`failed` 后按钮隐藏
+
+### Redis 数据结构变更
+
+`backfill:progress` 的 `status` 字段新增两个取值：
+
+| status 值 | 含义 |
+|---|---|
+| `stopping` | 已收到停止信号，等待任务响应 |
+| `stopped` | 任务已响应停止信号并终止 |
+
+### 测试策略
+
+- 属性测试：停止信号发送后 Redis status 正确变更为 stopping
+- 属性测试：任务检测到 stopping 后立即停止并将 status 更新为 stopped
+- 集成测试：启动回填 → 发送停止 → 验证任务提前终止且已写入数据保留
+
+
+---
+
+## 需求 26：大盘概况页面股票K线图扩展基本面数据与资金流向展示
+
+### 概述
+
+在大盘概况页面（DashboardView）现有的股票 K 线图查询区域，新增"基本面"和"资金流向"两个标签页，与现有"K线图"标签页并列。用户查询股票后可在三个视图间切换，分别查看技术走势、基本面核心指标和主力资金动向。
+
+后端新增两个 REST API 端点，通过 DataSourceRouter 获取数据并返回结构化响应；前端通过 ECharts 柱状图和数据卡片组合展示资金流向趋势，通过颜色编码的数据卡片展示基本面指标。
+
+### 架构
+
+```mermaid
+sequenceDiagram
+    participant UI as DashboardView
+    participant API_F as GET /data/stock/{symbol}/fundamentals
+    participant API_M as GET /data/stock/{symbol}/money-flow
+    participant Router as DataSourceRouter
+    participant Tushare as TushareAdapter
+    participant AkShare as AkShareAdapter
+
+    UI->>UI: 用户输入股票代码并查询
+    UI->>UI: 点击"基本面"标签页
+
+    UI->>API_F: GET /data/stock/000001/fundamentals
+    API_F->>Router: fetch_fundamentals("000001.SZ")
+    Router->>Tushare: fetch_fundamentals()
+    alt Tushare 成功
+        Tushare-->>Router: FundamentalsData
+    else Tushare 失败
+        Router->>AkShare: fetch_fundamentals()
+        AkShare-->>Router: FundamentalsData
+    end
+    Router-->>API_F: FundamentalsData
+    API_F-->>UI: StockFundamentalsResponse (JSON)
+    UI->>UI: 渲染基本面数据卡片（含颜色编码）
+
+    UI->>UI: 点击"资金流向"标签页
+
+    UI->>API_M: GET /data/stock/000001/money-flow?days=20
+    API_M->>Router: fetch_money_flow("000001.SZ", trade_date) × N days
+    Router-->>API_M: list[MoneyFlowData]
+    API_M-->>UI: StockMoneyFlowResponse (JSON)
+    UI->>UI: 渲染柱状图 + 汇总卡片
+```
+
+### 组件与接口
+
+#### 1. 后端 API 端点
+
+新增于 `app/api/v1/data.py`：
+
+```python
+@router.get("/stock/{symbol}/fundamentals")
+async def get_stock_fundamentals(symbol: str) -> StockFundamentalsResponse:
+    """
+    获取指定股票的最新基本面数据。
+
+    - 通过 DataSourceRouter.fetch_fundamentals() 获取
+    - 将 FundamentalsData 映射为 API 响应模型
+    - 股票不存在或无数据 → 返回 HTTP 404
+    """
+    ...
+
+
+@router.get("/stock/{symbol}/money-flow")
+async def get_stock_money_flow(
+    symbol: str,
+    days: int = Query(20, ge=1, le=60, description="查询天数，默认20"),
+) -> StockMoneyFlowResponse:
+    """
+    获取指定股票近 N 个交易日的资金流向数据。
+
+    - 计算最近 days 个交易日的日期列表
+    - 对每个交易日调用 DataSourceRouter.fetch_money_flow()
+    - 聚合为响应列表返回
+    - 股票不存在或无数据 → 返回 HTTP 404
+    """
+    ...
+```
+
+#### 2. Pydantic 响应模型
+
+新增于 `app/api/v1/data.py`：
+
+```python
+class StockFundamentalsResponse(BaseModel):
+    """个股基本面数据响应"""
+    symbol: str
+    name: str | None = None
+    pe_ttm: float | None = None           # 市盈率（TTM）
+    pb: float | None = None               # 市净率
+    roe: float | None = None              # 净资产收益率（%）
+    market_cap: float | None = None       # 总市值（亿元）
+    revenue_growth: float | None = None   # 营收同比增长率（%）
+    net_profit_growth: float | None = None # 净利润同比增长率（%）
+    report_period: str | None = None      # 报告期，如 "2024Q3"
+    updated_at: str | None = None         # 数据更新时间（ISO 8601）
+
+
+class MoneyFlowDailyRecord(BaseModel):
+    """单日资金流向记录"""
+    trade_date: str                        # 交易日期（ISO date）
+    main_net_inflow: float                 # 主力资金净流入（万元）
+    north_net_inflow: float | None = None  # 北向资金净流入（万元）
+    large_order_ratio: float | None = None # 大单成交占比（%）
+    super_large_inflow: float | None = None # 超大单净流入（万元）
+    large_inflow: float | None = None      # 大单净流入（万元）
+
+
+class StockMoneyFlowResponse(BaseModel):
+    """个股资金流向数据响应"""
+    symbol: str
+    name: str | None = None
+    days: int                              # 实际返回天数
+    records: list[MoneyFlowDailyRecord]    # 每日记录列表（按日期升序）
+```
+
+#### 3. DataSourceRouter 代理方法
+
+`DataSourceRouter` 已有 `fetch_fundamentals()` 和 `fetch_money_flow()` 代理方法，无需新增。API 端点直接调用即可。
+
+#### 4. 前端 DashboardView 标签页组件结构
+
+在 `DashboardView.vue` 的 `chart-section` 区域，将现有 K 线图包裹在标签页容器中：
+
+```html
+<!-- 标签页导航 -->
+<div class="chart-tabs" role="tablist" aria-label="数据视图切换">
+  <button
+    v-for="tab in tabs"
+    :key="tab.key"
+    role="tab"
+    :aria-selected="activeTab === tab.key"
+    :class="['tab-btn', { active: activeTab === tab.key }]"
+    @click="switchTab(tab.key)"
+  >
+    {{ tab.label }}
+  </button>
+</div>
+
+<!-- K线图面板 -->
+<div v-show="activeTab === 'kline'" role="tabpanel" aria-label="K线图">
+  <!-- 现有 K 线图内容不变 -->
+</div>
+
+<!-- 基本面面板 -->
+<div v-show="activeTab === 'fundamentals'" role="tabpanel" aria-label="基本面数据">
+  <div v-if="fundamentalsLoading" class="loading-indicator">加载中...</div>
+  <div v-else-if="fundamentalsError" class="error-banner">
+    {{ fundamentalsError }}
+    <button @click="loadFundamentals">重试</button>
+  </div>
+  <div v-else-if="fundamentals" class="fundamentals-cards">
+    <div class="fund-card" v-for="item in fundamentalCards" :key="item.label">
+      <span class="fund-label">{{ item.label }}</span>
+      <span class="fund-value" :class="item.colorClass">{{ item.display }}</span>
+    </div>
+    <div class="fund-meta">
+      报告期：{{ fundamentals.report_period }} | 更新时间：{{ fundamentals.updated_at }}
+    </div>
+  </div>
+</div>
+
+<!-- 资金流向面板 -->
+<div v-show="activeTab === 'moneyFlow'" role="tabpanel" aria-label="资金流向数据">
+  <div v-if="moneyFlowLoading" class="loading-indicator">加载中...</div>
+  <div v-else-if="moneyFlowError" class="error-banner">
+    {{ moneyFlowError }}
+    <button @click="loadMoneyFlow">重试</button>
+  </div>
+  <div v-else-if="moneyFlow">
+    <div class="money-flow-summary">
+      <!-- 汇总卡片 -->
+    </div>
+    <div ref="moneyFlowChartRef" class="money-flow-chart"></div>
+  </div>
+</div>
+```
+
+#### 5. 前端 TypeScript 接口
+
+```typescript
+interface StockFundamentalsResponse {
+  symbol: string
+  name: string | null
+  pe_ttm: number | null
+  pb: number | null
+  roe: number | null
+  market_cap: number | null       // 亿元
+  revenue_growth: number | null   // %
+  net_profit_growth: number | null // %
+  report_period: string | null
+  updated_at: string | null
+}
+
+interface MoneyFlowDailyRecord {
+  trade_date: string
+  main_net_inflow: number         // 万元
+  north_net_inflow: number | null // 万元
+  large_order_ratio: number | null // %
+  super_large_inflow: number | null // 万元
+  large_inflow: number | null     // 万元
+}
+
+interface StockMoneyFlowResponse {
+  symbol: string
+  name: string | null
+  days: number
+  records: MoneyFlowDailyRecord[]
+}
+
+type ChartTab = 'kline' | 'fundamentals' | 'moneyFlow'
+```
+
+#### 6. 基本面颜色编码逻辑
+
+```typescript
+/**
+ * 根据指标值返回 CSS 颜色类名。
+ * 提取为纯函数以便属性测试。
+ */
+function getFundamentalColorClass(
+  indicator: 'pe' | 'roe' | 'growth',
+  value: number | null,
+  industryAvgPe?: number
+): string {
+  if (value === null) return ''
+  switch (indicator) {
+    case 'pe':
+      if (industryAvgPe == null) return ''
+      return value < industryAvgPe ? 'color-green' : 'color-red'
+    case 'roe':
+      if (value > 15) return 'color-green'
+      if (value < 8) return 'color-red'
+      return ''
+    case 'growth':
+      return value > 0 ? 'color-red' : value < 0 ? 'color-green' : ''
+    default:
+      return ''
+  }
+}
+```
+
+#### 7. 资金流向柱状图 ECharts 配置
+
+```typescript
+function renderMoneyFlowChart(records: MoneyFlowDailyRecord[]) {
+  if (!moneyFlowChartInstance || !records.length) return
+
+  const dates = records.map(r => r.trade_date)
+  const values = records.map(r => r.main_net_inflow)
+  const colors = values.map(v => (v >= 0 ? '#f85149' : '#3fb950'))
+
+  moneyFlowChartInstance.setOption({
+    backgroundColor: 'transparent',
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params: any) => {
+        const p = params[0]
+        return `${p.name}<br/>主力净流入：${p.value.toFixed(2)} 万元`
+      },
+    },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      axisLabel: { color: '#8b949e', rotate: 45 },
+    },
+    yAxis: {
+      type: 'value',
+      name: '万元',
+      splitLine: { lineStyle: { color: '#21262d' } },
+      axisLabel: { color: '#8b949e' },
+    },
+    series: [{
+      type: 'bar',
+      data: values.map((v, i) => ({
+        value: v,
+        itemStyle: { color: colors[i] },
+      })),
+    }],
+  })
+}
+```
+
+#### 8. 股票切换时数据重置
+
+```typescript
+// 在 loadKline() 成功后或 symbol 变更时调用
+function resetTabData() {
+  fundamentals.value = null
+  fundamentalsError.value = ''
+  fundamentalsLoading.value = false
+  moneyFlow.value = null
+  moneyFlowError.value = ''
+  moneyFlowLoading.value = false
+  // 如果当前在非 K 线标签页，自动加载对应数据
+  if (activeTab.value === 'fundamentals') loadFundamentals()
+  if (activeTab.value === 'moneyFlow') loadMoneyFlow()
+}
+```
+
+### 数据模型
+
+本需求不新增数据库表。后端 API 通过 DataSourceRouter 实时获取数据，不涉及持久化存储变更。
+
+已有数据结构复用：
+- `FundamentalsData`（`app/services/data_engine/fundamental_adapter.py`）：包含 `pe_ttm`、`pb`、`roe`、`market_cap`、`revenue_yoy`、`net_profit_yoy` 等字段，API 端点将 `revenue_yoy` 映射为 `revenue_growth`，`net_profit_yoy` 映射为 `net_profit_growth`
+- `MoneyFlowData`（`app/services/data_engine/money_flow_adapter.py`）：包含 `main_net_inflow`、`north_net_inflow`、`large_order_ratio` 等字段
+
+### 正确性属性（需求 26）
+
+*正确性属性是在系统所有合法执行路径上都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规格说明与机器可验证正确性保证之间的桥梁。*
+
+#### Property 69: 基本面 API 响应包含全部必需字段
+
+*For any* 合法的 `FundamentalsData` 对象（由 DataSourceRouter 返回），`GET /api/v1/data/stock/{symbol}/fundamentals` 的响应 JSON 应包含全部 8 个必需字段：`pe_ttm`、`pb`、`roe`、`market_cap`、`revenue_growth`、`net_profit_growth`、`report_period`、`updated_at`。
+
+**Validates: Requirements 26.6**
+
+#### Property 70: 资金流向 API 返回记录数不超过 days 参数
+
+*For any* 合法的 `days` 参数值（1 ≤ days ≤ 60）和任意非空的 `MoneyFlowData` 列表，`GET /api/v1/data/stock/{symbol}/money-flow?days={days}` 返回的 `records` 列表长度应 ≤ `days`，且每条记录应包含 `trade_date`、`main_net_inflow`、`north_net_inflow`、`large_order_ratio`、`super_large_inflow`、`large_inflow` 全部 6 个字段。
+
+**Validates: Requirements 26.7**
+
+#### Property 71: 标签页切换仅显示当前激活面板
+
+*For any* 标签页状态（`'kline'` | `'fundamentals'` | `'moneyFlow'`），DashboardView 应渲染三个标签按钮，且仅当前激活标签页对应的面板内容可见，其余两个面板隐藏。
+
+**Validates: Requirements 26.1**
+
+#### Property 72: 基本面数据卡片渲染全部指标及元数据
+
+*For any* 合法的 `StockFundamentalsResponse`（所有数值字段非 null），渲染后的基本面标签页应包含 PE TTM、PB、ROE、总市值、营收同比增长率、净利润同比增长率六个指标值，以及报告期和更新时间。
+
+**Validates: Requirements 26.2, 26.11**
+
+#### Property 73: 基本面指标颜色编码正确性
+
+*For any* PE TTM 值和行业均值、ROE 值、营收/净利润增长率值，颜色编码函数 `getFundamentalColorClass` 应满足：
+- PE < 行业均值 → 绿色，PE ≥ 行业均值 → 红色
+- ROE > 15% → 绿色，ROE < 8% → 红色，8% ≤ ROE ≤ 15% → 无色
+- 增长率 > 0 → 红色，增长率 < 0 → 绿色，增长率 = 0 → 无色
+
+**Validates: Requirements 26.5**
+
+#### Property 74: 资金流向柱状图颜色映射
+
+*For any* 资金流向每日记录列表，柱状图中每根柱体的颜色应满足：`main_net_inflow ≥ 0` 时为红色（`#f85149`），`main_net_inflow < 0` 时为绿色（`#3fb950`）。
+
+**Validates: Requirements 26.4**
+
+#### Property 75: 资金流向汇总卡片计算正确性
+
+*For any* 长度 ≥ 5 的资金流向每日记录列表，"近5日主力资金净流入累计金额"应等于最近 5 条记录的 `main_net_inflow` 之和；"当日主力资金净流入"应等于最新一条记录的 `main_net_inflow`。
+
+**Validates: Requirements 26.3**
+
+#### Property 76: 加载与错误状态渲染
+
+*For any* 加载状态（loading=true/false）和错误状态（error=null/非空字符串），基本面和资金流向标签页应满足：loading=true 时显示加载指示器；error 非空时显示错误信息和重试按钮；两者均为 false/null 时显示数据内容。
+
+**Validates: Requirements 26.10**
+
+#### Property 77: 切换股票查询时数据状态重置
+
+*For any* 两个不同的股票代码，当从第一个股票切换到第二个股票查询时，基本面和资金流向的数据、加载状态、错误状态应全部重置为初始值。
+
+**Validates: Requirements 26.12**
+
+### 错误处理（需求 26）
+
+| 场景 | 处理方式 |
+|---|---|
+| 股票代码不存在或无基本面数据 | `GET /stock/{symbol}/fundamentals` 返回 HTTP 404，消息"未找到该股票的基本面数据" |
+| 股票代码不存在或无资金流向数据 | `GET /stock/{symbol}/money-flow` 返回 HTTP 404，消息"未找到该股票的资金流向数据" |
+| DataSourceRouter 双源均不可用 | 捕获 `DataSourceUnavailableError`，返回 HTTP 503，消息"数据源暂时不可用，请稍后重试" |
+| `days` 参数超出范围 | Pydantic/FastAPI 校验拒绝，返回 HTTP 422 |
+| 前端 API 请求失败 | 显示错误提示信息，提供"重试"按钮，点击后重新调用对应接口 |
+| 前端数据加载中 | 显示 loading spinner，禁用标签页切换操作 |
+| 切换股票时旧请求未完成 | 使用 AbortController 取消旧请求，避免数据错乱 |
+
+### 测试策略（需求 26）
+
+#### 属性测试
+
+**后端（Hypothesis + pytest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 69：基本面 API 响应字段完整性 | `tests/properties/test_stock_fundamentals_api_properties.py` | 100 |
+| 属性 70：资金流向 API 记录数与字段完整性 | `tests/properties/test_stock_money_flow_api_properties.py` | 100 |
+| 属性 75：资金流向汇总计算正确性 | `tests/properties/test_money_flow_summary_properties.py` | 100 |
+
+**前端（fast-check + Vitest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 71：标签页切换显隐 | `frontend/src/views/__tests__/dashboard-tabs.property.test.ts` | 100 |
+| 属性 72：基本面数据卡片渲染完整性 | `frontend/src/views/__tests__/dashboard-fundamentals-cards.property.test.ts` | 100 |
+| 属性 73：基本面颜色编码正确性 | `frontend/src/views/__tests__/dashboard-fundamentals-color.property.test.ts` | 100 |
+| 属性 74：资金流向柱状图颜色映射 | `frontend/src/views/__tests__/dashboard-money-flow-color.property.test.ts` | 100 |
+| 属性 76：加载与错误状态渲染 | `frontend/src/views/__tests__/dashboard-loading-error.property.test.ts` | 100 |
+| 属性 77：切换股票数据状态重置 | `frontend/src/views/__tests__/dashboard-stock-switch-reset.property.test.ts` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+- 后端：`# Feature: a-share-quant-trading-system, Property 69: 基本面 API 响应字段完整性`
+- 前端：`// Feature: a-share-quant-trading-system, Property 71: 标签页切换显隐`
+
+#### 单元测试
+
+**后端：**
+- `GET /data/stock/000001/fundamentals` 正常返回基本面数据的示例
+- `GET /data/stock/INVALID/fundamentals` 返回 404 的示例
+- `GET /data/stock/000001/money-flow` 默认 days=20 正常返回的示例
+- `GET /data/stock/000001/money-flow?days=5` 指定天数返回的示例
+- `GET /data/stock/INVALID/money-flow` 返回 404 的示例
+- `FundamentalsData` → `StockFundamentalsResponse` 字段映射正确性（`revenue_yoy` → `revenue_growth`）的示例
+- `MoneyFlowData` → `MoneyFlowDailyRecord` 单位转换（元 → 万元）的示例
+
+**前端：**
+- DashboardView 渲染三个标签页按钮的示例
+- 点击"基本面"标签页触发 API 调用的示例
+- 点击"资金流向"标签页触发 API 调用的示例
+- 基本面数据卡片正确渲染各指标值的示例
+- 资金流向柱状图正确渲染 20 根柱体的示例
+- 资金流向汇总卡片显示当日和近5日累计金额的示例
+- 接口请求失败时显示错误提示和重试按钮的示例
+- 切换股票代码后旧数据被清除的示例
+
+#### 集成测试
+
+- 查询股票 → 切换基本面标签页 → 验证 API 调用 → 验证数据卡片渲染全链路测试
+- 查询股票 → 切换资金流向标签页 → 验证 API 调用 → 验证柱状图和汇总卡片渲染全链路测试
+- 查询股票 A → 切换到股票 B → 验证数据重置和重新加载全链路测试

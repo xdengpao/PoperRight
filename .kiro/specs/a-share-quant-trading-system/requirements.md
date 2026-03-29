@@ -43,12 +43,12 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 
 #### 验收标准
 
-1. THE DataEngine SHALL 对接Tushare数据接口和AkShare数据接口，获取A股全市场（主板/创业板/科创板/北交所）1分钟、5分钟、15分钟、30分钟、60分钟、日、周、月K线数据，包含成交量、成交额、换手率、量比、涨跌停价。所有数据获取请求SHALL优先调用Tushare接口，AkShare作为备用数据源。
+1. THE DataEngine SHALL 对接Tushare数据接口和AkShare数据接口，获取A股全市场（主板/创业板/科创板/北交所）1分钟、5分钟、15分钟、30分钟、60分钟、日、周、月K线数据，包含成交量、成交额、换手率、量比、涨跌停价。
 2. WHEN 行情数据到达时，THE DataEngine SHALL 在500ms内完成数据接收与入库。
 3. THE DataEngine SHALL 通过Tushare接口每日更新个股财务报表（季度/年度）、业绩预告、违规处罚、股东减持、质押率、市值、PE/PB/ROE估值数据。
 4. THE DataEngine SHALL 通过Tushare接口和AkShare接口实时同步主力资金流向、北向资金、龙虎榜、大宗交易、盘口委比/内外盘数据。
-5. THE DataEngine SHALL 通过Tushare接口和AkShare接口实时同步大盘指数、行业/概念板块、涨跌家数、涨跌停数量、市场情绪指标数据。
-6. THE DataEngine SHALL 采用时序数据库存储行情数据，历史数据保留不少于5年，支持按股票代码、时间范围快速查询。
+5. THE DataEngine SHALL 通过AkShare接口实时同步大盘指数、行业/概念板块、涨跌家数、涨跌停数量、市场情绪指标数据。
+6. THE DataEngine SHALL 采用时序数据库存储行情数据，历史数据保留不少于10年，支持按股票代码、时间范围快速查询。
 7. THE DataEngine SHALL 从配置文件（pydantic-settings / .env）中读取Tushare API Token（`tushare_api_token`）和Tushare API地址（`tushare_api_url`），代码中不得硬编码任何API访问凭证或地址。
 8. THE DataEngine SHALL 从配置文件（pydantic-settings / .env）中读取AkShare请求超时时间（`akshare_request_timeout`）等运行参数，代码中不得硬编码AkShare的运行配置参数。
 9. WHEN Tushare接口调用失败或返回错误时，THE DataEngine SHALL 自动切换至AkShare接口获取同类数据，确保数据获取的连续性。
@@ -333,47 +333,6 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 5. THE WebUI SHALL 在保存策略配置时将因子的 `type` 字段一并持久化至服务端，加载策略时优先使用存储的 `type` 字段，缺失时根据因子名称自动推断所属类型（向后兼容旧数据）。
 6. THE WebUI 选股策略页面 SHALL 消除配置参数的双数据源问题：策略顶层的 `ma_periods` 字段统一从均线趋势配置面板的 `maTrend.ma_periods` 读取（移除因子编辑器区块中独立的均线周期文本输入框），趋势打分阈值统一从均线趋势配置面板的 `maTrend.trend_score_threshold` 读取（移除因子编辑器区块中独立的趋势打分阈值输入框），确保保存和回显使用同一数据源，消除切换策略时参数不一致的问题。
 
-### 需求 24：数据管理页面与双数据源服务适配完善
-
-**用户故事：** 作为量化交易员，我希望数据管理页面能展示Tushare和AkShare两个数据源的实时健康状态、显示每种数据同步实际使用的数据源、支持按数据类型单独触发同步任务、并用真实的数据清洗统计替换硬编码数值，以便全面掌握双数据源运行状况并灵活管理数据同步流程。
-
-#### 验收标准
-
-1. THE DataEngine SHALL 提供 `GET /api/v1/data/sources/health` 接口，该接口分别调用 TushareAdapter 和 AkShareAdapter 的 `health_check()` 方法，返回每个数据源的名称、连通状态（connected 或 disconnected）和检测时间戳。
-2. WHEN 用户打开数据管理页面时，THE WebUI SHALL 调用 `GET /api/v1/data/sources/health` 接口，以状态卡片形式展示 Tushare 和 AkShare 各自的健康状态，连通时卡片显示绿色"已连接"标识，不可用时卡片显示红色"已断开"标识。
-3. THE DataEngine SHALL 更新 `GET /api/v1/data/sync/status` 接口的返回数据，在每条同步状态记录中新增 `data_source` 字段（取值为 "Tushare" 或 "AkShare"）和 `is_fallback` 布尔字段，标识该类型数据最近一次同步实际使用的数据源以及是否触发了故障转移。
-4. THE WebUI 数据管理页面同步状态表格 SHALL 新增"数据源"列，显示每条同步记录实际使用的数据源名称，WHEN `is_fallback` 为 true 时在数据源名称后追加"（故障转移）"标注。
-5. THE DataEngine SHALL 更新 `POST /api/v1/data/sync` 接口，接受可选的 `sync_type` 参数（取值为 "kline"、"fundamentals"、"money_flow" 或 "all"），根据参数值分别调用 `sync_realtime_market.delay()`、`sync_fundamentals.delay()`、`sync_money_flow.delay()` 对应的 Celery 异步任务，`sync_type` 缺省时默认触发全部三种同步任务。
-6. THE WebUI 数据管理页面 SHALL 在手动同步按钮前提供同步类型选择控件（下拉选择框或按钮组），选项包括"全部同步"、"行情数据"、"基本面数据"、"资金流向"，用户选择后点击同步按钮时将对应的 `sync_type` 参数传递至 `POST /api/v1/data/sync` 接口。
-7. THE DataEngine SHALL 提供 `GET /api/v1/data/cleaning/stats` 接口，从数据库中查询并返回实时数据清洗统计信息，包含总股票数、有效标的数、ST/退市剔除数、新股剔除数、停牌剔除数和高质押剔除数。
-8. WHEN 用户打开数据管理页面时，THE WebUI SHALL 调用 `GET /api/v1/data/cleaning/stats` 接口获取实时数据清洗统计，替换当前硬编码的静态数值，在统计卡片中展示从接口返回的各项数据。
-9. IF `GET /api/v1/data/sources/health` 接口调用 TushareAdapter 或 AkShareAdapter 的 `health_check()` 方法时发生异常，THEN THE DataEngine SHALL 捕获该异常并将对应数据源状态标记为 disconnected，接口正常返回结果而非抛出错误。
-10. IF `GET /api/v1/data/cleaning/stats` 接口查询数据库失败，THEN THE WebUI SHALL 在数据清洗统计区域显示错误提示信息并提供重试操作入口。
-
-
-### 需求 25：历史K线数据批量回填
-
-**用户故事：** 作为量化交易员，我希望系统能批量回填所有或制定股票的历史日K线数据并支持每日自动增量同步，以便回测引擎和选股计算拥有完整的历史行情数据基础。
-
-#### 验收标准
-
-1. THE DataEngine SHALL 提供 Celery 异步任务 `sync_historical_kline`，该任务通过 DataSourceRouter（Tushare 主数据源、AkShare 备用数据源故障转移）获取指定股票列表在指定日期范围内的历史日K线数据，并通过 KlineRepository 批量写入 TimescaleDB。
-2. THE DataEngine SHALL 提供 `POST /api/v1/data/backfill` 接口，接受 `symbols`（股票代码列表）、`start_date`（起始日期）、`end_date`（结束日期）、`freq`（K线频率，取值为 "1d"、"1w"、"1M"，默认 "1d"）四个参数，调用 `sync_historical_kline.delay()` 触发异步回填任务，返回任务ID。
-3. THE DataEngine SHALL 提供 `GET /api/v1/data/backfill/status` 接口，从 Redis 中读取回填进度信息，返回 `total`（总股票数）、`completed`（已完成数）、`failed`（失败数）、`current_symbol`（当前正在处理的股票代码）、`status`（任务状态：pending、running、completed、failed）字段。
-4. WHEN `sync_historical_kline` 任务执行时，THE DataEngine SHALL 将回填进度信息（total、completed、failed、current_symbol、status）实时写入 Redis，每完成一只股票的回填后更新一次进度。
-5. THE DataEngine `sync_historical_kline` 任务 SHALL 将股票列表按每批不超过50只的批次进行处理，每批次之间等待至少1秒间隔，避免触发 Tushare 和 AkShare 的 API 频率限制。
-6. WHEN 回填目标日期范围内某只股票的某个交易日已存在K线数据时，THE DataEngine SHALL 跳过该条数据的写入（利用 KlineRepository 的 ON CONFLICT DO NOTHING 机制），确保回填操作幂等，重复执行不产生重复数据。
-7. THE DataEngine `sync_historical_kline` 任务 SHALL 支持 "1d"（日线）、"1w"（周线）、"1M"（月线）三种K线频率的历史数据回填。
-8. WHEN `POST /api/v1/data/backfill` 接口未传入 `start_date` 参数时，THE DataEngine SHALL 使用当前日期往前推 `kline_history_years`（配置默认值10年）作为默认起始日期。
-9. WHEN `POST /api/v1/data/backfill` 接口未传入 `symbols` 参数时，THE DataEngine SHALL 从数据库 StockInfo 表查询全市场有效股票代码列表作为默认回填范围。
-10. THE DataEngine SHALL 在 Celery Beat 调度计划中注册 `sync_daily_kline` 定时任务，每个交易日（周一至周五）16:00 自动执行，回填前一个交易日全市场有效股票的日K线数据，实现历史K线数据的每日增量同步。
-11. IF `sync_historical_kline` 任务在回填某只股票时 DataSourceRouter 的 Tushare 和 AkShare 均调用失败，THEN THE DataEngine SHALL 记录该股票的错误信息，将 failed 计数加1，继续处理下一只股票，任务不因单只股票失败而中断。
-12. THE WebUI 数据管理页面 SHALL 新增"历史数据回填"区域，提供股票代码输入框（支持多个代码逗号分隔，留空表示全市场）、起止日期选择器、K线频率选择控件（日线/周线/月线）和"开始回填"按钮，点击后调用 `POST /api/v1/data/backfill` 接口触发回填任务。
-13. THE WebUI 数据管理页面历史数据回填区域 SHALL 展示回填进度信息，包含进度条（已完成数/总数）、当前处理股票代码、失败数量和任务状态，通过定时轮询 `GET /api/v1/data/backfill/status` 接口（每3秒一次）更新进度显示，任务完成或失败后停止轮询。
-14. WHEN 已有回填任务正在执行时（status 为 running），THE DataEngine `POST /api/v1/data/backfill` 接口 SHALL 拒绝新的回填请求并返回提示信息"已有回填任务正在执行，请等待完成后再试"。
-15. THE WebUI 数据管理页面历史数据回填区域 SHALL 展示回填进度信息，包含进度条（已完成数/总数）、当前处理股票代码、正在回填的数据类型、失败数量和任务状态，通过定时轮询 `GET /api/v1/data/backfill/status` 接口（每3秒一次）更新进度显示，任务完成或失败后停止轮询。
-16. THE DataEngine SHALL 提供 `POST /api/v1/data/backfill/stop` 接口，WHEN 调用时将 Redis 中 `backfill:progress` 的 `status` 字段设为 `"stopping"`，所有正在执行的回填 Celery 任务在处理下一只股票前检测到该状态后立即停止处理并将 `status` 更新为 `"stopped"`，已写入数据库的数据保留不回滚。
-17. WHEN 回填任务状态为 running 或 pending 时，THE WebUI 数据管理页面 SHALL 在"开始回填"按钮旁显示"停止回填"按钮，点击后调用 `POST /api/v1/data/backfill/stop` 接口，按钮在请求期间显示"停止中..."禁用状态，任务停止后按钮隐藏。
 
 ### 需求 24：数据管理页面与双数据源服务适配完善
 
@@ -413,3 +372,22 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 13. THE DataEngine SHALL 在 Celery Beat 调度计划中注册 `sync_daily_kline` 定时任务，每个交易日（周一至周五）16:00 自动执行，回填前一个交易日全市场有效股票的日K线数据，实现历史K线数据的每日增量同步。
 14. THE WebUI 数据管理页面 SHALL 新增"历史数据回填"区域，提供以下控件：数据类型多选复选框（行情数据/基本面数据/资金流向，默认全选）、股票代码输入框（支持多个代码逗号分隔，留空表示全市场）、起止日期选择器、K线频率选择控件（日线/周线/月线，仅当选中行情数据时显示）和"开始回填"按钮，点击后调用 `POST /api/v1/data/backfill` 接口触发回填任务。
 15. THE WebUI 数据管理页面历史数据回填区域 SHALL 展示回填进度信息，包含进度条（已完成数/总数）、当前处理股票代码、正在回填的数据类型、失败数量和任务状态，通过定时轮询 `GET /api/v1/data/backfill/status` 接口（每3秒一次）更新进度显示，任务完成或失败后停止轮询。
+
+### 需求 26：大盘概况页面股票K线图扩展基本面数据与资金流向展示
+
+**用户故事：** 作为量化交易员，我希望在大盘概况页面查询个股K线图时，能同时查看该股票的基本面核心指标和资金流向数据，以便在分析技术走势的同时快速评估个股的基本面质量和主力资金动向，辅助交易决策。
+
+#### 验收标准
+
+1. THE WebUI 大盘概况页面 SHALL 在股票查询K线展示图区域新增"基本面"和"资金流向"两个数据标签页，与现有"K线图"标签页并列展示，用户可通过点击标签页在三个视图之间自由切换。
+2. WHEN 用户在大盘概况页面输入股票代码并查询后切换至"基本面"标签页时，THE WebUI SHALL 调用 `GET /api/v1/data/stock/{symbol}/fundamentals` 接口获取该股票的基本面数据，并以数据卡片形式展示以下核心指标：市盈率（PE TTM）、市净率（PB）、净资产收益率（ROE）、总市值、营收同比增长率、净利润同比增长率。
+3. WHEN 用户在大盘概况页面输入股票代码并查询后切换至"资金流向"标签页时，THE WebUI SHALL 调用 `GET /api/v1/data/stock/{symbol}/money-flow` 接口获取该股票的资金流向数据，并以图表和数据卡片组合形式展示以下核心指标：当日主力资金净流入金额、近5日主力资金净流入累计金额、北向资金持仓变动、大单成交占比。
+4. THE WebUI 大盘概况页面"资金流向"标签页 SHALL 以柱状图形式展示该股票近20个交易日的每日主力资金净流入金额趋势，正值显示为红色柱体，负值显示为绿色柱体。
+5. THE WebUI 大盘概况页面"基本面"标签页 SHALL 对各指标数值进行颜色标注：PE TTM 低于行业均值时标注为绿色（低估）、高于行业均值时标注为红色（高估）；ROE 大于15%时标注为绿色（优质）、低于8%时标注为红色（较差）；营收和净利润同比增长率为正值时标注为红色（增长）、为负值时标注为绿色（下降）。
+6. THE DataEngine SHALL 提供 `GET /api/v1/data/stock/{symbol}/fundamentals` 接口，通过 DataSourceRouter 获取指定股票的最新基本面数据，返回字段包含：`pe_ttm`（市盈率TTM）、`pb`（市净率）、`roe`（净资产收益率）、`market_cap`（总市值，单位：亿元）、`revenue_growth`（营收同比增长率，单位：%）、`net_profit_growth`（净利润同比增长率，单位：%）、`report_period`（报告期）、`updated_at`（数据更新时间）。
+7. THE DataEngine SHALL 提供 `GET /api/v1/data/stock/{symbol}/money-flow` 接口，接受可选的 `days` 查询参数（默认值20），通过 DataSourceRouter 获取指定股票近 `days` 个交易日的资金流向数据，返回字段包含每日记录列表，每条记录包含：`trade_date`（交易日期）、`main_net_inflow`（主力资金净流入，单位：万元）、`north_net_inflow`（北向资金净流入，单位：万元）、`large_order_ratio`（大单成交占比，单位：%）、`super_large_inflow`（超大单净流入，单位：万元）、`large_inflow`（大单净流入，单位：万元）。
+8. IF `GET /api/v1/data/stock/{symbol}/fundamentals` 接口查询的股票代码不存在或无基本面数据，THEN THE DataEngine SHALL 返回 404 状态码和明确的错误提示信息"未找到该股票的基本面数据"。
+9. IF `GET /api/v1/data/stock/{symbol}/money-flow` 接口查询的股票代码不存在或无资金流向数据，THEN THE DataEngine SHALL 返回 404 状态码和明确的错误提示信息"未找到该股票的资金流向数据"。
+10. WHEN 用户在"基本面"或"资金流向"标签页时，THE WebUI SHALL 在数据加载过程中显示加载状态指示器，WHEN 接口请求失败时显示明确的错误提示信息并提供重试操作入口，对应需求21验收标准25的统一加载与错误处理规范。
+11. THE WebUI 大盘概况页面 SHALL 在"基本面"标签页底部显示数据报告期和更新时间，使用户了解基本面数据的时效性。
+12. THE WebUI 大盘概况页面 SHALL 在切换股票查询时自动重置"基本面"和"资金流向"标签页的数据状态，重新加载新股票的对应数据。

@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
 
+    # Tushare 数据源配置
+    tushare_api_token: str = ""
+    tushare_api_url: str = "http://api.tushare.pro"
+
+    # AkShare 数据源配置
+    akshare_request_timeout: float = 30.0
+    akshare_max_retries: int = 3
+
     # 行情数据 API
     market_data_api_key: str = ""
     market_data_api_url: str = "https://api.example.com/market"
@@ -58,6 +66,12 @@ class Settings(BaseSettings):
     # 数据保留
     kline_history_years: int = 10
     audit_log_retention_days: int = 365
+
+    # API 频率限制（每次调用间隔秒数，留 20% 余量避免触发限制）
+    # Tushare: kline 500次/min→0.18s, fundamentals 200次/min→0.40s, moneyflow 300次/min→0.30s
+    rate_limit_kline: float = 0.18
+    rate_limit_fundamentals: float = 0.40
+    rate_limit_money_flow: float = 0.30
 
     @field_validator("app_allowed_hosts", mode="before")
     @classmethod

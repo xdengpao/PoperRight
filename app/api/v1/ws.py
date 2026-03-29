@@ -12,39 +12,6 @@ WebSocket 端点
 
 import logging
 
-import jwt
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
-
-from app.core.config import settings
-from app.core.websocket_manager import ws_manager
-
-logger = logging.getLogger(__name__)
-
-router = APIRouter()
-
-
-def _verify_token(token: str) -> str | None:
-    """
-    验证 JWT token，返回 user_id（sub 字段）。
-    验证失败返回 None。
-    """
-    try:
-        payload = jwt.decode(
-            token,
-            settings.jwt_secret_key,
-            algorithms=[settings.jwt_algorithm],
-        )
-        return payload.get("sub")
-    except jwt.ExpiredSignatureError:
-        logger.warning("WebSocket auth failed: token expired")
-        return None
-    except jwt.InvalidTokenError as exc:
-        logger.warning("WebSocket auth failed: %s", exc)
-        return None
-
-
-import logging
-
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
 from app.core.config import settings

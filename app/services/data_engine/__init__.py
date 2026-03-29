@@ -19,6 +19,12 @@ from app.services.data_engine.stock_filter import (
     normalize_minmax,
     normalize_zscore,
 )
+from app.services.data_engine.base_adapter import BaseDataSourceAdapter, DataSourceUnavailableError
+from app.services.data_engine.tushare_adapter import TushareAdapter
+from app.services.data_engine.akshare_adapter import AkShareAdapter
+from app.services.data_engine.format_converter import TushareFormatConverter, AkShareFormatConverter
+from app.services.data_engine.data_source_router import DataSourceRouter
+from app.services.data_engine.backfill_service import BackfillService
 
 __all__ = [
     "MarketDataClient",
@@ -38,4 +44,12 @@ __all__ = [
     "remove_outliers",
     "normalize_minmax",
     "normalize_zscore",
+    "BaseDataSourceAdapter",
+    "DataSourceUnavailableError",
+    "TushareAdapter",
+    "AkShareAdapter",
+    "TushareFormatConverter",
+    "AkShareFormatConverter",
+    "DataSourceRouter",
+    "BackfillService",
 ]

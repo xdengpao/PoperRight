@@ -110,12 +110,21 @@ async def cache_delete(key: str) -> int:
 
 
 async def init_redis() -> None:
-    """应用启动时验证 Redis 连接"""
-    client = get_redis_client()
-    try:
-        await client.ping()
-    finally:
-        await client.aclose()
+    """应用启动时验证 Redis 连接（带重试）"""
+    for attempt in range(5):
+        try:
+            client = get_redis_client()
+            try:
+                await client.ping()
+                return
+            finally:
+                await client.aclose()
+        except Exception as e:
+            if attempt < 4:
+                import asyncio
+                await asyncio.sleep(1)
+            else:
+                raise RuntimeError(f"Redis 连接失败: {e}") from e
 
 
 async def close_redis() -> None:

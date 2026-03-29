@@ -51,6 +51,7 @@
             <span class="strategy-date">{{ s.created_at?.slice(0, 10) ?? '—' }}</span>
           </div>
           <div class="strategy-actions" @click.stop>
+            <button class="btn-icon" title="重命名策略" @click="startRename(s.id, s.name)">✏️</button>
             <button class="btn-icon" title="导出策略" @click="exportStrategy(s)">📤</button>
             <button class="btn-icon danger" title="删除策略" @click="confirmDelete(s)">🗑</button>
           </div>
@@ -86,16 +87,24 @@
             {{ factorTypeLabel(factor.type) }}
           </div>
 
-          <select v-model="factor.type" class="input factor-type-select" :aria-label="`因子类型 ${idx + 1}`">
+          <select v-model="factor.type" class="input factor-type-select" :aria-label="`因子类型 ${idx + 1}`"
+            @change="factor.factor_name = factorNameOptions[factor.type]?.[0]?.value ?? ''"
+          >
             <option v-for="ft in factorTypes" :key="ft.key" :value="ft.key">{{ ft.label }}</option>
           </select>
 
-          <input
+          <select
             v-model="factor.factor_name"
             class="input factor-name"
-            placeholder="因子名称（如 ma_trend）"
             :aria-label="`因子名称 ${idx + 1}`"
-          />
+          >
+            <option value="" disabled>选择因子</option>
+            <option
+              v-for="opt in factorNameOptions[factor.type]"
+              :key="opt.value"
+              :value="opt.value"
+            >{{ opt.label }}</option>
+          </select>
 
           <select v-model="factor.operator" class="input factor-op" :aria-label="`运算符 ${idx + 1}`">
             <option value=">">&gt;</option>
@@ -147,16 +156,18 @@
         >＋ {{ ft.label }}</button>
       </div>
 
-      <!-- 其他参数 -->
-      <div class="extra-config">
-        <div class="config-item">
-          <label for="ma-periods">均线周期</label>
-          <input id="ma-periods" v-model="config.maPeriods" class="input" placeholder="5,10,20,60,120" />
-        </div>
-        <div class="config-item">
-          <label for="trend-threshold">趋势打分阈值</label>
-          <input id="trend-threshold" v-model.number="config.trendThreshold" type="number" min="0" max="100" class="input" />
-        </div>
+      <!-- 保存修改按钮 -->
+      <div v-if="activeStrategyId" class="save-row">
+        <button
+          class="btn btn-save"
+          @click="saveStrategy"
+          :disabled="saving"
+          aria-label="保存修改"
+        >
+          <span v-if="saving" class="spinner" aria-hidden="true"></span>
+          {{ saving ? '保存中...' : '💾 保存修改' }}
+        </button>
+        <span v-if="saveSuccess" class="save-success">✓ 保存成功</span>
       </div>
     </section>
 
@@ -734,6 +745,27 @@
       </div>
     </div>
 
+    <!-- 重命名对话框 -->
+    <div v-if="renameDialogVisible" class="dialog-overlay" @click.self="renameDialogVisible = false">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="重命名策略">
+        <h3 class="dialog-title">重命名策略</h3>
+        <label for="rename-strategy-name" class="dialog-label">策略名称</label>
+        <input
+          id="rename-strategy-name"
+          v-model="renameNewName"
+          class="input full"
+          placeholder="输入新的策略名称"
+          @keyup.enter="confirmRename"
+        />
+        <div class="dialog-actions">
+          <button class="btn" @click="confirmRename" :disabled="!renameNewName.trim() || renaming">
+            {{ renaming ? '保存中...' : '确认' }}
+          </button>
+          <button class="btn btn-outline" @click="renameDialogVisible = false">取消</button>
+        </div>
+      </div>
+    </div>
+
     <!-- 删除确认对话框 -->
     <div v-if="deleteTarget" class="dialog-overlay" @click.self="deleteTarget = null">
       <div class="dialog" role="dialog" aria-modal="true" aria-label="确认删除">
@@ -802,6 +834,55 @@ const factorTypes: { key: FactorType; label: string }[] = [
   { key: 'sector', label: '板块面' },
 ]
 
+/** 每个因子类型下可选的因子名称枚举 */
+const factorNameOptions: Record<FactorType, { value: string; label: string }[]> = {
+  technical: [
+    { value: 'ma_trend', label: '均线趋势评分' },
+    { value: 'macd_signal', label: 'MACD 多头信号' },
+    { value: 'boll_breakout', label: 'BOLL 突破信号' },
+    { value: 'rsi_strength', label: 'RSI 强势信号' },
+    { value: 'dma_signal', label: 'DMA 信号' },
+    { value: 'ma_support', label: '均线支撑信号' },
+    { value: 'box_breakout', label: '箱体突破' },
+    { value: 'high_breakout', label: '前高突破' },
+    { value: 'trendline_breakout', label: '趋势线突破' },
+    { value: 'breakout_score', label: '突破综合评分' },
+  ],
+  capital: [
+    { value: 'capital_inflow', label: '主力资金净流入' },
+    { value: 'large_order_ratio', label: '大单成交占比' },
+    { value: 'north_inflow', label: '北向资金流入' },
+    { value: 'volume_surge', label: '成交量放大倍数' },
+    { value: 'turnover_rate', label: '换手率' },
+  ],
+  fundamental: [
+    { value: 'pe_ttm', label: 'PE（TTM）' },
+    { value: 'pb', label: 'PB' },
+    { value: 'roe', label: 'ROE' },
+    { value: 'net_profit_growth', label: '净利润同比增长率' },
+    { value: 'revenue_growth', label: '营收同比增长率' },
+    { value: 'market_cap', label: '总市值' },
+  ],
+  sector: [
+    { value: 'sector_rank', label: '板块涨幅排名' },
+    { value: 'sector_trend', label: '板块趋势强度' },
+    { value: 'sector_inflow', label: '板块资金流入' },
+    { value: 'sector_count', label: '板块涨停家数' },
+  ],
+}
+
+function factorNameLabel(type: FactorType, name: string): string {
+  return factorNameOptions[type]?.find((f) => f.value === name)?.label ?? name
+}
+
+/** 根据因子名称推断所属类型（用于加载旧配置时的兼容） */
+function inferFactorType(name: string): FactorType {
+  for (const [type, options] of Object.entries(factorNameOptions) as [FactorType, { value: string }[]][]) {
+    if (options.some((o) => o.value === name)) return type
+  }
+  return 'technical'
+}
+
 function factorTypeLabel(type: string): string {
   return factorTypes.find((f) => f.key === type)?.label ?? type
 }
@@ -828,12 +909,18 @@ const newStrategyName = ref('')
 const deleteTarget = ref<StrategyTemplate | null>(null)
 const deleting = ref(false)
 
+const renameDialogVisible = ref(false)
+const renameStrategyId = ref('')
+const renameNewName = ref('')
+const renaming = ref(false)
+
+const saving = ref(false)
+const saveSuccess = ref(false)
+
 const importInputRef = ref<HTMLInputElement | null>(null)
 
 const config = reactive({
   logic: 'AND' as 'AND' | 'OR',
-  maPeriods: '5,10,20,60,120',
-  trendThreshold: 80,
   factors: [] as FactorCondition[],
 })
 
@@ -1047,8 +1134,175 @@ async function loadStrategies() {
   }
 }
 
-function selectStrategy(id: string) {
-  activeStrategyId.value = activeStrategyId.value === id ? '' : id
+// ─── 默认值常量（用于取消选中时恢复） ──────────────────────────────────────
+
+const MA_TREND_DEFAULTS: MaTrendConfig = {
+  ma_periods: [5, 10, 20, 60, 120],
+  slope_threshold: 0,
+  trend_score_threshold: 80,
+  support_ma_lines: [20, 60],
+}
+
+const BREAKOUT_DEFAULTS: BreakoutConfig = {
+  box_breakout: true,
+  high_breakout: true,
+  trendline_breakout: true,
+  volume_ratio_threshold: 1.5,
+  confirm_days: 1,
+}
+
+const VOLUME_PRICE_DEFAULTS: VolumePriceConfig = {
+  turnover_rate_min: 3,
+  turnover_rate_max: 15,
+  main_flow_threshold: 1000,
+  main_flow_days: 2,
+  large_order_ratio: 30,
+  min_daily_amount: 5000,
+  sector_rank_top: 30,
+}
+
+function resetToDefaults() {
+  // 因子条件编辑器
+  config.logic = 'AND'
+  config.factors = []
+
+  // 均线趋势配置
+  Object.assign(maTrend, {
+    ma_periods: [...MA_TREND_DEFAULTS.ma_periods],
+    slope_threshold: MA_TREND_DEFAULTS.slope_threshold,
+    trend_score_threshold: MA_TREND_DEFAULTS.trend_score_threshold,
+    support_ma_lines: [...MA_TREND_DEFAULTS.support_ma_lines],
+  })
+
+  // 技术指标配置
+  Object.assign(indicatorParams.macd, { ...INDICATOR_DEFAULTS.macd })
+  Object.assign(indicatorParams.boll, { ...INDICATOR_DEFAULTS.boll })
+  Object.assign(indicatorParams.rsi, { ...INDICATOR_DEFAULTS.rsi })
+  Object.assign(indicatorParams.dma, { ...INDICATOR_DEFAULTS.dma })
+
+  // 形态突破配置
+  Object.assign(breakoutConfig, { ...BREAKOUT_DEFAULTS })
+
+  // 量价资金筛选配置
+  Object.assign(volumePriceConfig, { ...VOLUME_PRICE_DEFAULTS })
+}
+
+async function selectStrategy(id: string) {
+  // 取消选中
+  if (activeStrategyId.value === id) {
+    activeStrategyId.value = ''
+    resetToDefaults()
+    return
+  }
+
+  activeStrategyId.value = id
+
+  try {
+    const res = await apiClient.get<StrategyTemplate>(`/strategies/${id}`)
+    const cfg = res.data.config as Record<string, unknown>
+
+    // 回填因子条件编辑器
+    config.logic = (cfg.logic as 'AND' | 'OR') ?? 'AND'
+    const factors = (cfg.factors ?? []) as Array<Record<string, unknown>>
+    const weights = (cfg.weights ?? {}) as Record<string, number>
+    config.factors = factors.map((f) => ({
+      type: (f.type as FactorType) ?? inferFactorType((f.factor_name as string) ?? ''),
+      factor_name: (f.factor_name as string) ?? '',
+      operator: (f.operator as string) ?? '>',
+      threshold: (f.threshold as number | null) ?? null,
+      weight: Math.round(((weights[(f.factor_name as string) ?? ''] ?? 0.5) * 100)),
+    }))
+
+    // 回填均线趋势配置
+    const mt = cfg.ma_trend as Record<string, unknown> | undefined
+    if (mt) {
+      maTrend.ma_periods = Array.isArray(mt.ma_periods) ? [...mt.ma_periods] : [...MA_TREND_DEFAULTS.ma_periods]
+      maTrend.slope_threshold = typeof mt.slope_threshold === 'number' ? mt.slope_threshold : MA_TREND_DEFAULTS.slope_threshold
+      maTrend.trend_score_threshold = typeof mt.trend_score_threshold === 'number' ? mt.trend_score_threshold : MA_TREND_DEFAULTS.trend_score_threshold
+      maTrend.support_ma_lines = Array.isArray(mt.support_ma_lines) ? [...mt.support_ma_lines] : [...MA_TREND_DEFAULTS.support_ma_lines]
+    } else {
+      Object.assign(maTrend, {
+        ma_periods: [...MA_TREND_DEFAULTS.ma_periods],
+        slope_threshold: MA_TREND_DEFAULTS.slope_threshold,
+        trend_score_threshold: MA_TREND_DEFAULTS.trend_score_threshold,
+        support_ma_lines: [...MA_TREND_DEFAULTS.support_ma_lines],
+      })
+    }
+
+    // 回填技术指标配置
+    const ip = cfg.indicator_params as Record<string, Record<string, unknown>> | undefined
+    if (ip) {
+      if (ip.macd) Object.assign(indicatorParams.macd, ip.macd)
+      if (ip.boll) Object.assign(indicatorParams.boll, ip.boll)
+      if (ip.rsi) Object.assign(indicatorParams.rsi, ip.rsi)
+      if (ip.dma) Object.assign(indicatorParams.dma, ip.dma)
+    } else {
+      Object.assign(indicatorParams.macd, { ...INDICATOR_DEFAULTS.macd })
+      Object.assign(indicatorParams.boll, { ...INDICATOR_DEFAULTS.boll })
+      Object.assign(indicatorParams.rsi, { ...INDICATOR_DEFAULTS.rsi })
+      Object.assign(indicatorParams.dma, { ...INDICATOR_DEFAULTS.dma })
+    }
+
+    // 回填形态突破配置
+    const bo = cfg.breakout as Record<string, unknown> | undefined
+    if (bo) {
+      Object.assign(breakoutConfig, {
+        box_breakout: bo.box_breakout ?? BREAKOUT_DEFAULTS.box_breakout,
+        high_breakout: bo.high_breakout ?? BREAKOUT_DEFAULTS.high_breakout,
+        trendline_breakout: bo.trendline_breakout ?? BREAKOUT_DEFAULTS.trendline_breakout,
+        volume_ratio_threshold: bo.volume_ratio_threshold ?? BREAKOUT_DEFAULTS.volume_ratio_threshold,
+        confirm_days: bo.confirm_days ?? BREAKOUT_DEFAULTS.confirm_days,
+      })
+    } else {
+      Object.assign(breakoutConfig, { ...BREAKOUT_DEFAULTS })
+    }
+
+    // 回填量价资金筛选配置
+    const vp = cfg.volume_price as Record<string, unknown> | undefined
+    if (vp) {
+      Object.assign(volumePriceConfig, {
+        turnover_rate_min: vp.turnover_rate_min ?? VOLUME_PRICE_DEFAULTS.turnover_rate_min,
+        turnover_rate_max: vp.turnover_rate_max ?? VOLUME_PRICE_DEFAULTS.turnover_rate_max,
+        main_flow_threshold: vp.main_flow_threshold ?? VOLUME_PRICE_DEFAULTS.main_flow_threshold,
+        main_flow_days: vp.main_flow_days ?? VOLUME_PRICE_DEFAULTS.main_flow_days,
+        large_order_ratio: vp.large_order_ratio ?? VOLUME_PRICE_DEFAULTS.large_order_ratio,
+        min_daily_amount: vp.min_daily_amount ?? VOLUME_PRICE_DEFAULTS.min_daily_amount,
+        sector_rank_top: vp.sector_rank_top ?? VOLUME_PRICE_DEFAULTS.sector_rank_top,
+      })
+    } else {
+      Object.assign(volumePriceConfig, { ...VOLUME_PRICE_DEFAULTS })
+    }
+
+    // 激活该策略（需求 22.3）
+    try {
+      await apiClient.post(`/strategies/${id}/activate`)
+      await loadStrategies()
+    } catch {
+      // 激活失败不阻塞配置回显，仅静默处理
+    }
+  } catch (e) {
+    pageError.value = e instanceof Error ? e.message : '加载策略配置失败'
+  }
+}
+
+// ─── 保存修改 ─────────────────────────────────────────────────────────────────
+
+async function saveStrategy() {
+  if (!activeStrategyId.value) return
+  saving.value = true
+  saveSuccess.value = false
+  try {
+    await apiClient.put(`/strategies/${activeStrategyId.value}`, {
+      config: buildStrategyConfig(),
+    })
+    await loadStrategies()
+    saveSuccess.value = true
+    setTimeout(() => { saveSuccess.value = false }, 2000)
+  } catch (e) {
+    pageError.value = e instanceof Error ? e.message : '保存策略失败'
+  } finally {
+    saving.value = false
+  }
 }
 
 // ─── 新建策略 ─────────────────────────────────────────────────────────────────
@@ -1095,6 +1349,31 @@ async function deleteStrategy() {
 
 // ─── 导出策略 ─────────────────────────────────────────────────────────────────
 
+// ─── 重命名策略 ───────────────────────────────────────────────────────────────
+
+function startRename(id: string, currentName: string) {
+  renameStrategyId.value = id
+  renameNewName.value = currentName
+  renameDialogVisible.value = true
+}
+
+async function confirmRename() {
+  const name = renameNewName.value.trim()
+  if (!name || !renameStrategyId.value) return
+  renaming.value = true
+  try {
+    await apiClient.put(`/strategies/${renameStrategyId.value}`, { name })
+    renameDialogVisible.value = false
+    await loadStrategies()
+  } catch (e) {
+    pageError.value = e instanceof Error ? e.message : '修改策略名称失败'
+  } finally {
+    renaming.value = false
+  }
+}
+
+// ─── 导出策略 ─────────────────────────────────────────────────────────────────
+
 async function exportStrategy(strategy: StrategyTemplate) {
   try {
     const res = await apiClient.get<StrategyTemplate>(`/strategies/${strategy.id}`)
@@ -1117,6 +1396,12 @@ async function onImportFile(event: Event) {
   const input = event.target as HTMLInputElement
   const file = input.files?.[0]
   if (!file) return
+
+  if (strategies.value.length >= MAX_STRATEGIES) {
+    pageError.value = '已达策略上限（20 套），请删除旧策略后再导入'
+    if (importInputRef.value) importInputRef.value.value = ''
+    return
+  }
 
   try {
     const text = await file.text()
@@ -1146,7 +1431,7 @@ async function onImportFile(event: Event) {
 function addFactor(type: FactorType) {
   config.factors.push({
     type,
-    factor_name: '',
+    factor_name: factorNameOptions[type]?.[0]?.value ?? '',
     operator: '>',
     threshold: null,
     weight: 50,
@@ -1160,11 +1445,11 @@ function removeFactor(idx: number) {
 function buildStrategyConfig() {
   return {
     logic: config.logic,
-    factors: config.factors.map(({ type: _type, weight: _weight, ...f }) => f),
+    factors: config.factors.map(({ weight: _weight, ...f }) => f),
     weights: Object.fromEntries(
       config.factors.map((f) => [f.factor_name || f.type, f.weight / 100])
     ),
-    ma_periods: config.maPeriods.split(',').map(Number).filter(Boolean),
+    ma_periods: [...maTrend.ma_periods],
     indicator_params: {
       macd: { ...indicatorParams.macd },
       boll: { ...indicatorParams.boll },
@@ -1202,8 +1487,13 @@ async function runScreen() {
 
 // ─── 初始化 ───────────────────────────────────────────────────────────────────
 
-onMounted(() => {
-  loadStrategies()
+onMounted(async () => {
+  await loadStrategies()
+  // 自动选中 is_active=true 的策略并回显配置（需求 22.3）
+  const active = strategies.value.find((s) => s.is_active)
+  if (active) {
+    await selectStrategy(active.id)
+  }
   loadScheduleStatus()
   startTradingHoursCheck()
 })
@@ -1510,4 +1800,17 @@ details > summary::-webkit-details-marker { display: none; }
 .toggle-switch input:checked + .toggle-track { background: #1f6feb; border-color: #388bfd; }
 .toggle-switch input:checked + .toggle-track::before { transform: translateX(18px); background: #fff; }
 .toggle-switch input:disabled + .toggle-track { opacity: 0.4; cursor: not-allowed; }
+
+/* ─── 保存修改 ──────────────────────────────────────────────────────────────── */
+.save-row {
+  display: flex; align-items: center; gap: 12px;
+  padding-top: 14px; border-top: 1px solid #21262d; margin-top: 4px;
+}
+.btn-save { background: #238636; }
+.btn-save:hover:not(:disabled) { background: #2ea043; }
+.save-success {
+  font-size: 13px; color: #3fb950; font-weight: 500;
+  animation: fadeIn 0.2s ease-in;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 </style>

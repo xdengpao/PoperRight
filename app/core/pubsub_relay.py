@@ -87,53 +87,65 @@ async def _relay_loop(channels: list[str]) -> None:
 async def _dynamic_relay_loop() -> None:
     """
     动态订阅模式：使用 psubscribe 订阅所有用户专属频道模式，
-    同时订阅广播频道。
+    同时订阅广播频道。自动重连。
     """
-    client = get_redis_client()
-    pubsub = client.pubsub()
+    retry_delay = 1.0
+    max_retry_delay = 30.0
 
-    try:
-        # 订阅广播频道（精确匹配）
-        await pubsub.subscribe(*BROADCAST_CHANNELS)
-        # 订阅用户专属频道（模式匹配）
-        await pubsub.psubscribe("alert:*", "screen:result:*")
-        logger.info("PubSub relay started (dynamic mode)")
+    while True:
+        client = get_redis_client()
+        pubsub = client.pubsub()
 
-        async for raw_message in pubsub.listen():
-            msg_type = raw_message["type"]
-            if msg_type not in ("message", "pmessage"):
-                continue
+        try:
+            # 订阅广播频道（精确匹配）
+            await pubsub.subscribe(*BROADCAST_CHANNELS)
+            # 订阅用户专属频道（模式匹配）
+            await pubsub.psubscribe("alert:*", "screen:result:*")
+            logger.info("PubSub relay started (dynamic mode)")
+            retry_delay = 1.0  # 连接成功后重置重试延迟
 
-            channel: str = raw_message.get("channel") or raw_message.get("pattern", "")
-            # pmessage 中实际频道在 "channel" 字段
-            actual_channel: str = raw_message.get("channel", channel)
-            data: str = raw_message["data"]
+            async for raw_message in pubsub.listen():
+                msg_type = raw_message["type"]
+                if msg_type not in ("message", "pmessage"):
+                    continue
 
-            mode, user_id = _resolve_target(actual_channel)
+                channel: str = raw_message.get("channel") or raw_message.get("pattern", "")
+                actual_channel: str = raw_message.get("channel", channel)
+                data: str = raw_message["data"]
 
+                mode, user_id = _resolve_target(actual_channel)
+
+                try:
+                    if mode == "broadcast":
+                        await ws_manager.broadcast(data)
+                    else:
+                        if user_id and ws_manager.is_user_connected(user_id):
+                            await ws_manager.send_to_user(user_id, data)
+                except Exception:
+                    logger.exception("Error forwarding message from channel %s", actual_channel)
+
+        except asyncio.CancelledError:
+            logger.info("PubSub relay task cancelled")
+            raise
+        except Exception:
+            logger.warning(
+                "PubSub relay connection lost, retrying in %.1fs...", retry_delay,
+                exc_info=True,
+            )
+        finally:
             try:
-                if mode == "broadcast":
-                    await ws_manager.broadcast(data)
-                else:
-                    if user_id and ws_manager.is_user_connected(user_id):
-                        await ws_manager.send_to_user(user_id, data)
+                await pubsub.punsubscribe()
+                await pubsub.unsubscribe()
+                await pubsub.aclose()
             except Exception:
-                logger.exception("Error forwarding message from channel %s", actual_channel)
+                pass
+            try:
+                await client.aclose()
+            except Exception:
+                pass
 
-    except asyncio.CancelledError:
-        logger.info("PubSub relay task cancelled")
-        raise
-    finally:
-        try:
-            await pubsub.punsubscribe()
-            await pubsub.unsubscribe()
-            await pubsub.aclose()
-        except Exception:
-            pass
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+        await asyncio.sleep(retry_delay)
+        retry_delay = min(retry_delay * 2, max_retry_delay)
 
 
 class PubSubRelay:
