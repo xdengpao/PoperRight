@@ -32,6 +32,7 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 - **Tushare**：第三方A股金融数据接口平台，提供K线行情、财务报表、资金流向等数据，通过HTTP API + Token认证方式访问
 - **AkShare**：开源A股金融数据接口库，提供行情数据、板块数据、市场情绪等数据，通过Python SDK方式调用
 - **DataSourceConfig**：数据源配置模块，管理Tushare和AkShare的API访问地址与认证凭证
+- **StrategyModuleSelector**：策略模板模块选择器，用于新建策略模板时选择需要启用的可选配置模块
 
 ---
 
@@ -391,3 +392,22 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 10. WHEN 用户在"基本面"或"资金流向"标签页时，THE WebUI SHALL 在数据加载过程中显示加载状态指示器，WHEN 接口请求失败时显示明确的错误提示信息并提供重试操作入口，对应需求21验收标准25的统一加载与错误处理规范。
 11. THE WebUI 大盘概况页面 SHALL 在"基本面"标签页底部显示数据报告期和更新时间，使用户了解基本面数据的时效性。
 12. THE WebUI 大盘概况页面 SHALL 在切换股票查询时自动重置"基本面"和"资金流向"标签页的数据状态，重新加载新股票的对应数据。
+
+### 需求 27：策略模板新建时可选配置模块多选
+
+**用户故事：** 作为量化交易员，我希望在智能选股页面新建策略模板时，能够以多选方式自由选择需要启用的配置模块（因子条件编辑器、均线趋势配置、技术指标配置、形态突破配置、量价资金筛选），这些模块均为可选项而非必选项，以便根据不同的交易策略风格灵活组合所需的配置模块，避免不必要的配置项干扰。
+
+#### 验收标准
+
+1. WHEN 用户在选股策略页面点击"新建策略"时，THE WebUI SHALL 展示策略模板创建表单，表单中包含策略名称输入框和配置模块多选区域，配置模块多选区域以复选框形式列出以下五个可选模块：因子条件编辑器、均线趋势配置、技术指标配置、形态突破配置、量价资金筛选，所有模块默认未勾选。
+2. THE WebUI 策略模板创建表单 SHALL 允许用户勾选零个或多个配置模块，不强制要求勾选任何模块，用户可以仅填写策略名称后直接创建空策略模板。
+3. WHEN 用户完成模块勾选并确认创建策略模板后，THE WebUI SHALL 仅在选股策略页面展示用户所勾选的配置模块面板，未勾选的模块面板隐藏不显示。
+4. THE WebUI SHALL 在已创建的策略模板配置中持久化用户选择的模块列表（`enabled_modules` 字段，取值为 "factor_editor"、"ma_trend"、"indicator_params"、"breakout"、"volume_price" 的任意子集），调用 `POST /api/v1/strategies` 创建策略时将 `enabled_modules` 字段包含在请求体中。
+5. WHEN 用户选中一个已保存的策略模板时，THE WebUI SHALL 根据该策略的 `enabled_modules` 字段动态显示对应的配置模块面板，未启用的模块面板隐藏不显示，对应需求22验收标准1的配置回显逻辑。
+6. THE WebUI 选股策略页面 SHALL 在已选中策略的配置区域提供"管理模块"按钮，WHEN 用户点击"管理模块"时弹出模块选择对话框，允许用户修改当前策略已启用的配置模块，修改后调用 `PUT /api/v1/strategies/{id}` 更新 `enabled_modules` 字段，页面立即刷新显示或隐藏对应的配置面板。
+7. THE StockScreener SHALL 在执行选股时仅应用策略模板中 `enabled_modules` 所列模块对应的筛选逻辑，未启用的模块对应的筛选条件不参与选股计算。
+8. WHEN 策略模板的 `enabled_modules` 为空列表时，THE StockScreener SHALL 跳过所有模块筛选逻辑，返回空的选股结果集。
+9. WHEN 用户通过 `POST /api/v1/screen/run` 接口执行选股时，THE StockScreener SHALL 完成以下完整执行流程：若请求中包含 `strategy_id`，从策略存储中加载该策略的完整配置（含 `config` 和 `enabled_modules`）；若请求中包含 `strategy_config` 而无 `strategy_id`，使用请求中的配置并将 `enabled_modules` 视为全部启用；从本地数据库（TimescaleDB kline 表和 PostgreSQL 业务表）查询全市场有效股票的最新行情数据和因子数据作为选股输入；使用加载的策略配置和 `enabled_modules` 实例化 `ScreenExecutor` 并执行选股；返回包含实际选股结果的 `ScreenResult`（含 `items` 列表、每条结果的 `symbol`、`ref_buy_price`、`trend_score`、`risk_level`、`signals`）。
+10. THE StockScreener `POST /api/v1/screen/run` 接口 SHALL 从本地数据库获取选股所需的股票数据，不直接调用外部数据源接口，具体包括：从 TimescaleDB `kline` 表查询各股票最近 N 个交易日的日 K 线数据（用于均线计算、形态识别、量价分析），从 PostgreSQL `stock_info` 表查询股票基本面数据（PE/PB/ROE/市值等），从 PostgreSQL 资金流向相关表查询主力资金和北向资金数据。
+11. IF `POST /api/v1/screen/run` 接口传入的 `strategy_id` 在策略存储中不存在，THEN THE StockScreener SHALL 返回 HTTP 404 状态码和明确的错误提示信息"策略不存在"。
+12. IF `POST /api/v1/screen/run` 接口执行选股时本地数据库中无可用的行情数据，THEN THE StockScreener SHALL 返回空的选股结果集（`items` 为空列表）并在响应中标注 `is_complete: true`，不抛出异常。

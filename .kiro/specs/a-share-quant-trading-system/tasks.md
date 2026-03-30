@@ -1534,6 +1534,215 @@
 
 ---
 
+## 阶段 25：策略模板可选配置模块多选（需求 27）
+
+### 概述
+
+实现策略模板新建时的可选配置模块多选功能。新增 `enabled_modules` 字段，支持用户在新建策略时以复选框多选方式自由选择需要启用的五个配置模块（因子条件编辑器、均线趋势配置、技术指标配置、形态突破配置、量价资金筛选），所有模块均为可选。前端根据 `enabled_modules` 动态显示/隐藏配置面板，后端 ScreenExecutor 仅应用已启用模块的筛选逻辑，`enabled_modules` 为空时返回空结果。
+
+### 任务
+
+- [x] 25.1 更新后端 API 支持 enabled_modules 字段
+  - [x] 25.1.1 更新 Pydantic 请求模型（`app/api/v1/screen.py`）
+    - 在 `StrategyTemplateIn` 中新增 `enabled_modules: list[str] = Field(default_factory=list)` 字段
+    - 在 `StrategyTemplateUpdate` 中新增 `enabled_modules: list[str] | None = None` 字段
+    - 定义 `VALID_MODULES` 常量集合：`{"factor_editor", "ma_trend", "indicator_params", "breakout", "volume_price"}`
+    - _需求：27.4_
+
+  - [x] 25.1.2 更新策略 CRUD 端点（`app/api/v1/screen.py`）
+    - `POST /strategies`：创建时将 `body.enabled_modules` 存入策略字典
+    - `PUT /strategies/{id}`：更新时支持修改 `enabled_modules`（`body.enabled_modules is not None` 时更新）
+    - `GET /strategies/{id}` 和 `GET /strategies`：返回的策略字典已包含 `enabled_modules`，确保旧策略无该字段时默认返回空列表
+    - _需求：27.4, 27.6_
+
+  - [x] 25.1.3 编写属性 79 测试：任意模块子集均可创建策略
+    - **属性 79：任意模块子集均可创建策略**
+    - 测试文件：`tests/properties/test_strategy_modules_create_properties.py`
+    - 对任意五个模块标识符的子集（包括空集），当策略名称非空时，策略创建请求应被接受且返回的 `enabled_modules` 与请求一致
+    - **验证需求：27.2, 27.4**
+
+  - [x] 25.1.4 编写属性 81 测试：enabled_modules 持久化 round-trip
+    - **属性 81：enabled_modules 持久化 round-trip**
+    - 测试文件：`tests/properties/test_strategy_modules_roundtrip_properties.py`
+    - 对任意合法 `enabled_modules`，通过 POST 创建后 GET 查询返回值一致；通过 PUT 更新后 GET 查询返回值一致
+    - **验证需求：27.4, 27.6**
+
+- [x] 25.2 更新 ScreenExecutor 支持 enabled_modules 筛选逻辑
+  - [x] 25.2.1 修改 ScreenExecutor 构造函数和 _execute 方法（`app/services/screener/screen_executor.py`）
+    - 构造函数新增 `enabled_modules: list[str] | None = None` 参数，内部转为 `set`
+    - `_execute()` 方法：`enabled_modules` 为空集时跳过所有筛选，返回空 `ScreenResult`（items=[]）
+    - `_execute()` 方法：仅当 `"factor_editor"` 在 `enabled_modules` 中时执行 `StrategyEngine.screen_stocks()`，否则所有股票初始通过
+    - 后续各模块筛选（ma_trend、indicator_params、breakout、volume_price）仅在 `enabled_modules` 包含对应标识符时执行
+    - _需求：27.7, 27.8_
+
+  - [x] 25.2.2 编写属性 82 测试：选股仅应用已启用模块的筛选逻辑
+    - **属性 82：选股仅应用已启用模块的筛选逻辑**
+    - 测试文件：`tests/properties/test_screen_enabled_modules_properties.py`
+    - 对任意策略配置和任意 `enabled_modules` 子集，ScreenExecutor 仅应用已启用模块的筛选逻辑；`enabled_modules` 为空时返回空结果集
+    - **验证需求：27.7, 27.8**
+
+- [x] 25.3 检查点 - 确保后端 API 和选股逻辑正确
+  - 确保 `POST /strategies` 和 `PUT /strategies/{id}` 正确存储和更新 `enabled_modules`
+  - 确保 `GET /strategies/{id}` 返回包含 `enabled_modules` 的策略数据，旧策略默认空列表
+  - 确保 ScreenExecutor `enabled_modules=[]` 时返回空结果
+  - 确保 ScreenExecutor 仅执行已启用模块的筛选逻辑
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 25.4 实现前端策略创建对话框模块多选（ScreenerView）
+  - [x] 25.4.1 新增 TypeScript 类型定义
+    - 定义 `StrategyModule` 类型：`'factor_editor' | 'ma_trend' | 'indicator_params' | 'breakout' | 'volume_price'`
+    - 定义 `ModuleOption` 接口：`{ key: StrategyModule, label: string }`
+    - 定义 `ALL_MODULES` 常量数组：五个模块的 key 和中文 label 映射
+    - 更新 `StrategyTemplate` 接口新增 `enabled_modules: StrategyModule[]` 字段
+    - _需求：27.1_
+
+  - [x] 25.4.2 实现创建对话框模块多选区域
+    - 在"新建策略"对话框中策略名称输入框下方新增 `<fieldset>` 配置模块多选区域
+    - 以复选框形式列出五个可选模块，所有复选框默认未勾选
+    - 新增 `newStrategyModules` ref（`StrategyModule[]`，默认空数组）
+    - 提示文字："所有模块均为可选，可不勾选任何模块直接创建空策略"
+    - `handleCreate()` 提交时将 `enabled_modules: newStrategyModules.value` 包含在 POST 请求体中
+    - 创建成功后重置 `newStrategyModules` 为空数组
+    - _需求：27.1, 27.2, 27.4_
+
+  - [x] 25.4.3 编写属性 78 测试：创建对话框默认展示五个未勾选的模块复选框
+    - **属性 78：创建对话框默认展示五个未勾选的模块复选框**
+    - 测试文件：`frontend/src/views/__tests__/strategy-create-modules.property.test.ts`
+    - 对任意创建对话框渲染状态，模块多选区域应包含恰好 5 个复选框且初始均未勾选
+    - **验证需求：27.1**
+
+- [x] 25.5 实现前端配置面板条件渲染（ScreenerView）
+  - [x] 25.5.1 实现 enabled_modules 驱动的面板显示/隐藏
+    - 新增 `currentEnabledModules` ref（`StrategyModule[]`，默认空数组）
+    - 新增 `isModuleEnabled(moduleKey)` 辅助函数
+    - 选中策略时（`selectStrategy()`）从 API 返回数据中读取 `enabled_modules` 并更新 `currentEnabledModules`
+    - 旧策略无 `enabled_modules` 字段时默认为空列表（向后兼容，所有面板隐藏）
+    - 五个配置面板分别用 `v-if="isModuleEnabled('xxx')"` 条件渲染
+    - 取消选中策略时重置 `currentEnabledModules` 为空数组
+    - _需求：27.3, 27.5_
+
+  - [x] 25.5.2 编写属性 80 测试：配置面板可见性由 enabled_modules 驱动
+    - **属性 80：配置面板可见性由 enabled_modules 驱动**
+    - 测试文件：`frontend/src/views/__tests__/strategy-panel-visibility.property.test.ts`
+    - 对任意 `enabled_modules` 值，仅显示已启用模块的面板，未启用的隐藏；空列表时所有面板隐藏
+    - **验证需求：27.3, 27.5**
+
+- [x] 25.6 实现前端"管理模块"对话框（ScreenerView）
+  - [x] 25.6.1 实现管理模块按钮和对话框
+    - 在已选中策略的配置区域顶部新增"⚙️ 管理模块"按钮（仅当有策略选中时显示）
+    - 按钮旁显示"已启用 N 个模块"摘要文字
+    - 点击弹出模块选择对话框，预勾选当前策略的 `enabled_modules`
+    - 确认后调用 `PUT /api/v1/strategies/{id}` 提交 `{ enabled_modules: editingModules }`
+    - 保存成功后更新 `currentEnabledModules`，页面立即刷新面板显示/隐藏
+    - 保存失败时显示错误提示"更新模块配置失败"，不修改当前面板状态
+    - _需求：27.6_
+
+- [x] 25.7 检查点 - 确保前端模块选择功能正常
+  - 确保新建策略对话框展示 5 个未勾选的模块复选框
+  - 确保勾选模块后创建策略，POST 请求体包含正确 `enabled_modules`
+  - 确保不勾选任何模块可直接创建空策略
+  - 确保选中策略后仅显示 `enabled_modules` 中的配置面板
+  - 确保"管理模块"对话框预勾选当前模块，修改后面板立即刷新
+  - 确保旧策略无 `enabled_modules` 字段时所有面板隐藏
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 25.8 编写集成测试
+  - [x] 25.8.1 新建策略（选择 2 个模块）→ 选中策略 → 验证仅显示 2 个面板 → 管理模块添加 1 个 → 验证显示 3 个面板全链路测试
+    - 测试文件：`tests/integration/test_strategy_modules_integration.py`
+    - _需求：27.1, 27.3, 27.5, 27.6_
+
+  - [x] 25.8.2 新建空策略（0 个模块）→ 执行选股 → 验证返回空结果全链路测试
+    - 测试文件：`tests/integration/test_strategy_modules_integration.py`（同文件）
+    - _需求：27.2, 27.8_
+
+  - [x] 25.8.3 新建策略（选择 factor_editor + ma_trend）→ 执行选股 → 验证仅应用因子和均线筛选逻辑全链路测试
+    - 测试文件：`tests/integration/test_strategy_modules_integration.py`（同文件）
+    - _需求：27.7_
+
+- [x] 25.9 最终检查点 - 确保阶段 25 所有功能和测试通过
+  - 确保 `StrategyTemplateIn` 和 `StrategyTemplateUpdate` 包含 `enabled_modules` 字段
+  - 确保策略 CRUD 端点正确存储、更新和返回 `enabled_modules`，旧策略默认空列表
+  - 确保 ScreenExecutor `enabled_modules` 为空时返回空结果，非空时仅执行已启用模块筛选
+  - 确保前端创建对话框展示 5 个未勾选复选框，支持零个或多个模块选择
+  - 确保前端配置面板根据 `enabled_modules` 动态显示/隐藏
+  - 确保"管理模块"对话框正确预勾选、保存后面板立即刷新
+  - 确保所有新增属性测试（属性 78-82）和集成测试通过
+  - 确保所有测试通过，ask the user if questions arise.
+
+---
+
+## 阶段 26：选股执行端点实装——本地数据库驱动的选股流程（需求 27.9–27.12）
+
+### 概述
+
+将 `POST /api/v1/screen/run` 端点从 stub 实装为完整的选股执行流程：从策略存储加载配置 → 从本地数据库（TimescaleDB kline 表 + PostgreSQL stock_info 表）查询股票数据 → 转换为因子字典 → 实例化 ScreenExecutor 执行选股 → 返回真实结果。新增 `ScreenDataProvider` 服务层封装本地数据查询和因子转换逻辑。
+
+### 任务
+
+- [x] 26.1 实现 ScreenDataProvider 服务层
+  - [x] 26.1.1 创建 `app/services/screener/screen_data_provider.py`，实现 `ScreenDataProvider` 类
+    - 构造函数接受可选的 `pg_session`（PostgreSQL）和 `ts_session`（TimescaleDB）参数，支持依赖注入
+    - `load_screen_data(lookback_days, screen_date)` 异步方法：查询 stock_info 有效股票 → 逐只查询 kline → 转换为因子字典
+    - `_load_valid_stocks()` 异步方法：从 PostgreSQL stock_info 表查询 `is_st=False AND is_delisted=False` 的全市场有效股票
+    - `_build_factor_dict(stock, bars)` 静态方法：将 StockInfo + KlineBar 列表转换为因子字典，包含最新行情（close/open/high/low/volume/amount/turnover/vol_ratio）、历史序列（closes/highs/lows/volumes/amounts/turnovers）、基本面因子（pe_ttm/pb/roe/market_cap）
+    - 默认回溯 365 天（日历日），覆盖 MA250 所需的约 250 个交易日
+    - 单只股票数据加载失败时记录 warning 日志并跳过，不中断整体流程
+    - _需求：27.9, 27.10_
+
+- [x] 26.2 实装 `run_screen()` 端点
+  - [x] 26.2.1 重写 `app/api/v1/screen.py` 中的 `run_screen()` 函数
+    - 策略加载逻辑：`strategy_id` 存在时从 `_strategies` 内存字典加载 `config` 和 `enabled_modules`；`strategy_id` 不存在时返回 HTTP 404（需求 27.11）；仅有 `strategy_config` 时使用请求配置，`enabled_modules=None`（全部启用）
+    - 数据查询：使用 `AsyncSessionPG` 和 `AsyncSessionTS` 创建 `ScreenDataProvider`，调用 `load_screen_data()` 获取全市场股票因子数据
+    - 空数据处理：`stocks_data` 为空时返回 `items=[]`、`is_complete=true`（需求 27.12）
+    - 选股执行：使用 `StrategyConfig.from_dict(config_dict)` 解析配置，实例化 `ScreenExecutor(strategy_config, strategy_id, enabled_modules)` 并调用 `run_eod_screen()` 或 `run_realtime_screen()`
+    - 结果序列化：将 `ScreenResult` 转换为 dict 返回，包含 `strategy_id`、`screen_type`、`screen_time`、`items`（每条含 symbol/ref_buy_price/trend_score/risk_level/signals/has_fake_breakout）、`is_complete`
+    - 新增 `from fastapi import HTTPException` 导入和 `from app.core.database import AsyncSessionPG, AsyncSessionTS` 导入
+    - _需求：27.9, 27.10, 27.11, 27.12_
+
+- [x] 26.3 编写属性测试
+  - [x] 26.3.1 编写属性 83 测试：选股执行端点完整流程正确性
+    - **属性 83：选股执行端点完整流程正确性（本地数据库驱动）**
+    - 测试文件：`tests/properties/test_screen_run_flow_properties.py`
+    - 对任意合法策略配置和非空股票因子数据，验证：通过 strategy_id 加载的配置与存储一致；ScreenDataProvider 仅查询本地数据库（mock 验证无外部适配器调用）；返回的 ScreenResult 中每条 ScreenItem 包含 symbol、ref_buy_price、trend_score、risk_level、signals 全部字段且均不为空
+    - 最少 100 次迭代
+    - **验证需求：27.9, 27.10**
+
+  - [x] 26.3.2 编写属性 84 测试：不存在的 strategy_id 返回 404
+    - **属性 84：不存在的 strategy_id 返回 404**
+    - 测试文件：`tests/properties/test_screen_run_flow_properties.py`
+    - 对任意不在策略存储中的 UUID，POST /screen/run 应返回 HTTP 404 且响应包含"策略不存在"
+    - 最少 100 次迭代
+    - **验证需求：27.11**
+
+  - [x] 26.3.3 编写属性 85 测试：本地数据库无行情数据时返回空结果
+    - **属性 85：本地数据库无行情数据时返回空结果**
+    - 测试文件：`tests/properties/test_screen_run_flow_properties.py`
+    - 对任意合法策略配置，当 ScreenDataProvider 返回空字典时，端点应返回 items=[] 且 is_complete=true，不抛出异常
+    - 最少 100 次迭代
+    - **验证需求：27.12**
+
+- [x] 26.4 编写集成测试
+  - [x] 26.4.1 创建策略 → 写入测试 K 线数据 → 执行选股 → 验证返回真实结果全链路测试
+    - 测试文件：`tests/integration/test_screen_run_integration.py`
+    - 通过 POST /strategies 创建策略（含 enabled_modules），向 _strategies 写入测试数据；mock ScreenDataProvider 返回预设的股票因子数据；调用 POST /screen/run 传入 strategy_id；验证返回的 items 非空且字段完整
+    - _需求：27.9, 27.10_
+
+  - [x] 26.4.2 不存在的 strategy_id → 404 + 空数据库 → 空结果集成测试
+    - 测试文件：`tests/integration/test_screen_run_integration.py`（同文件）
+    - 验证不存在的 strategy_id 返回 404；验证 ScreenDataProvider 返回空数据时端点返回空结果
+    - _需求：27.11, 27.12_
+
+- [x] 26.5 检查点 - 确保阶段 26 所有功能和测试通过
+  - 确保 `ScreenDataProvider` 正确查询 stock_info 和 kline 表并转换为因子字典
+  - 确保 `run_screen()` 端点正确加载策略配置（strategy_id → _strategies 查找）
+  - 确保 strategy_id 不存在时返回 HTTP 404
+  - 确保本地数据库无行情数据时返回空结果（items=[], is_complete=true）
+  - 确保选股结果包含完整的 ScreenItem 字段（symbol/ref_buy_price/trend_score/risk_level/signals）
+  - 确保所有新增属性测试（属性 83-85）和集成测试通过
+  - 确保所有测试通过，ask the user if questions arise.
+
+---
+
 ## 备注
 
 - 标记 `*` 的子任务为可选任务，可跳过以加速 MVP 交付

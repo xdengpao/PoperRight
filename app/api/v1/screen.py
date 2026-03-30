@@ -11,18 +11,25 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 
-from app.core.redis_client import get_redis
+from app.core.database import AsyncSessionPG, AsyncSessionTS
+from app.core.redis_client import cache_get, cache_set, get_redis
+from app.core.schemas import ScreenType, StrategyConfig
+from app.services.screener.screen_data_provider import ScreenDataProvider
+from app.services.screener.screen_executor import ScreenExecutor
 
 router = APIRouter(tags=["选股"])
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -108,16 +115,31 @@ class ScreenRunRequest(BaseModel):
     screen_type: Literal["EOD", "REALTIME"] = "EOD"
 
 
+# ---------------------------------------------------------------------------
+# 可选配置模块常量（需求 27）
+# ---------------------------------------------------------------------------
+
+VALID_MODULES: set[str] = {
+    "factor_editor",
+    "ma_trend",
+    "indicator_params",
+    "breakout",
+    "volume_price",
+}
+
+
 class StrategyTemplateIn(BaseModel):
     name: str
     config: StrategyConfigIn
     is_active: bool = False
+    enabled_modules: list[str] = Field(default_factory=list)
 
 
 class StrategyTemplateUpdate(BaseModel):
     name: str | None = None
     config: StrategyConfigIn | None = None
     is_active: bool | None = None
+    enabled_modules: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +147,167 @@ class StrategyTemplateUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 _strategies: dict[str, dict] = {}  # id -> strategy dict
+
+
+# ---------------------------------------------------------------------------
+# 内置策略模板（系统预置，可编辑）
+# ---------------------------------------------------------------------------
+
+_BUILTIN_TEMPLATES: list[dict] = [
+    {
+        "id": "00000000-0000-0000-0000-000000000001",
+        "name": "均线趋势选股",
+        "is_active": False,
+        "is_builtin": True,
+        "enabled_modules": ["ma_trend"],
+        "config": {
+            "factors": [],
+            "logic": "AND",
+            "weights": {},
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {
+                "ma_periods": [5, 10, 20, 60, 120],
+                "slope_threshold": 0.0,
+                "trend_score_threshold": 80,
+                "support_ma_lines": [20, 60],
+            },
+            "indicator_params": {},
+            "breakout": {},
+            "volume_price": {},
+        },
+        "created_at": "2026-01-01T00:00:00",
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000002",
+        "name": "MACD+RSI 技术信号",
+        "is_active": False,
+        "is_builtin": True,
+        "enabled_modules": ["indicator_params"],
+        "config": {
+            "factors": [],
+            "logic": "AND",
+            "weights": {},
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {},
+            "indicator_params": {
+                "macd_fast": 12,
+                "macd_slow": 26,
+                "macd_signal": 9,
+                "rsi_period": 14,
+                "rsi_lower": 50,
+                "rsi_upper": 80,
+                "boll_period": 20,
+                "boll_std_dev": 2.0,
+                "dma_short": 10,
+                "dma_long": 50,
+            },
+            "breakout": {},
+            "volume_price": {},
+        },
+        "created_at": "2026-01-01T00:00:01",
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000003",
+        "name": "形态突破选股",
+        "is_active": False,
+        "is_builtin": True,
+        "enabled_modules": ["breakout"],
+        "config": {
+            "factors": [],
+            "logic": "AND",
+            "weights": {},
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {},
+            "indicator_params": {},
+            "breakout": {
+                "box_breakout": True,
+                "high_breakout": True,
+                "trendline_breakout": True,
+                "volume_ratio_threshold": 1.5,
+                "confirm_days": 1,
+            },
+            "volume_price": {},
+        },
+        "created_at": "2026-01-01T00:00:02",
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000004",
+        "name": "多模块联合选股",
+        "is_active": False,
+        "is_builtin": True,
+        "enabled_modules": ["ma_trend", "indicator_params", "breakout"],
+        "config": {
+            "factors": [],
+            "logic": "AND",
+            "weights": {},
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {
+                "ma_periods": [5, 10, 20, 60, 120],
+                "slope_threshold": 0.0,
+                "trend_score_threshold": 80,
+                "support_ma_lines": [20, 60],
+            },
+            "indicator_params": {
+                "macd_fast": 12,
+                "macd_slow": 26,
+                "macd_signal": 9,
+                "boll_period": 20,
+                "boll_std_dev": 2.0,
+                "rsi_period": 14,
+                "rsi_lower": 50,
+                "rsi_upper": 80,
+                "dma_short": 10,
+                "dma_long": 50,
+            },
+            "breakout": {
+                "box_breakout": True,
+                "high_breakout": True,
+                "trendline_breakout": True,
+                "volume_ratio_threshold": 1.5,
+                "confirm_days": 1,
+            },
+            "volume_price": {},
+        },
+        "created_at": "2026-01-01T00:00:03",
+    },
+    {
+        "id": "00000000-0000-0000-0000-000000000005",
+        "name": "价值成长+趋势",
+        "is_active": False,
+        "is_builtin": True,
+        "enabled_modules": ["factor_editor", "ma_trend"],
+        "config": {
+            "factors": [
+                {"factor_name": "pe_ttm", "operator": "<=", "threshold": 30.0, "params": {}},
+                {"factor_name": "roe", "operator": ">=", "threshold": 0.08, "params": {}},
+                {"factor_name": "market_cap", "operator": ">=", "threshold": 5000000000.0, "params": {}},
+            ],
+            "logic": "AND",
+            "weights": {},
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {
+                "ma_periods": [5, 10, 20, 60, 120],
+                "slope_threshold": 0.0,
+                "trend_score_threshold": 80,
+                "support_ma_lines": [20, 60],
+            },
+            "indicator_params": {},
+            "breakout": {},
+            "volume_price": {},
+        },
+        "created_at": "2026-01-01T00:00:04",
+    },
+]
+
+
+def _seed_builtin_templates() -> None:
+    """将内置策略模板注入内存存储（仅在尚未存在时）。"""
+    for tpl in _BUILTIN_TEMPLATES:
+        if tpl["id"] not in _strategies:
+            _strategies[tpl["id"]] = dict(tpl)
+
+
+_seed_builtin_templates()
 
 
 # ---------------------------------------------------------------------------
@@ -176,14 +359,154 @@ def _next_weekday_1530(now: datetime) -> datetime:
 
 @router.post("/screen/run")
 async def run_screen(body: ScreenRunRequest) -> dict:
-    """执行选股（盘后/实时）。"""
-    return {
-        "strategy_id": str(body.strategy_id or uuid4()),
-        "screen_type": body.screen_type,
-        "screen_time": datetime.now().isoformat(),
-        "items": [],
-        "is_complete": True,
+    """
+    执行选股（盘后/实时）。
+
+    流程：
+    1. 加载策略配置（从 strategy_id 或 strategy_config）
+    2. 从本地数据库查询全市场股票数据
+    3. 实例化 ScreenExecutor 执行选股
+    4. 返回选股结果
+
+    错误处理：
+    - strategy_id 不存在 → HTTP 404
+    - 本地数据库无行情数据 → 返回空结果（items=[], is_complete=true）
+    """
+    # 1. 加载策略配置
+    strategy_id_str: str | None = None
+    config_dict: dict | None = None
+    enabled_modules: list[str] | None = None
+
+    if body.strategy_id is not None:
+        sid = str(body.strategy_id)
+        if sid not in _strategies:
+            raise HTTPException(status_code=404, detail="策略不存在")
+        strategy = _strategies[sid]
+        strategy_id_str = sid
+        config_dict = strategy.get("config", {})
+        enabled_modules = strategy.get("enabled_modules", [])
+    elif body.strategy_config is not None:
+        strategy_id_str = str(uuid4())
+        config_dict = body.strategy_config.model_dump()
+        enabled_modules = None  # 无 strategy_id 时视为全部启用
+    else:
+        # 既无 strategy_id 也无 strategy_config，返回空结果
+        return {
+            "strategy_id": str(uuid4()),
+            "screen_type": body.screen_type,
+            "screen_time": datetime.now().isoformat(),
+            "items": [],
+            "is_complete": True,
+        }
+
+    # 解析策略配置
+    strategy_config = StrategyConfig.from_dict(config_dict)
+
+    logger.info(
+        "选股请求: strategy_id=%s, enabled_modules=%s, factors=%d",
+        strategy_id_str, enabled_modules, len(strategy_config.factors),
+    )
+
+    # 2. 从本地数据库查询股票数据
+    async with AsyncSessionPG() as pg_session, AsyncSessionTS() as ts_session:
+        provider = ScreenDataProvider(
+            pg_session=pg_session,
+            ts_session=ts_session,
+        )
+        stocks_data = await provider.load_screen_data()
+
+    logger.info("数据加载完成: stocks_data 共 %d 只股票", len(stocks_data))
+
+    # 抽样输出第一只股票的因子键，帮助诊断
+    if stocks_data:
+        sample_sym = next(iter(stocks_data))
+        sample_data = stocks_data[sample_sym]
+        derived_keys = ["ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout",
+                        "turnover_check", "money_flow", "large_order"]
+        sample_factors = {k: sample_data.get(k, "MISSING") for k in derived_keys}
+        logger.info(
+            "抽样股票 %s 派生因子: %s, bars数量(closes): %d",
+            sample_sym, sample_factors, len(sample_data.get("closes", [])),
+        )
+
+    # 3. 无行情数据时返回空结果（需求 27.12）
+    if not stocks_data:
+        return {
+            "strategy_id": strategy_id_str,
+            "screen_type": body.screen_type,
+            "screen_time": datetime.now().isoformat(),
+            "items": [],
+            "is_complete": True,
+        }
+
+    # 4. 执行选股
+    executor = ScreenExecutor(
+        strategy_config=strategy_config,
+        strategy_id=strategy_id_str,
+        enabled_modules=enabled_modules,
+    )
+
+    logger.info(
+        "ScreenExecutor 初始化: enabled_modules=%s, factor_editor启用=%s",
+        executor._enabled_modules, executor._is_module_enabled("factor_editor"),
+    )
+
+    screen_type = ScreenType(body.screen_type)
+    if screen_type == ScreenType.EOD:
+        result = executor.run_eod_screen(stocks_data)
+    else:
+        result = executor.run_realtime_screen(stocks_data)
+
+    logger.info(
+        "选股完成: 共 %d 只股票入选, screen_type=%s",
+        len(result.items), result.screen_type.value,
+    )
+    if result.items:
+        for item in result.items[:3]:
+            logger.info(
+                "  入选: %s, trend_score=%.1f, signals=%s",
+                item.symbol, item.trend_score,
+                [(s.category.value, s.label) for s in item.signals],
+            )
+    else:
+        logger.warning("选股结果为空 — 无股票满足筛选条件")
+
+    # 5. 缓存结果到 Redis（供 GET /screen/results 查询）
+    screen_time_str = result.screen_time.isoformat()
+    response = {
+        "strategy_id": str(result.strategy_id),
+        "screen_type": result.screen_type.value,
+        "screen_time": screen_time_str,
+        "items": [
+            {
+                "symbol": item.symbol,
+                "name": stocks_data.get(item.symbol, {}).get("name", item.symbol),
+                "ref_buy_price": float(item.ref_buy_price),
+                "trend_score": item.trend_score,
+                "risk_level": item.risk_level.value,
+                "signals": [
+                    {
+                        "category": s.category.value,
+                        "label": s.label,
+                        "is_fake_breakout": s.is_fake_breakout,
+                    }
+                    for s in item.signals
+                ],
+                "has_fake_breakout": item.has_fake_breakout,
+                "screen_time": screen_time_str,
+            }
+            for item in result.items
+        ],
+        "is_complete": result.is_complete,
     }
+
+    # 缓存到 Redis，24 小时过期
+    cache_key = f"screen:results:{strategy_id_str}"
+    await cache_set(cache_key, json.dumps(response), ex=86400)
+    # 同时缓存最新一次结果的 key，方便无参查询
+    await cache_set("screen:results:latest", json.dumps(response), ex=86400)
+
+    return response
 
 
 @router.get("/screen/results")
@@ -193,8 +516,39 @@ async def get_screen_results(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> dict:
-    """查询选股结果。"""
-    return {"total": 0, "page": page, "page_size": page_size, "items": []}
+    """查询选股结果（从 Redis 缓存读取最近一次执行结果）。"""
+    # 优先按 strategy_id 查询，否则取最新结果
+    if strategy_id:
+        cache_key = f"screen:results:{strategy_id}"
+    else:
+        cache_key = "screen:results:latest"
+
+    raw = await cache_get(cache_key)
+    if not raw:
+        return {"total": 0, "page": page, "page_size": page_size, "items": []}
+
+    data = json.loads(raw)
+    all_items = data.get("items", [])
+
+    # 按 screen_type 过滤
+    if screen_type and data.get("screen_type") != screen_type:
+        return {"total": 0, "page": page, "page_size": page_size, "items": []}
+
+    # 分页
+    total = len(all_items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged_items = all_items[start:end]
+
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "items": paged_items,
+        "strategy_id": data.get("strategy_id"),
+        "screen_type": data.get("screen_type"),
+        "screen_time": data.get("screen_time"),
+    }
 
 
 @router.get("/screen/export")
@@ -254,6 +608,8 @@ async def list_strategies(
 ) -> list:
     """查询当前用户的策略模板列表。"""
     items = sorted(_strategies.values(), key=lambda s: s.get("created_at", ""), reverse=True)
+    for item in items:
+        item.setdefault("enabled_modules", [])
     return items
 
 
@@ -266,6 +622,7 @@ async def create_strategy(body: StrategyTemplateIn) -> dict:
         "name": body.name,
         "config": body.config.model_dump(),
         "is_active": body.is_active,
+        "enabled_modules": body.enabled_modules,
         "created_at": datetime.now().isoformat(),
     }
     _strategies[sid] = strategy
@@ -277,9 +634,10 @@ async def get_strategy(strategy_id: UUID) -> dict:
     """查询单个策略模板详情。"""
     sid = str(strategy_id)
     if sid not in _strategies:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="策略不存在")
-    return _strategies[sid]
+    s = _strategies[sid]
+    s.setdefault("enabled_modules", [])
+    return s
 
 
 @router.put("/strategies/{strategy_id}")
@@ -287,7 +645,6 @@ async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> di
     """更新策略模板。"""
     sid = str(strategy_id)
     if sid not in _strategies:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="策略不存在")
     s = _strategies[sid]
     if body.name is not None:
@@ -296,14 +653,19 @@ async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> di
         s["config"] = body.config.model_dump()
     if body.is_active is not None:
         s["is_active"] = body.is_active
+    if body.enabled_modules is not None:
+        s["enabled_modules"] = body.enabled_modules
+    s.setdefault("enabled_modules", [])
     return s
 
 
 @router.delete("/strategies/{strategy_id}")
 async def delete_strategy(strategy_id: UUID) -> dict:
-    """删除策略模板。"""
+    """删除策略模板（内置模板不可删除）。"""
     sid = str(strategy_id)
     if sid in _strategies:
+        if _strategies[sid].get("is_builtin"):
+            raise HTTPException(status_code=400, detail="内置策略模板不可删除")
         del _strategies[sid]
     return {"id": sid, "deleted": True}
 

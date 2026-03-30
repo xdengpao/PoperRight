@@ -139,6 +139,11 @@ def sync_realtime_market(self, symbols: list[str] | None = None) -> dict:
     Returns:
         同步结果摘要字典
     """
+    # 行情 API 未配置时跳过（避免无效连接错误）
+    if not settings.market_data_api_key or "localhost" in settings.market_data_api_url:
+        logger.debug("行情 API 未配置，跳过实时行情同步")
+        return {"status": "skipped", "reason": "market_api_not_configured"}
+
     if not _is_trading_hours():
         logger.debug("非交易时段，跳过实时行情同步")
         _run_async(_update_sync_status(

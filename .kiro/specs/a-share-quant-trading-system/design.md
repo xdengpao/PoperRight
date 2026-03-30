@@ -4107,3 +4107,1001 @@ function resetTabData() {
 - 查询股票 → 切换基本面标签页 → 验证 API 调用 → 验证数据卡片渲染全链路测试
 - 查询股票 → 切换资金流向标签页 → 验证 API 调用 → 验证柱状图和汇总卡片渲染全链路测试
 - 查询股票 A → 切换到股票 B → 验证数据重置和重新加载全链路测试
+
+---
+
+## 需求 27：策略模板新建时可选配置模块多选
+
+### 概述
+
+当前系统新建策略模板时，所有五个配置模块（因子条件编辑器、均线趋势配置、技术指标配置、形态突破配置、量价资金筛选）默认全部展示，用户无法按需选择。本次设计新增 `enabled_modules` 字段，支持用户在新建策略时以复选框多选方式自由选择需要启用的模块（均为可选，可创建空策略），并在前端根据该字段动态显示/隐藏对应配置面板。后端 StockScreener 在执行选股时仅应用已启用模块的筛选逻辑，`enabled_modules` 为空时跳过所有筛选返回空结果。
+
+### 架构
+
+#### 数据流概览
+
+```mermaid
+sequenceDiagram
+    participant UI as ScreenerView
+    participant API as FastAPI /strategies
+    participant Screener as StockScreener / ScreenExecutor
+    participant Store as 内存策略存储
+
+    Note over UI: 用户点击"新建策略"
+    UI->>UI: 弹出创建对话框（名称 + 模块多选复选框）
+    UI->>API: POST /strategies {name, config, enabled_modules: [...]}
+    API->>Store: 保存策略（含 enabled_modules）
+    API-->>UI: 201 {id, name, config, enabled_modules, ...}
+    UI->>UI: 根据 enabled_modules 仅显示对应配置面板
+
+    Note over UI: 用户选中已有策略
+    UI->>API: GET /strategies/{id}
+    API-->>UI: {id, name, config, enabled_modules, ...}
+    UI->>UI: 根据 enabled_modules 动态显示/隐藏面板
+
+    Note over UI: 用户点击"管理模块"
+    UI->>UI: 弹出模块选择对话框（当前 enabled_modules 预勾选）
+    UI->>API: PUT /strategies/{id} {enabled_modules: [...]}
+    API->>Store: 更新 enabled_modules
+    API-->>UI: 200 更新后的策略
+    UI->>UI: 刷新面板显示/隐藏
+
+    Note over Screener: 执行选股
+    Screener->>Store: 读取策略 enabled_modules
+    alt enabled_modules 为空
+        Screener-->>Screener: 跳过所有筛选，返回空结果
+    else enabled_modules 非空
+        Screener->>Screener: 仅执行 enabled_modules 中列出的模块筛选逻辑
+    end
+```
+
+#### 模块标识符映射
+
+| 模块中文名 | 模块标识符 | 对应配置面板 | 对应后端筛选逻辑 |
+|---|---|---|---|
+| 因子条件编辑器 | `factor_editor` | 因子条件编辑器区块 | StrategyEngine 多因子评估 |
+| 均线趋势配置 | `ma_trend` | 均线趋势参数配置面板 | MaTrend 均线趋势筛选 |
+| 技术指标配置 | `indicator_params` | 技术指标参数配置面板 | Indicators 技术指标筛选 |
+| 形态突破配置 | `breakout` | 形态突破配置面板 | Breakout 形态突破筛选 |
+| 量价资金筛选 | `volume_price` | 量价资金筛选配置面板 | VolumePrice 量价资金筛选 |
+
+### 组件与接口
+
+#### 1. 后端 API 变更
+
+##### 1a. Pydantic 请求模型更新（`app/api/v1/screen.py`）
+
+`StrategyTemplateIn` 和 `StrategyTemplateUpdate` 新增 `enabled_modules` 字段：
+
+```python
+# 合法的模块标识符集合
+VALID_MODULES = {"factor_editor", "ma_trend", "indicator_params", "breakout", "volume_price"}
+
+class StrategyTemplateIn(BaseModel):
+    name: str
+    config: StrategyConfigIn
+    is_active: bool = False
+    enabled_modules: list[str] = Field(default_factory=list)  # 新增
+
+class StrategyTemplateUpdate(BaseModel):
+    name: str | None = None
+    config: StrategyConfigIn | None = None
+    is_active: bool | None = None
+    enabled_modules: list[str] | None = None  # 新增
+```
+
+##### 1b. 策略 CRUD 端点更新
+
+`POST /strategies` 创建时将 `enabled_modules` 存入策略字典：
+
+```python
+@router.post("/strategies", status_code=201)
+async def create_strategy(body: StrategyTemplateIn) -> dict:
+    sid = str(uuid4())
+    strategy = {
+        "id": sid,
+        "name": body.name,
+        "config": body.config.model_dump(),
+        "is_active": body.is_active,
+        "enabled_modules": body.enabled_modules,  # 新增
+        "created_at": datetime.now().isoformat(),
+    }
+    _strategies[sid] = strategy
+    return strategy
+```
+
+`PUT /strategies/{id}` 更新时支持修改 `enabled_modules`：
+
+```python
+@router.put("/strategies/{strategy_id}")
+async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> dict:
+    # ... 已有逻辑 ...
+    if body.enabled_modules is not None:
+        s["enabled_modules"] = body.enabled_modules
+    return s
+```
+
+`GET /strategies/{id}` 和 `GET /strategies` 返回的策略字典已包含 `enabled_modules` 字段，无需额外修改。
+
+##### 1c. ScreenExecutor 选股逻辑更新（`app/services/screener/screen_executor.py`）
+
+`ScreenExecutor` 构造函数新增 `enabled_modules` 参数，`_execute()` 方法根据该参数决定执行哪些筛选模块：
+
+```python
+class ScreenExecutor:
+    def __init__(
+        self,
+        strategy_config: StrategyConfig,
+        strategy_id: str | None = None,
+        enabled_modules: list[str] | None = None,  # 新增
+    ):
+        self._config = strategy_config
+        self._strategy_id = strategy_id or str(uuid.uuid4())
+        self._enabled_modules = set(enabled_modules) if enabled_modules else set()
+
+    def _execute(
+        self,
+        stocks_data: dict[str, dict[str, Any]],
+        screen_type: ScreenType,
+    ) -> ScreenResult:
+        # enabled_modules 为空 → 跳过所有筛选，返回空结果
+        if not self._enabled_modules:
+            return ScreenResult(
+                strategy_id=uuid.UUID(self._strategy_id),
+                screen_time=datetime.now(),
+                screen_type=screen_type,
+                items=[],
+                is_complete=True,
+            )
+
+        # 仅当 factor_editor 启用时执行多因子评估
+        if "factor_editor" in self._enabled_modules:
+            passed = StrategyEngine.screen_stocks(self._config, stocks_data)
+        else:
+            # 不使用因子筛选时，所有股票初始通过
+            passed = [(sym, StrategyEngine.evaluate(self._config, data))
+                      for sym, data in stocks_data.items()]
+
+        # 后续各模块筛选仅在 enabled_modules 包含对应标识符时执行
+        # ma_trend → 均线趋势筛选
+        # indicator_params → 技术指标筛选
+        # breakout → 形态突破筛选
+        # volume_price → 量价资金筛选
+        # ... 具体筛选逻辑按模块条件执行 ...
+```
+
+#### 2. 前端变更
+
+##### 2a. 新增 TypeScript 类型
+
+```typescript
+/** 可选配置模块标识符 */
+type StrategyModule = 'factor_editor' | 'ma_trend' | 'indicator_params' | 'breakout' | 'volume_price'
+
+/** 模块定义（用于渲染复选框） */
+interface ModuleOption {
+  key: StrategyModule
+  label: string
+}
+
+const ALL_MODULES: ModuleOption[] = [
+  { key: 'factor_editor', label: '因子条件编辑器' },
+  { key: 'ma_trend', label: '均线趋势配置' },
+  { key: 'indicator_params', label: '技术指标配置' },
+  { key: 'breakout', label: '形态突破配置' },
+  { key: 'volume_price', label: '量价资金筛选' },
+]
+
+/** 更新后的策略模板接口 */
+interface StrategyTemplate {
+  id: string
+  name: string
+  config: FullStrategyConfig
+  is_active: boolean
+  enabled_modules: StrategyModule[]  // 新增
+  created_at: string
+  updated_at: string
+}
+```
+
+##### 2b. 策略创建对话框（新增模块多选区域）
+
+在现有的"新建策略"对话框中，策略名称输入框下方新增配置模块多选区域：
+
+```html
+<!-- 新建策略对话框 -->
+<dialog ref="createDialogRef" class="create-dialog" aria-label="新建策略模板">
+  <h3>新建策略模板</h3>
+  <form @submit.prevent="handleCreate">
+    <div class="form-group">
+      <label for="strategy-name">策略名称</label>
+      <input
+        id="strategy-name"
+        v-model="newStrategyName"
+        type="text"
+        class="input"
+        required
+        placeholder="输入策略名称"
+      />
+    </div>
+
+    <!-- 配置模块多选区域（需求 27.1） -->
+    <fieldset class="form-group module-select-fieldset">
+      <legend>选择配置模块（可选）</legend>
+      <div class="module-checkboxes">
+        <label
+          v-for="mod in ALL_MODULES"
+          :key="mod.key"
+          class="module-checkbox-label"
+        >
+          <input
+            type="checkbox"
+            :value="mod.key"
+            v-model="newStrategyModules"
+          />
+          {{ mod.label }}
+        </label>
+      </div>
+      <p class="hint-text">所有模块均为可选，可不勾选任何模块直接创建空策略</p>
+    </fieldset>
+
+    <div class="dialog-actions">
+      <button type="button" class="btn btn-outline" @click="showCreateDialog = false">取消</button>
+      <button type="submit" class="btn btn-primary">创建</button>
+    </div>
+  </form>
+</dialog>
+```
+
+```typescript
+// 创建对话框状态
+const newStrategyName = ref('')
+const newStrategyModules = ref<StrategyModule[]>([])  // 默认空数组，所有模块未勾选
+
+async function handleCreate() {
+  try {
+    await apiClient.post('/strategies', {
+      name: newStrategyName.value,
+      config: buildDefaultConfig(),
+      enabled_modules: newStrategyModules.value,  // 传递模块选择
+    })
+    showCreateDialog.value = false
+    newStrategyName.value = ''
+    newStrategyModules.value = []  // 重置
+    await loadStrategies()
+  } catch (e) {
+    pageError.value = '创建策略失败'
+  }
+}
+```
+
+##### 2c. 配置面板条件渲染（需求 27.3, 27.5）
+
+根据当前选中策略的 `enabled_modules` 动态显示/隐藏各配置面板：
+
+```typescript
+// 当前选中策略的 enabled_modules
+const currentEnabledModules = ref<StrategyModule[]>([])
+
+// 判断模块是否启用
+function isModuleEnabled(moduleKey: StrategyModule): boolean {
+  return currentEnabledModules.value.includes(moduleKey)
+}
+
+// 选中策略时更新 enabled_modules
+async function selectStrategy(id: string) {
+  // ... 已有逻辑 ...
+  const res = await apiClient.get<StrategyTemplate>(`/strategies/${id}`)
+  currentEnabledModules.value = res.data.enabled_modules ?? []
+  // ... 回填配置 ...
+}
+```
+
+```html
+<!-- 因子条件编辑器：仅当 factor_editor 启用时显示 -->
+<section v-if="isModuleEnabled('factor_editor')" class="card" aria-label="因子条件编辑器">
+  <!-- 现有因子编辑器内容 -->
+</section>
+
+<!-- 均线趋势配置面板：仅当 ma_trend 启用时显示 -->
+<section v-if="isModuleEnabled('ma_trend')" class="card" aria-label="均线趋势配置">
+  <!-- 现有均线趋势面板内容 -->
+</section>
+
+<!-- 技术指标配置面板：仅当 indicator_params 启用时显示 -->
+<section v-if="isModuleEnabled('indicator_params')" class="card" aria-label="技术指标配置">
+  <!-- 现有技术指标面板内容 -->
+</section>
+
+<!-- 形态突破配置面板：仅当 breakout 启用时显示 -->
+<section v-if="isModuleEnabled('breakout')" class="card" aria-label="形态突破配置">
+  <!-- 现有形态突破面板内容 -->
+</section>
+
+<!-- 量价资金筛选配置面板：仅当 volume_price 启用时显示 -->
+<section v-if="isModuleEnabled('volume_price')" class="card" aria-label="量价资金筛选配置">
+  <!-- 现有量价资金面板内容 -->
+</section>
+```
+
+##### 2d. "管理模块"按钮与对话框（需求 27.6）
+
+在已选中策略的配置区域顶部新增"管理模块"按钮：
+
+```html
+<!-- 管理模块按钮（仅当有策略选中时显示） -->
+<div v-if="activeStrategyId" class="module-manage-bar">
+  <button class="btn btn-outline" @click="showModuleDialog = true">
+    ⚙️ 管理模块
+  </button>
+  <span class="module-summary">
+    已启用 {{ currentEnabledModules.length }} 个模块
+  </span>
+</div>
+
+<!-- 管理模块对话框 -->
+<dialog ref="moduleDialogRef" class="module-dialog" aria-label="管理配置模块">
+  <h3>管理配置模块</h3>
+  <fieldset class="module-checkboxes">
+    <legend class="sr-only">选择要启用的配置模块</legend>
+    <label
+      v-for="mod in ALL_MODULES"
+      :key="mod.key"
+      class="module-checkbox-label"
+    >
+      <input
+        type="checkbox"
+        :value="mod.key"
+        v-model="editingModules"
+      />
+      {{ mod.label }}
+    </label>
+  </fieldset>
+  <div class="dialog-actions">
+    <button class="btn btn-outline" @click="showModuleDialog = false">取消</button>
+    <button class="btn btn-primary" @click="saveModules">确认</button>
+  </div>
+</dialog>
+```
+
+```typescript
+const showModuleDialog = ref(false)
+const editingModules = ref<StrategyModule[]>([])
+
+// 打开管理模块对话框时，预填当前 enabled_modules
+watch(showModuleDialog, (val) => {
+  if (val) {
+    editingModules.value = [...currentEnabledModules.value]
+  }
+})
+
+async function saveModules() {
+  if (!activeStrategyId.value) return
+  try {
+    await apiClient.put(`/strategies/${activeStrategyId.value}`, {
+      enabled_modules: editingModules.value,
+    })
+    currentEnabledModules.value = [...editingModules.value]
+    showModuleDialog.value = false
+    await loadStrategies()
+  } catch (e) {
+    pageError.value = '更新模块配置失败'
+  }
+}
+```
+
+### 数据模型
+
+#### 后端数据模型变更
+
+`strategy_template` 表的 `config` JSONB 字段中新增 `enabled_modules` 键（开发阶段使用内存存储，后续迁移至数据库时在 JSONB 中存储）。
+
+当前内存存储结构变更：
+
+```python
+# _strategies 字典中每个策略新增 enabled_modules 字段
+strategy = {
+    "id": sid,
+    "name": body.name,
+    "config": body.config.model_dump(),
+    "is_active": body.is_active,
+    "enabled_modules": body.enabled_modules,  # list[str]，如 ["factor_editor", "ma_trend"]
+    "created_at": datetime.now().isoformat(),
+}
+```
+
+后续迁移至数据库时，`enabled_modules` 可作为 `strategy_template` 表的独立 `JSONB` 列或存储在 `config` JSONB 内部：
+
+```sql
+-- 方案 A：独立列（推荐，便于查询）
+ALTER TABLE strategy_template ADD COLUMN enabled_modules JSONB DEFAULT '[]'::jsonb;
+
+-- 方案 B：存储在 config JSONB 内部
+-- config->>'enabled_modules' 即可读取
+```
+
+#### 前端数据模型变更
+
+`StrategyTemplate` 接口新增 `enabled_modules` 字段（已在 2a 节定义）。
+
+`FullStrategyConfig` 接口无需变更，`enabled_modules` 是策略模板级别的字段，不属于策略配置本身。
+
+### 正确性属性（需求 27）
+
+*属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
+
+#### 属性 78：创建对话框默认展示五个未勾选的模块复选框
+
+*对任意*创建对话框的渲染状态，模块多选区域应包含恰好 5 个复选框（factor_editor、ma_trend、indicator_params、breakout、volume_price），且所有复选框的初始状态均为未勾选。
+
+**验证需求：27.1**
+
+---
+
+#### 属性 79：任意模块子集均可创建策略
+
+*对任意*五个模块标识符的子集（包括空集），当策略名称非空时，策略创建请求应被接受且返回的策略对象中 `enabled_modules` 字段应与请求中传入的子集完全一致。
+
+**验证需求：27.2, 27.4**
+
+---
+
+#### 属性 80：配置面板可见性由 enabled_modules 驱动
+
+*对任意* `enabled_modules` 值（五个模块标识符的任意子集），选股策略页面应仅显示 `enabled_modules` 中列出的模块对应的配置面板，未列出的模块面板应隐藏不显示；`enabled_modules` 为空时所有五个配置面板均应隐藏。
+
+**验证需求：27.3, 27.5**
+
+---
+
+#### 属性 81：enabled_modules 持久化 round-trip
+
+*对任意*合法的 `enabled_modules` 值，通过 `POST /strategies` 创建策略后，再通过 `GET /strategies/{id}` 查询该策略，返回的 `enabled_modules` 应与创建时传入的值完全一致；通过 `PUT /strategies/{id}` 更新 `enabled_modules` 后再查询，返回值应与更新时传入的值完全一致。
+
+**验证需求：27.4, 27.6**
+
+---
+
+#### 属性 82：选股仅应用已启用模块的筛选逻辑
+
+*对任意*策略配置和任意 `enabled_modules` 子集，ScreenExecutor 执行选股时应仅应用 `enabled_modules` 中列出的模块对应的筛选逻辑；当 `enabled_modules` 为空列表时，应跳过所有模块筛选逻辑并返回空的选股结果集。
+
+**验证需求：27.7, 27.8**
+
+---
+
+### 错误处理（需求 27）
+
+| 错误场景 | 处理策略 |
+|---|---|
+| `enabled_modules` 包含无效的模块标识符 | 后端忽略无效标识符，仅保留合法值（`VALID_MODULES` 集合内的值） |
+| `enabled_modules` 字段缺失（旧策略兼容） | 后端返回空列表 `[]`，前端将其视为所有模块未启用（向后兼容） |
+| 管理模块对话框保存失败 | 前端显示错误提示"更新模块配置失败"，不修改当前面板显示状态 |
+| 创建策略时 `enabled_modules` 为 null | 后端将其视为空列表 `[]` |
+| 选股执行时策略无 `enabled_modules` 字段 | ScreenExecutor 将 `enabled_modules` 视为空集，返回空结果 |
+
+### 测试策略（需求 27）
+
+#### 属性测试
+
+**后端（Hypothesis + pytest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 79：任意模块子集均可创建策略 | `tests/properties/test_strategy_modules_create_properties.py` | 100 |
+| 属性 81：enabled_modules 持久化 round-trip | `tests/properties/test_strategy_modules_roundtrip_properties.py` | 100 |
+| 属性 82：选股仅应用已启用模块 | `tests/properties/test_screen_enabled_modules_properties.py` | 100 |
+
+**前端（fast-check + Vitest）：**
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 78：创建对话框默认展示五个未勾选复选框 | `frontend/src/views/__tests__/strategy-create-modules.property.test.ts` | 100 |
+| 属性 80：配置面板可见性由 enabled_modules 驱动 | `frontend/src/views/__tests__/strategy-panel-visibility.property.test.ts` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+- 后端：`# Feature: a-share-quant-trading-system, Property 79: 任意模块子集均可创建策略`
+- 前端：`// Feature: a-share-quant-trading-system, Property 78: 创建对话框默认展示五个未勾选复选框`
+
+#### 单元测试
+
+**后端：**
+- `POST /strategies` 传入 `enabled_modules: ["factor_editor", "ma_trend"]` 创建成功的示例
+- `POST /strategies` 传入 `enabled_modules: []` 创建空策略成功的示例
+- `POST /strategies` 未传入 `enabled_modules` 字段时默认为空列表的示例
+- `PUT /strategies/{id}` 更新 `enabled_modules` 字段的示例
+- `GET /strategies/{id}` 返回包含 `enabled_modules` 字段的示例
+- ScreenExecutor `enabled_modules=[]` 时返回空结果的示例
+- ScreenExecutor `enabled_modules=["factor_editor"]` 时仅执行因子筛选的示例
+- ScreenExecutor `enabled_modules=["ma_trend", "volume_price"]` 时仅执行对应模块筛选的示例
+
+**前端：**
+- 新建策略对话框渲染 5 个未勾选复选框的示例
+- 勾选 2 个模块后创建策略，POST 请求体包含正确 `enabled_modules` 的示例
+- 不勾选任何模块直接创建空策略的示例
+- 选中策略后仅显示 `enabled_modules` 中的面板的示例
+- 选中 `enabled_modules: []` 的策略后所有面板隐藏的示例
+- "管理模块"按钮点击弹出对话框并预勾选当前模块的示例
+- 管理模块对话框修改后保存，面板立即刷新的示例
+- 旧策略无 `enabled_modules` 字段时所有面板隐藏的向后兼容示例
+
+#### 集成测试
+
+- 新建策略（选择 2 个模块）→ 选中策略 → 验证仅显示 2 个面板 → 管理模块添加 1 个 → 验证显示 3 个面板全链路测试
+- 新建空策略（0 个模块）→ 执行选股 → 验证返回空结果全链路测试
+- 新建策略（选择 factor_editor + ma_trend）→ 执行选股 → 验证仅应用因子和均线筛选逻辑全链路测试
+
+
+---
+
+## 选股执行端点实装：本地数据库驱动的选股流程（需求 27.9–27.12）
+
+### 概述
+
+当前 `POST /api/v1/screen/run` 端点为 stub 实现，直接返回空结果。本次设计将其实装为完整的选股执行流程：从策略存储加载配置 → 从本地数据库查询股票数据 → 转换为 ScreenExecutor 所需的因子字典格式 → 执行选股 → 返回真实结果。
+
+核心设计原则：
+- 选股数据全部来自本地数据库（TimescaleDB kline 表 + PostgreSQL stock_info 表），不直接调用外部数据源 API
+- 新增 `ScreenDataProvider` 服务层，封装本地数据库查询和因子字典转换逻辑
+- `run_screen()` 端点作为编排层，串联策略加载、数据查询、选股执行三个步骤
+
+### 架构
+
+#### 选股执行数据流
+
+```mermaid
+sequenceDiagram
+    participant Client as 前端/API 调用方
+    participant API as POST /screen/run
+    participant Store as _strategies (内存存储)
+    participant SDP as ScreenDataProvider
+    participant TS as TimescaleDB (kline)
+    participant PG as PostgreSQL (stock_info)
+    participant SE as ScreenExecutor
+
+    Client->>API: ScreenRunRequest (strategy_id / strategy_config)
+    
+    alt strategy_id 存在
+        API->>Store: 查找策略 by strategy_id
+        alt 策略不存在
+            Store-->>API: None
+            API-->>Client: HTTP 404 "策略不存在"
+        else 策略存在
+            Store-->>API: strategy dict (config + enabled_modules)
+        end
+    end
+
+    API->>SDP: load_screen_data(lookback_days=250)
+    SDP->>PG: SELECT * FROM stock_info WHERE is_st=False AND is_delisted=False
+    PG-->>SDP: List[StockInfo]
+    
+    loop 每只有效股票
+        SDP->>TS: KlineRepository.query(symbol, "1d", start, end)
+        TS-->>SDP: List[KlineBar]
+    end
+    
+    SDP-->>API: Dict[symbol, factor_dict]
+    
+    alt stocks_data 为空
+        API-->>Client: ScreenResult(items=[], is_complete=true)
+    else
+        API->>SE: ScreenExecutor(config, strategy_id, enabled_modules)
+        API->>SE: run_eod_screen(stocks_data) / run_realtime_screen(stocks_data)
+        SE-->>API: ScreenResult
+        API-->>Client: ScreenResult (含 items)
+    end
+```
+
+#### 组件关系
+
+```mermaid
+graph TD
+    A[POST /screen/run] --> B[_strategies 内存存储]
+    A --> C[ScreenDataProvider]
+    A --> D[ScreenExecutor]
+    C --> E[KlineRepository]
+    C --> F[StockInfo ORM]
+    E --> G[(TimescaleDB kline)]
+    F --> H[(PostgreSQL stock_info)]
+    D --> I[StrategyEngine]
+```
+
+### 组件与接口
+
+#### 1. ScreenDataProvider（选股数据提供服务）
+
+新增 `app/services/screener/screen_data_provider.py`，负责从本地数据库查询股票数据并转换为 ScreenExecutor 所需的因子字典格式。
+
+```python
+"""
+选股数据提供服务
+
+从本地数据库（TimescaleDB + PostgreSQL）查询股票数据，
+转换为 ScreenExecutor 所需的 {symbol: factor_dict} 格式。
+
+数据来源：
+- TimescaleDB kline 表：K 线行情数据（用于均线计算、形态识别、量价分析）
+- PostgreSQL stock_info 表：基本面数据（PE/PB/ROE/市值）
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import AsyncSessionPG, AsyncSessionTS
+from app.models.kline import KlineBar
+from app.models.stock import StockInfo
+from app.services.data_engine.kline_repository import KlineRepository
+
+logger = logging.getLogger(__name__)
+
+# 默认回溯天数（覆盖 MA250 所需的最少交易日）
+DEFAULT_LOOKBACK_DAYS = 365
+
+
+class ScreenDataProvider:
+    """
+    选股数据提供服务。
+
+    从本地数据库查询全市场有效股票的行情和基本面数据，
+    转换为 ScreenExecutor 所需的因子字典格式。
+    """
+
+    def __init__(
+        self,
+        pg_session: AsyncSession | None = None,
+        ts_session: AsyncSession | None = None,
+    ) -> None:
+        self._pg_session = pg_session
+        self._ts_session = ts_session
+
+    async def load_screen_data(
+        self,
+        lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+        screen_date: date | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """
+        加载选股所需的全市场股票数据。
+
+        1. 从 PostgreSQL stock_info 查询全市场有效股票（排除 ST、退市）
+        2. 从 TimescaleDB kline 查询每只股票最近 lookback_days 天的日 K 线
+        3. 将 K 线数据和基本面数据转换为因子字典
+
+        Args:
+            lookback_days: K 线回溯天数，默认 365（覆盖 MA250）
+            screen_date: 选股基准日期，默认今天
+
+        Returns:
+            {symbol: factor_dict} 字典，factor_dict 包含 ScreenExecutor 所需的全部因子数据
+        """
+        if screen_date is None:
+            screen_date = date.today()
+
+        start_date = screen_date - timedelta(days=lookback_days)
+
+        # 1. 查询有效股票列表
+        stocks = await self._load_valid_stocks()
+        if not stocks:
+            return {}
+
+        # 2. 查询 K 线数据并转换为因子字典
+        kline_repo = KlineRepository(self._ts_session)
+        result: dict[str, dict[str, Any]] = {}
+
+        for stock in stocks:
+            try:
+                bars = await kline_repo.query(
+                    symbol=stock.symbol,
+                    freq="1d",
+                    start=start_date,
+                    end=screen_date,
+                )
+                if not bars:
+                    continue  # 无行情数据的股票跳过
+
+                factor_dict = self._build_factor_dict(stock, bars)
+                result[stock.symbol] = factor_dict
+            except Exception:
+                logger.warning(
+                    "加载股票 %s 数据失败，跳过", stock.symbol, exc_info=True
+                )
+                continue
+
+        logger.info(
+            "选股数据加载完成：有效股票 %d 只，成功加载 %d 只",
+            len(stocks), len(result),
+        )
+        return result
+
+    async def _load_valid_stocks(self) -> list[StockInfo]:
+        """查询全市场有效股票（排除 ST 和退市）。"""
+        stmt = select(StockInfo).where(
+            StockInfo.is_st == False,  # noqa: E712
+            StockInfo.is_delisted == False,  # noqa: E712
+        )
+        if self._pg_session is not None:
+            res = await self._pg_session.execute(stmt)
+            return list(res.scalars().all())
+
+        async with AsyncSessionPG() as session:
+            res = await session.execute(stmt)
+            return list(res.scalars().all())
+
+    @staticmethod
+    def _build_factor_dict(
+        stock: StockInfo,
+        bars: list[KlineBar],
+    ) -> dict[str, Any]:
+        """
+        将 StockInfo + KlineBar 列表转换为 ScreenExecutor 所需的因子字典。
+
+        因子字典结构：
+        {
+            "close": Decimal,           # 最新收盘价
+            "open": Decimal,            # 最新开盘价
+            "high": Decimal,            # 最新最高价
+            "low": Decimal,             # 最新最低价
+            "volume": int,              # 最新成交量
+            "amount": Decimal,          # 最新成交额
+            "turnover": Decimal,        # 最新换手率
+            "vol_ratio": Decimal,       # 最新量比
+            "closes": list[Decimal],    # 收盘价序列（时间升序）
+            "highs": list[Decimal],     # 最高价序列
+            "lows": list[Decimal],      # 最低价序列
+            "volumes": list[int],       # 成交量序列
+            "amounts": list[Decimal],   # 成交额序列
+            "turnovers": list[Decimal], # 换手率序列
+            # 基本面因子
+            "pe_ttm": float | None,
+            "pb": float | None,
+            "roe": float | None,
+            "market_cap": float | None,
+        }
+        """
+        latest = bars[-1]  # bars 按时间升序，最后一条为最新
+
+        return {
+            # 最新行情
+            "close": latest.close,
+            "open": latest.open,
+            "high": latest.high,
+            "low": latest.low,
+            "volume": latest.volume,
+            "amount": latest.amount,
+            "turnover": latest.turnover,
+            "vol_ratio": latest.vol_ratio,
+            # 历史序列（时间升序）
+            "closes": [b.close for b in bars],
+            "highs": [b.high for b in bars],
+            "lows": [b.low for b in bars],
+            "volumes": [b.volume for b in bars],
+            "amounts": [b.amount for b in bars],
+            "turnovers": [b.turnover for b in bars],
+            # 基本面因子（来自 stock_info 表）
+            "pe_ttm": float(stock.pe_ttm) if stock.pe_ttm is not None else None,
+            "pb": float(stock.pb) if stock.pb is not None else None,
+            "roe": float(stock.roe) if stock.roe is not None else None,
+            "market_cap": float(stock.market_cap) if stock.market_cap is not None else None,
+        }
+```
+
+关键设计决策：
+- `ScreenDataProvider` 通过依赖注入接受 session，便于测试时 mock 数据库
+- `_build_factor_dict` 为纯静态方法，输入 StockInfo + KlineBar 列表，输出因子字典，便于单独测试
+- K 线回溯 365 天（日历日），覆盖 MA250 所需的约 250 个交易日
+- 单只股票数据加载失败时跳过（不中断整体选股），记录 warning 日志
+
+#### 2. 更新 `run_screen()` 端点（需求 27.9, 27.11, 27.12）
+
+重写 `app/api/v1/screen.py` 中的 `run_screen()` 端点，从 stub 改为完整的选股执行流程。
+
+```python
+from fastapi import HTTPException
+from app.core.database import AsyncSessionPG, AsyncSessionTS
+from app.core.schemas import StrategyConfig, ScreenType
+from app.services.screener.screen_executor import ScreenExecutor
+from app.services.screener.screen_data_provider import ScreenDataProvider
+
+
+@router.post("/screen/run")
+async def run_screen(body: ScreenRunRequest) -> dict:
+    """
+    执行选股（盘后/实时）。
+
+    流程：
+    1. 加载策略配置（从 strategy_id 或 strategy_config）
+    2. 从本地数据库查询全市场股票数据
+    3. 实例化 ScreenExecutor 执行选股
+    4. 返回选股结果
+
+    错误处理：
+    - strategy_id 不存在 → HTTP 404
+    - 本地数据库无行情数据 → 返回空结果（items=[], is_complete=true）
+    """
+    # 1. 加载策略配置
+    strategy_id_str: str | None = None
+    config_dict: dict | None = None
+    enabled_modules: list[str] | None = None
+
+    if body.strategy_id is not None:
+        sid = str(body.strategy_id)
+        if sid not in _strategies:
+            raise HTTPException(status_code=404, detail="策略不存在")
+        strategy = _strategies[sid]
+        strategy_id_str = sid
+        config_dict = strategy.get("config", {})
+        enabled_modules = strategy.get("enabled_modules", [])
+    elif body.strategy_config is not None:
+        strategy_id_str = str(uuid4())
+        config_dict = body.strategy_config.model_dump()
+        enabled_modules = None  # 无 strategy_id 时视为全部启用
+    else:
+        # 既无 strategy_id 也无 strategy_config，返回空结果
+        return {
+            "strategy_id": str(uuid4()),
+            "screen_type": body.screen_type,
+            "screen_time": datetime.now().isoformat(),
+            "items": [],
+            "is_complete": True,
+        }
+
+    # 解析策略配置
+    strategy_config = StrategyConfig.from_dict(config_dict)
+
+    # 2. 从本地数据库查询股票数据
+    async with AsyncSessionPG() as pg_session, AsyncSessionTS() as ts_session:
+        provider = ScreenDataProvider(
+            pg_session=pg_session,
+            ts_session=ts_session,
+        )
+        stocks_data = await provider.load_screen_data()
+
+    # 3. 无行情数据时返回空结果（需求 27.12）
+    if not stocks_data:
+        return {
+            "strategy_id": strategy_id_str,
+            "screen_type": body.screen_type,
+            "screen_time": datetime.now().isoformat(),
+            "items": [],
+            "is_complete": True,
+        }
+
+    # 4. 执行选股
+    executor = ScreenExecutor(
+        strategy_config=strategy_config,
+        strategy_id=strategy_id_str,
+        enabled_modules=enabled_modules,
+    )
+
+    screen_type = ScreenType(body.screen_type)
+    if screen_type == ScreenType.EOD:
+        result = executor.run_eod_screen(stocks_data)
+    else:
+        result = executor.run_realtime_screen(stocks_data)
+
+    # 5. 序列化返回
+    return {
+        "strategy_id": str(result.strategy_id),
+        "screen_type": result.screen_type.value,
+        "screen_time": result.screen_time.isoformat(),
+        "items": [
+            {
+                "symbol": item.symbol,
+                "ref_buy_price": str(item.ref_buy_price),
+                "trend_score": item.trend_score,
+                "risk_level": item.risk_level.value,
+                "signals": [
+                    {
+                        "category": s.category.value,
+                        "label": s.label,
+                        "is_fake_breakout": s.is_fake_breakout,
+                    }
+                    for s in item.signals
+                ],
+                "has_fake_breakout": item.has_fake_breakout,
+            }
+            for item in result.items
+        ],
+        "is_complete": result.is_complete,
+    }
+```
+
+关键设计决策：
+- `strategy_id` 存在但不在 `_strategies` 中 → HTTP 404（需求 27.11）
+- 本地数据库无行情数据（`stocks_data` 为空）→ 返回空结果，不抛异常（需求 27.12）
+- `strategy_config` 直接传入时 `enabled_modules=None`，ScreenExecutor 视为全部启用（向后兼容）
+- 使用 `async with` 管理数据库 session 生命周期，确保连接释放
+
+#### 3. K 线数据到因子字典的转换逻辑
+
+`ScreenDataProvider._build_factor_dict()` 将 ORM 数据转换为 ScreenExecutor 期望的因子字典。ScreenExecutor 内部通过 `StrategyEngine` → `FactorEvaluator` 评估因子，`FactorEvaluator.evaluate()` 从 `stock_data` 字典中读取对应因子名称的值。
+
+因子字典中的关键字段映射：
+
+| 因子字典键 | 数据来源 | 用途 |
+|---|---|---|
+| `close` | kline 最新一条 close | 买入参考价、突破判定 |
+| `closes` | kline 全部 close 序列 | MA 计算、趋势打分 |
+| `volumes` | kline 全部 volume 序列 | 量价分析、突破量比 |
+| `amounts` | kline 全部 amount 序列 | 日均成交额过滤 |
+| `turnovers` | kline 全部 turnover 序列 | 换手率区间筛选 |
+| `pe_ttm` / `pb` / `roe` / `market_cap` | stock_info 表 | 基本面因子评估 |
+
+### 数据模型
+
+本次设计不引入新的数据模型，复用现有：
+- `app/models/kline.py` → `Kline` ORM + `KlineBar` dataclass
+- `app/models/stock.py` → `StockInfo` ORM
+- `app/core/schemas.py` → `StrategyConfig`、`ScreenResult`、`ScreenItem`、`SignalDetail`
+- `app/api/v1/screen.py` → `ScreenRunRequest`（已有 `strategy_id`、`strategy_config`、`screen_type` 字段）
+
+
+
+### 正确性属性（需求 27.9–27.12）
+
+*属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
+
+#### 属性 83：选股执行端点完整流程正确性（本地数据库驱动）
+
+需求 27.9 要求端点完成策略加载→数据查询→选股执行→返回结果的完整流程，需求 27.10 要求数据全部来自本地数据库。这两个需求共同约束了选股执行的数据流正确性，合并为一个综合属性。
+
+*对任意*合法的策略配置（含 `config` 和 `enabled_modules`）和本地数据库中的任意非空股票数据集，`POST /api/v1/screen/run` 端点应：当提供 `strategy_id` 时从策略存储加载对应的 `config` 和 `enabled_modules`；当仅提供 `strategy_config` 时使用请求中的配置；从本地数据库（TimescaleDB kline 表和 PostgreSQL stock_info 表）查询股票数据，不调用任何外部数据源适配器（TushareAdapter / AkShareAdapter）；使用加载的配置实例化 ScreenExecutor 执行选股；返回的 `ScreenResult` 中每条 `ScreenItem` 应包含 `symbol`、`ref_buy_price`、`trend_score`、`risk_level`、`signals` 全部字段且均不为空。
+
+**验证需求：27.9, 27.10**
+
+---
+
+#### 属性 84：不存在的 strategy_id 返回 404
+
+*对任意*不在策略存储中的 `strategy_id`（UUID），`POST /api/v1/screen/run` 端点应返回 HTTP 404 状态码，响应体应包含"策略不存在"错误提示信息。
+
+**验证需求：27.11**
+
+---
+
+#### 属性 85：本地数据库无行情数据时返回空结果
+
+*对任意*合法的策略配置，当本地数据库中无可用的 K 线行情数据时（stock_info 表为空或所有股票在 kline 表中无记录），`POST /api/v1/screen/run` 端点应返回 `items` 为空列表且 `is_complete` 为 `true` 的选股结果，不抛出异常。
+
+**验证需求：27.12**
+
+---
+
+### 错误处理（需求 27.9–27.12）
+
+| 错误场景 | 处理策略 |
+|---|---|
+| `strategy_id` 不在策略存储中 | 返回 HTTP 404，detail="策略不存在"（需求 27.11） |
+| 本地数据库无行情数据 | 返回空结果 `items=[]`，`is_complete=true`，不抛异常（需求 27.12） |
+| 单只股票 K 线查询失败 | 记录 warning 日志，跳过该股票，继续处理其他股票 |
+| PostgreSQL stock_info 查询失败 | 返回空结果（无有效股票可选） |
+| TimescaleDB 连接失败 | 返回空结果（无法查询 K 线数据） |
+| ScreenExecutor 执行异常 | 返回 HTTP 500，记录错误日志 |
+
+### 测试策略（需求 27.9–27.12）
+
+#### 属性测试（Hypothesis）
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 83：选股执行端点完整流程正确性 | `tests/properties/test_screen_run_flow_properties.py` | 100 |
+| 属性 84：不存在的 strategy_id 返回 404 | `tests/properties/test_screen_run_flow_properties.py` | 100 |
+| 属性 85：本地数据库无行情数据时返回空结果 | `tests/properties/test_screen_run_flow_properties.py` | 100 |
+
+#### 单元测试
+
+- `ScreenDataProvider._build_factor_dict()` 因子字典转换正确性示例
+- `ScreenDataProvider.load_screen_data()` 空数据库返回空字典示例
+- `run_screen()` 端点 strategy_id 加载配置示例
+- `run_screen()` 端点 strategy_config 直接传入示例
+
+#### 集成测试
+
+- 创建策略 → 写入测试 K 线数据 → 执行选股 → 验证返回真实结果全链路测试
+- 创建策略（enabled_modules=["ma_trend"]）→ 执行选股 → 验证仅应用均线模块筛选全链路测试

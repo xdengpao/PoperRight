@@ -59,8 +59,16 @@
       </div>
     </section>
 
+    <!-- 管理模块按钮（仅当有策略选中时显示） -->
+    <div v-if="activeStrategyId" class="module-manage-bar card">
+      <button class="btn btn-outline" @click="openModulesDialog">
+        ⚙️ 管理模块
+      </button>
+      <span class="module-summary">已启用 {{ currentEnabledModules.length }} 个模块</span>
+    </div>
+
     <!-- 因子条件可视化编辑器 -->
-    <section class="card" aria-label="因子条件编辑器">
+    <section v-if="isModuleEnabled('factor_editor')" class="card" aria-label="因子条件编辑器">
       <div class="section-header">
         <h2 class="section-title">因子条件编辑器</h2>
         <!-- AND/OR 逻辑切换 -->
@@ -172,7 +180,7 @@
     </section>
 
     <!-- 均线趋势配置 -->
-    <section class="card" aria-label="均线趋势配置">
+    <section v-if="isModuleEnabled('ma_trend')" class="card" aria-label="均线趋势配置">
       <details>
         <summary class="panel-summary">
           <span class="section-title">均线趋势配置</span>
@@ -266,7 +274,7 @@
     </section>
 
     <!-- 技术指标配置 -->
-    <section class="card" aria-label="技术指标配置">
+    <section v-if="isModuleEnabled('indicator_params')" class="card" aria-label="技术指标配置">
       <details>
         <summary class="panel-summary">
           <span class="section-title">技术指标配置</span>
@@ -490,7 +498,7 @@
     </section>
 
     <!-- 形态突破配置 -->
-    <section class="card" aria-label="形态突破配置">
+    <section v-if="isModuleEnabled('breakout')" class="card" aria-label="形态突破配置">
       <details>
         <summary class="panel-summary">
           <span class="section-title">形态突破配置</span>
@@ -549,7 +557,7 @@
     </section>
 
     <!-- 量价资金筛选 -->
-    <section class="card" aria-label="量价资金筛选">
+    <section v-if="isModuleEnabled('volume_price')" class="card" aria-label="量价资金筛选">
       <details>
         <summary class="panel-summary">
           <span class="section-title">量价资金筛选</span>
@@ -738,6 +746,18 @@
           placeholder="输入策略名称"
           @keyup.enter="createStrategy"
         />
+        <fieldset class="module-fieldset">
+          <legend class="module-legend">配置模块（可选）</legend>
+          <p class="module-hint">所有模块均为可选，可不勾选任何模块直接创建空策略</p>
+          <label v-for="mod in ALL_MODULES" :key="mod.key" class="checkbox-label">
+            <input
+              type="checkbox"
+              :value="mod.key"
+              v-model="newStrategyModules"
+            />
+            {{ mod.label }}
+          </label>
+        </fieldset>
         <div class="dialog-actions">
           <button class="btn" @click="createStrategy" :disabled="!newStrategyName.trim()">保存</button>
           <button class="btn btn-outline" @click="showCreateDialog = false">取消</button>
@@ -781,6 +801,28 @@
         </div>
       </div>
     </div>
+
+    <!-- 管理模块对话框 -->
+    <div v-if="showModulesDialog" class="dialog-overlay" @click.self="showModulesDialog = false">
+      <div class="dialog" role="dialog" aria-modal="true" aria-label="管理配置模块">
+        <h3 class="dialog-title">管理配置模块</h3>
+        <fieldset class="module-fieldset">
+          <legend class="module-legend">选择要启用的配置模块</legend>
+          <label v-for="mod in ALL_MODULES" :key="mod.key" class="checkbox-label">
+            <input
+              type="checkbox"
+              :value="mod.key"
+              v-model="editingModules"
+            />
+            {{ mod.label }}
+          </label>
+        </fieldset>
+        <div class="dialog-actions">
+          <button class="btn" @click="saveModules">确认</button>
+          <button class="btn btn-outline" @click="showModulesDialog = false">取消</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -803,12 +845,20 @@ interface FactorCondition {
   weight: number
 }
 
+type StrategyModule = 'factor_editor' | 'ma_trend' | 'indicator_params' | 'breakout' | 'volume_price'
+
+interface ModuleOption {
+  key: StrategyModule
+  label: string
+}
+
 interface StrategyTemplate {
   id: string
   name: string
   config: Record<string, unknown>
   is_active: boolean
   created_at: string
+  enabled_modules: StrategyModule[]
 }
 
 interface MaTrendConfig {
@@ -826,6 +876,14 @@ interface IndicatorParamsConfig {
 }
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
+
+const ALL_MODULES: ModuleOption[] = [
+  { key: 'factor_editor', label: '因子条件编辑器' },
+  { key: 'ma_trend', label: '均线趋势配置' },
+  { key: 'indicator_params', label: '技术指标配置' },
+  { key: 'breakout', label: '形态突破配置' },
+  { key: 'volume_price', label: '量价资金筛选' },
+]
 
 const factorTypes: { key: FactorType; label: string }[] = [
   { key: 'technical', label: '技术面' },
@@ -905,6 +963,7 @@ const runError = ref('')
 
 const showCreateDialog = ref(false)
 const newStrategyName = ref('')
+const newStrategyModules = ref<StrategyModule[]>([])
 
 const deleteTarget = ref<StrategyTemplate | null>(null)
 const deleting = ref(false)
@@ -916,6 +975,33 @@ const renaming = ref(false)
 
 const saving = ref(false)
 const saveSuccess = ref(false)
+
+const currentEnabledModules = ref<StrategyModule[]>([])
+
+function isModuleEnabled(moduleKey: StrategyModule): boolean {
+  return currentEnabledModules.value.includes(moduleKey)
+}
+
+const showModulesDialog = ref(false)
+const editingModules = ref<StrategyModule[]>([])
+
+function openModulesDialog() {
+  editingModules.value = [...currentEnabledModules.value]
+  showModulesDialog.value = true
+}
+
+async function saveModules() {
+  if (!activeStrategyId.value) return
+  try {
+    await apiClient.put(`/strategies/${activeStrategyId.value}`, {
+      enabled_modules: editingModules.value,
+    })
+    currentEnabledModules.value = [...editingModules.value]
+    showModulesDialog.value = false
+  } catch {
+    pageError.value = '更新模块配置失败'
+  }
+}
 
 const importInputRef = ref<HTMLInputElement | null>(null)
 
@@ -1191,6 +1277,7 @@ async function selectStrategy(id: string) {
   // 取消选中
   if (activeStrategyId.value === id) {
     activeStrategyId.value = ''
+    currentEnabledModules.value = []
     resetToDefaults()
     return
   }
@@ -1200,6 +1287,11 @@ async function selectStrategy(id: string) {
   try {
     const res = await apiClient.get<StrategyTemplate>(`/strategies/${id}`)
     const cfg = res.data.config as Record<string, unknown>
+
+    // 读取 enabled_modules（旧策略无此字段时默认空列表，向后兼容）
+    currentEnabledModules.value = Array.isArray(res.data.enabled_modules)
+      ? [...res.data.enabled_modules]
+      : []
 
     // 回填因子条件编辑器
     config.logic = (cfg.logic as 'AND' | 'OR') ?? 'AND'
@@ -1315,9 +1407,11 @@ async function createStrategy() {
       name,
       config: buildStrategyConfig(),
       is_active: false,
+      enabled_modules: newStrategyModules.value,
     })
     showCreateDialog.value = false
     newStrategyName.value = ''
+    newStrategyModules.value = []
     await loadStrategies()
   } catch (e) {
     pageError.value = e instanceof Error ? e.message : '创建策略失败'
@@ -1661,6 +1755,12 @@ onUnmounted(() => {
 .dialog-body strong { color: #e6edf3; }
 .dialog-actions { display: flex; gap: 8px; margin-top: 16px; justify-content: flex-end; }
 
+.module-fieldset {
+  border: 1px solid #30363d; border-radius: 6px; padding: 12px 16px; margin-top: 12px;
+}
+.module-legend { font-size: 13px; color: #e6edf3; padding: 0 4px; }
+.module-hint { font-size: 12px; color: #8b949e; margin: 0 0 8px; }
+
 /* ─── 空状态 ────────────────────────────────────────────────────────────────── */
 .empty { color: #484f58; font-size: 14px; padding: 24px 0; text-align: center; }
 
@@ -1805,6 +1905,14 @@ details > summary::-webkit-details-marker { display: none; }
 .save-row {
   display: flex; align-items: center; gap: 12px;
   padding-top: 14px; border-top: 1px solid #21262d; margin-top: 4px;
+}
+
+/* ─── 管理模块按钮栏 ────────────────────────────────────────────────────────── */
+.module-manage-bar {
+  display: flex; align-items: center; gap: 12px;
+}
+.module-summary {
+  font-size: 13px; color: #8b949e;
 }
 .btn-save { background: #238636; }
 .btn-save:hover:not(:disabled) { background: #2ea043; }

@@ -1,0 +1,98 @@
+# 实现计划
+
+- [x] 1. 编写 Bug Condition 探索性测试（修复前）
+  - **Property 1: Bug Condition** - 派生因子值缺失导致选股结果为空
+  - **CRITICAL**: 此测试必须在未修复代码上失败 — 失败即确认缺陷存在
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: 此测试编码了期望行为 — 修复后通过即验证修复正确性
+  - **GOAL**: 产生反例证明缺陷存在
+  - **Scoped PBT Approach**: 针对确定性缺陷，将属性范围限定到具体失败场景以确保可复现
+  - 测试文件：`tests/properties/test_build_factor_dict_bug_condition.py`
+  - 使用 Hypothesis 生成包含足够 K 线数据的 `StockInfo` + `KlineBar` 列表（`len(bars) >= 26`，满足 MACD slow period）
+  - 调用 `ScreenDataProvider._build_factor_dict(stock, bars)` 获取因子字典
+  - 断言因子字典中包含 `ma_trend` 键且值为 `float` 类型（来自 `score_ma_trend()`）
+  - 断言因子字典中包含 `macd` 键且值为 `bool` 类型（来自 `detect_macd_signal()`）
+  - 断言因子字典中包含 `boll` 键且值为 `bool` 类型（来自 `detect_boll_signal()`）
+  - 断言因子字典中包含 `rsi` 键且值为 `bool` 类型（来自 `detect_rsi_signal()`）
+  - 断言因子字典中包含 `breakout` 键（来自 breakout 检测函数，可为 `dict` 或 `None`）
+  - 断言因子字典中包含 `ma_support` 键（来自 `detect_ma_support()`）
+  - 在未修复代码上运行测试
+  - **EXPECTED OUTCOME**: 测试失败（这是正确的 — 证明缺陷存在）
+  - 记录反例：`_build_factor_dict()` 返回的字典中不包含 `ma_trend`、`macd`、`boll`、`rsi`、`breakout` 等键
+  - 任务完成条件：测试已编写、已运行、失败已记录
+  - _Requirements: 1.1, 1.3, 1.5, 1.7, 2.1, 2.3, 2.7, 2.11_
+
+- [x] 2. 编写 Preservation 属性测试（修复前）
+  - **Property 2: Preservation** - 原始行情与基本面数据不变
+  - **IMPORTANT**: 遵循观察优先方法论
+  - 测试文件：`tests/properties/test_build_factor_dict_preservation.py`
+  - 观察：在未修复代码上，对任意 `StockInfo` + `KlineBar` 列表调用 `_build_factor_dict()`，记录返回字典中原始行情字段和基本面字段的值
+  - 使用 Hypothesis 生成随机 K 线数据（`closes`、`highs`、`lows`、`volumes`、`amounts`、`turnovers`）和随机基本面数据（`pe_ttm`、`pb`、`roe`、`market_cap`）
+  - 编写属性测试：对所有输入，`_build_factor_dict()` 返回的以下字段值与直接从 `bars` / `stock` 提取的值完全一致：
+    - 最新行情：`close`、`open`、`high`、`low`、`volume`、`amount`、`turnover`、`vol_ratio`（取自 `bars[-1]`）
+    - 历史序列：`closes`、`highs`、`lows`、`volumes`、`amounts`、`turnovers`（取自所有 bars）
+    - 基本面：`pe_ttm`、`pb`、`roe`、`market_cap`（取自 `stock`）
+  - 编写属性测试：`enabled_modules` 为空集时 `ScreenExecutor` 返回空 `ScreenResult`（需求 27.8）
+  - 在未修复代码上运行测试
+  - **EXPECTED OUTCOME**: 测试通过（确认基线行为需要保持）
+  - 任务完成条件：测试已编写、已运行、在未修复代码上通过
+  - _Requirements: 3.1, 3.3, 3.6_
+
+- [x] 3. 修复选股模块孤立代码缺陷
+
+  - [x] 3.1 修改 `_build_factor_dict()` 调用各模块计算函数
+    - 文件：`app/services/screener/screen_data_provider.py`
+    - 在文件顶部导入 `ma_trend.score_ma_trend`、`ma_trend.detect_ma_support`
+    - 导入 `indicators.detect_macd_signal`、`indicators.detect_boll_signal`、`indicators.detect_rsi_signal`、`indicators.calculate_dma`
+    - 导入 `breakout.detect_box_breakout`、`breakout.detect_previous_high_breakout`、`breakout.detect_descending_trendline_breakout`
+    - 导入 `volume_price.check_turnover_rate`、`volume_price.check_money_flow_signal`、`volume_price.check_large_order_signal`
+    - 在 `_build_factor_dict()` 中将 `closes`/`highs`/`lows`/`volumes` 序列转为 `list[float]`/`list[int]`
+    - 调用 `score_ma_trend(closes_float)` → `stock_data["ma_trend"]`（float 趋势打分）
+    - 调用 `detect_ma_support(closes_float)` → `stock_data["ma_support"]`（bool）
+    - 调用 `detect_macd_signal(closes_float)` → `stock_data["macd"]`（bool）
+    - 调用 `detect_boll_signal(closes_float)` → `stock_data["boll"]`（bool）
+    - 调用 `detect_rsi_signal(closes_float)` → `stock_data["rsi"]`（bool）
+    - 调用 `calculate_dma(closes_float)` → `stock_data["dma"]`（dict）
+    - 调用 breakout 检测函数（`detect_box_breakout`、`detect_previous_high_breakout`、`detect_descending_trendline_breakout`）→ `stock_data["breakout"]`（dict|None）
+    - 调用 `check_turnover_rate(float(latest.turnover))` → `stock_data["turnover_check"]`
+    - `money_flow` 和 `large_order` 数据依赖额外数据源，当前使用安全默认值 `False`
+    - 每个模块调用包裹在 `try/except` 中，失败时使用安全默认值（`None`/`False`/`0.0`）
+    - _Bug_Condition: isBugCondition(input) where active_modules ∩ {ma_trend, indicator_params, breakout, volume_price} ≠ ∅ AND len(closes) >= 26_
+    - _Expected_Behavior: stock_data 包含 ma_trend(float)、macd(bool)、boll(bool)、rsi(bool)、breakout(dict|None)、ma_support(bool) 等派生因子键_
+    - _Preservation: 原始行情字段和基本面字段的值和类型不变_
+    - _Requirements: 1.1, 1.3, 1.5, 1.7, 2.1, 2.3, 2.7, 2.11, 3.1, 3.6, 3.7_
+
+  - [x] 3.2 修改 `ScreenExecutor._execute()` 增强信号构建逻辑
+    - 文件：`app/services/screener/screen_executor.py`
+    - 当仅启用非 `factor_editor` 模块时，从 `stock_data` 中读取派生因子值构建 `SignalDetail`
+    - `ma_trend` 模块：检查 `stock_data.get("ma_trend", 0) >= 80`，通过则添加 `SignalCategory.MA_TREND` 信号
+    - `indicator_params` 模块：检查 `stock_data.get("macd")`、`stock_data.get("boll")`、`stock_data.get("rsi")` 是否为 `True`
+    - `breakout` 模块：检查 `stock_data.get("breakout")` 是否包含有效突破信号（`is_valid=True`）
+    - `volume_price` 模块：检查 `stock_data.get("money_flow")`、`stock_data.get("large_order")` 是否为 `True`
+    - 从 `stock_data["breakout"]` 中读取 `is_fake_breakout` 标记设置到 `SignalDetail` 和 `ScreenItem`
+    - 当非 `factor_editor` 模块启用时，仅返回至少有一个信号的股票（过滤无信号项）
+    - _Bug_Condition: enabled_modules 仅包含非 factor_editor 模块时，signals 列表为空_
+    - _Expected_Behavior: signals 列表包含各启用模块检测到的信号_
+    - _Preservation: factor_editor 模块的筛选逻辑不变；enabled_modules 为空集时返回空结果_
+    - _Requirements: 1.10, 2.2, 2.4, 2.5, 2.6, 2.8, 2.9, 2.10, 2.12, 2.13, 2.15, 3.2, 3.3, 3.4_
+
+  - [x] 3.3 验证 Bug Condition 探索性测试现在通过
+    - **Property 1: Expected Behavior** - 派生因子值正确计算并填充
+    - **IMPORTANT**: 重新运行任务 1 中的同一测试 — 不要编写新测试
+    - 任务 1 中的测试编码了期望行为
+    - 当此测试通过时，确认期望行为已满足
+    - 运行 `pytest tests/properties/test_build_factor_dict_bug_condition.py -v`
+    - **EXPECTED OUTCOME**: 测试通过（确认缺陷已修复）
+    - _Requirements: 2.1, 2.3, 2.7, 2.11_
+
+  - [x] 3.4 验证 Preservation 属性测试仍然通过
+    - **Property 2: Preservation** - 原始行情与基本面数据不变
+    - **IMPORTANT**: 重新运行任务 2 中的同一测试 — 不要编写新测试
+    - 运行 `pytest tests/properties/test_build_factor_dict_preservation.py -v`
+    - **EXPECTED OUTCOME**: 测试通过（确认无回归）
+    - 确认修复后所有保持性测试仍然通过（无回归）
+    - _Requirements: 3.1, 3.3, 3.6_
+
+- [x] 4. Checkpoint - 确保所有测试通过
+  - 运行 `pytest tests/properties/test_build_factor_dict_bug_condition.py tests/properties/test_build_factor_dict_preservation.py tests/services/test_screen_data_provider.py -v`
+  - 确保所有测试通过，如有问题请询问用户。
