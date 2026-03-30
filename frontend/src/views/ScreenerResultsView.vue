@@ -133,6 +133,13 @@
           </template>
         </tbody>
       </table>
+
+      <!-- 分页 -->
+      <div v-if="totalPages > 1" class="pagination">
+        <button class="btn-page" :disabled="currentPage <= 1" @click="changePage(currentPage - 1)">上一页</button>
+        <span class="page-info">第 {{ currentPage }} 页 / 共 {{ totalPages }} 页（{{ totalCount }} 条）</span>
+        <button class="btn-page" :disabled="currentPage >= totalPages" @click="changePage(currentPage + 1)">下一页</button>
+      </div>
     </div>
   </div>
 </template>
@@ -225,22 +232,15 @@ const expandedSymbols = ref<Set<string>>(new Set())
 const sortKey = ref<SortKey>('trend_score')
 const sortDir = ref<SortDir>('desc')
 const exporting = ref(false)
+const currentPage = ref(1)
+const totalCount = ref(0)
+const pageSize = 20
 
-// ─── 排序后结果 ───────────────────────────────────────────────────────────────
+const totalPages = computed(() => Math.ceil(totalCount.value / pageSize))
 
-const sortedResults = computed(() => {
-  const arr = [...results.value]
-  arr.sort((a, b) => {
-    let cmp = 0
-    if (sortKey.value === 'trend_score') {
-      cmp = a.trend_score - b.trend_score
-    } else {
-      cmp = (RISK_ORDER[a.risk_level] ?? 0) - (RISK_ORDER[b.risk_level] ?? 0)
-    }
-    return sortDir.value === 'asc' ? cmp : -cmp
-  })
-  return arr
-})
+// ─── 排序后结果（排序由后端完成，前端直接使用返回结果）───────────────────────
+
+const sortedResults = computed(() => results.value)
 
 // ─── 辅助函数 ─────────────────────────────────────────────────────────────────
 
@@ -276,18 +276,31 @@ function toggleSort(key: SortKey) {
     sortKey.value = key
     sortDir.value = key === 'trend_score' ? 'desc' : 'asc'
   }
+  currentPage.value = 1
+  loadResults()
 }
 
 // ─── 数据加载 ─────────────────────────────────────────────────────────────────
 
 async function loadResults() {
   await execute(async () => {
-    const res = await apiClient.get<{ items?: ScreenResultRow[] } | ScreenResultRow[]>(
+    const res = await apiClient.get<{ total?: number; items?: ScreenResultRow[] } | ScreenResultRow[]>(
       '/screen/results',
+      { params: { page: currentPage.value, page_size: pageSize, sort_by: sortKey.value, sort_dir: sortDir.value } },
     )
     const data = res.data
-    return Array.isArray(data) ? data : (data.items ?? [])
+    if (Array.isArray(data)) {
+      totalCount.value = data.length
+      return data
+    }
+    totalCount.value = data.total ?? (data.items ?? []).length
+    return data.items ?? []
   })
+}
+
+function changePage(p: number) {
+  currentPage.value = p
+  loadResults()
 }
 
 // ─── 导出 Excel ───────────────────────────────────────────────────────────────
@@ -496,4 +509,17 @@ onMounted(() => {
   border-radius: 50%; animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ─── 分页 ──────────────────────────────────────────────────────────────────── */
+.pagination {
+  display: flex; align-items: center; gap: 12px;
+  justify-content: flex-end; margin-top: 14px;
+}
+.btn-page {
+  background: #21262d; border: 1px solid #30363d; color: #8b949e;
+  padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 13px;
+}
+.btn-page:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
+.btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-info { font-size: 13px; color: #8b949e; }
 </style>

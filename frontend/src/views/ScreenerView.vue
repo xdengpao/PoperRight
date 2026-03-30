@@ -59,12 +59,22 @@
       </div>
     </section>
 
-    <!-- 管理模块按钮（仅当有策略选中时显示） -->
+    <!-- 管理模块 + 保存修改按钮栏（仅当有策略选中时显示） -->
     <div v-if="activeStrategyId" class="module-manage-bar card">
       <button class="btn btn-outline" @click="openModulesDialog">
         ⚙️ 管理模块
       </button>
       <span class="module-summary">已启用 {{ currentEnabledModules.length }} 个模块</span>
+      <button
+        class="btn btn-save"
+        @click="saveStrategy"
+        :disabled="saving"
+        aria-label="保存修改"
+      >
+        <span v-if="saving" class="spinner" aria-hidden="true"></span>
+        {{ saving ? '保存中...' : '💾 保存修改' }}
+      </button>
+      <span v-if="saveSuccess" class="save-success">✓ 保存成功</span>
     </div>
 
     <!-- 因子条件可视化编辑器 -->
@@ -162,20 +172,6 @@
           class="btn btn-outline btn-sm"
           @click="addFactor(ft.key)"
         >＋ {{ ft.label }}</button>
-      </div>
-
-      <!-- 保存修改按钮 -->
-      <div v-if="activeStrategyId" class="save-row">
-        <button
-          class="btn btn-save"
-          @click="saveStrategy"
-          :disabled="saving"
-          aria-label="保存修改"
-        >
-          <span v-if="saving" class="spinner" aria-hidden="true"></span>
-          {{ saving ? '保存中...' : '💾 保存修改' }}
-        </button>
-        <span v-if="saveSuccess" class="save-success">✓ 保存成功</span>
       </div>
     </section>
 
@@ -1161,6 +1157,8 @@ function startRealtime() {
         strategy_id: activeStrategyId.value || undefined,
         strategy_config: activeStrategyId.value ? undefined : buildStrategyConfig(),
         screen_type: 'REALTIME',
+      }, {
+        timeout: 120_000,
       })
       lastRefreshTime.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
     } catch { /* ignore */ }
@@ -1386,6 +1384,7 @@ async function saveStrategy() {
   try {
     await apiClient.put(`/strategies/${activeStrategyId.value}`, {
       config: buildStrategyConfig(),
+      enabled_modules: currentEnabledModules.value,
     })
     await loadStrategies()
     saveSuccess.value = true
@@ -1571,6 +1570,8 @@ async function runScreen() {
       strategy_id: activeStrategyId.value || undefined,
       strategy_config: activeStrategyId.value ? undefined : buildStrategyConfig(),
       screen_type: 'EOD',
+    }, {
+      timeout: 120_000, // 全市场选股需要遍历所有股票，120s 超时
     })
     router.push('/screener/results')
   } catch (e) {
@@ -1902,17 +1903,13 @@ details > summary::-webkit-details-marker { display: none; }
 .toggle-switch input:disabled + .toggle-track { opacity: 0.4; cursor: not-allowed; }
 
 /* ─── 保存修改 ──────────────────────────────────────────────────────────────── */
-.save-row {
-  display: flex; align-items: center; gap: 12px;
-  padding-top: 14px; border-top: 1px solid #21262d; margin-top: 4px;
-}
 
 /* ─── 管理模块按钮栏 ────────────────────────────────────────────────────────── */
 .module-manage-bar {
   display: flex; align-items: center; gap: 12px;
 }
 .module-summary {
-  font-size: 13px; color: #8b949e;
+  font-size: 13px; color: #8b949e; margin-right: auto;
 }
 .btn-save { background: #238636; }
 .btn-save:hover:not(:disabled) { background: #2ea043; }

@@ -70,9 +70,11 @@ class ScreenExecutor:
         strategy_config: StrategyConfig,
         strategy_id: str | None = None,
         enabled_modules: list[str] | None = None,
+        raw_config: dict | None = None,
     ):
         self._config = strategy_config
         self._strategy_id = strategy_id or str(uuid.uuid4())
+        self._raw_config = raw_config or {}
         # None → all modules enabled (backward compat); [] → empty set (skip all)
         self._enabled_modules: set[str] | None = (
             set(enabled_modules) if enabled_modules is not None else None
@@ -188,6 +190,36 @@ class ScreenExecutor:
             if self._is_module_enabled("ma_trend"):
                 ma_trend_score = float(stock_data.get("ma_trend", 0.0))
                 trend_score = max(trend_score, ma_trend_score)
+
+            # breakout 模块贡献趋势强度：有效突破 +60，非假突破再 +20，量比>1.5 再 +20
+            breakout_data = stock_data.get("breakout")
+            if self._is_module_enabled("breakout") and isinstance(breakout_data, dict):
+                if breakout_data.get("is_valid"):
+                    bp_score = 60.0
+                    if not breakout_data.get("is_false_breakout", False):
+                        bp_score += 20.0
+                    vol_ratio = breakout_data.get("volume_ratio", 0)
+                    if vol_ratio and vol_ratio > 1.5:
+                        bp_score += 20.0
+                    trend_score = max(trend_score, bp_score)
+
+            # indicator_params 模块贡献趋势强度：每个有效信号 +25
+            if self._is_module_enabled("indicator_params"):
+                ind_score = 0.0
+                if stock_data.get("macd"):
+                    ind_score += 25.0
+                if stock_data.get("boll"):
+                    ind_score += 25.0
+                if stock_data.get("rsi"):
+                    ind_score += 25.0
+                if stock_data.get("dma") and isinstance(stock_data["dma"], dict):
+                    dma_val = stock_data["dma"].get("dma", 0)
+                    ama_val = stock_data["dma"].get("ama", 0)
+                    if dma_val and ama_val and dma_val > ama_val:
+                        ind_score += 25.0
+                if ind_score > 0:
+                    trend_score = max(trend_score, ind_score)
+
             # 确保 trend_score 在 [0, 100]
             trend_score = max(0.0, min(100.0, trend_score))
 
@@ -213,7 +245,9 @@ class ScreenExecutor:
             # 非 factor_editor 模块：从 stock_data 派生因子值直接构建信号
             # ma_trend 模块
             if self._is_module_enabled("ma_trend"):
-                if stock_data.get("ma_trend", 0) >= 80:
+                ma_cfg = self._raw_config.get("ma_trend", {}) if isinstance(self._raw_config.get("ma_trend"), dict) else {}
+                threshold = ma_cfg.get("trend_score_threshold", 80)
+                if stock_data.get("ma_trend", 0) >= threshold:
                     signals.append(SignalDetail(
                         category=SignalCategory.MA_TREND,
                         label="ma_trend",

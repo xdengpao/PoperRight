@@ -59,9 +59,11 @@ class ScreenDataProvider:
         self,
         pg_session: AsyncSession | None = None,
         ts_session: AsyncSession | None = None,
+        strategy_config: dict[str, Any] | None = None,
     ) -> None:
         self._pg_session = pg_session
         self._ts_session = ts_session
+        self._strategy_config = strategy_config or {}
 
     async def load_screen_data(
         self,
@@ -107,7 +109,7 @@ class ScreenDataProvider:
                 if not bars:
                     continue  # 无行情数据的股票跳过
 
-                factor_dict = self._build_factor_dict(stock, bars)
+                factor_dict = self._build_factor_dict(stock, bars, self._strategy_config)
                 result[stock.symbol] = factor_dict
             except Exception:
                 logger.warning(
@@ -139,6 +141,7 @@ class ScreenDataProvider:
     def _build_factor_dict(
         stock: StockInfo,
         bars: list[KlineBar],
+        strategy_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         将 StockInfo + KlineBar 列表转换为 ScreenExecutor 所需的因子字典。
@@ -212,16 +215,27 @@ class ScreenDataProvider:
         lows_float = [float(lo) for lo in stock_data["lows"]]
         volumes_int = [int(v) for v in stock_data["volumes"]]
 
+        # 从策略配置中提取均线参数
+        _cfg = strategy_config or {}
+        ma_cfg = _cfg.get("ma_trend", {}) if isinstance(_cfg.get("ma_trend"), dict) else {}
+        cfg_ma_periods = ma_cfg.get("ma_periods") if isinstance(ma_cfg.get("ma_periods"), list) else None
+        cfg_support_ma_lines = ma_cfg.get("support_ma_lines") if isinstance(ma_cfg.get("support_ma_lines"), list) else None
+        cfg_slope_threshold = float(ma_cfg.get("slope_threshold", 0.0))
+
         # 均线趋势模块
         try:
-            trend_result = score_ma_trend(closes_float)
+            trend_result = score_ma_trend(closes_float, periods=cfg_ma_periods, slope_threshold=cfg_slope_threshold)
             stock_data["ma_trend"] = trend_result.score
         except Exception:
             logger.debug("计算 ma_trend 失败", exc_info=True)
             stock_data["ma_trend"] = 0.0
 
         try:
-            support_result = detect_ma_support(closes_float)
+            support_result = detect_ma_support(
+                closes_float,
+                periods=cfg_ma_periods,
+                support_periods=cfg_support_ma_lines,
+            )
             stock_data["ma_support"] = support_result.detected
         except Exception:
             logger.debug("计算 ma_support 失败", exc_info=True)
@@ -259,19 +273,41 @@ class ScreenDataProvider:
         # 形态突破模块
         try:
             breakout_signal = None
-            box = detect_box_breakout(closes_float, highs_float, lows_float, volumes_int)
-            if box is not None:
-                breakout_signal = {
-                    "type": box.breakout_type.value,
-                    "resistance": box.resistance_level,
-                    "is_valid": box.is_valid,
-                    "is_false_breakout": box.is_false_breakout,
-                    "volume_ratio": box.volume_ratio,
-                    "generates_buy_signal": box.generates_buy_signal,
-                }
-            if breakout_signal is None:
-                prev_high = detect_previous_high_breakout(closes_float, volumes_int)
+            bo_cfg = _cfg.get("breakout", {}) if isinstance(_cfg.get("breakout"), dict) else {}
+            vol_threshold = float(bo_cfg.get("volume_ratio_threshold", 1.5))
+            confirm_days = int(bo_cfg.get("confirm_days", 1))
+            enable_box = bo_cfg.get("box_breakout", True)
+            enable_high = bo_cfg.get("high_breakout", True)
+            enable_trendline = bo_cfg.get("trendline_breakout", True)
+
+            if enable_box:
+                box = detect_box_breakout(
+                    closes_float, highs_float, lows_float, volumes_int,
+                    volume_multiplier=vol_threshold,
+                )
+                if box is not None:
+                    # 站稳确认：检查突破后 confirm_days 天是否站稳
+                    if confirm_days > 0 and len(closes_float) > 1:
+                        from app.services.screener.breakout import check_false_breakout
+                        box = check_false_breakout(box, closes_float[-1], hold_days=confirm_days)
+                    breakout_signal = {
+                        "type": box.breakout_type.value,
+                        "resistance": box.resistance_level,
+                        "is_valid": box.is_valid,
+                        "is_false_breakout": box.is_false_breakout,
+                        "volume_ratio": box.volume_ratio,
+                        "generates_buy_signal": box.generates_buy_signal,
+                    }
+
+            if breakout_signal is None and enable_high:
+                prev_high = detect_previous_high_breakout(
+                    closes_float, volumes_int,
+                    volume_multiplier=vol_threshold,
+                )
                 if prev_high is not None:
+                    if confirm_days > 0 and len(closes_float) > 1:
+                        from app.services.screener.breakout import check_false_breakout
+                        prev_high = check_false_breakout(prev_high, closes_float[-1], hold_days=confirm_days)
                     breakout_signal = {
                         "type": prev_high.breakout_type.value,
                         "resistance": prev_high.resistance_level,
@@ -280,11 +316,16 @@ class ScreenDataProvider:
                         "volume_ratio": prev_high.volume_ratio,
                         "generates_buy_signal": prev_high.generates_buy_signal,
                     }
-            if breakout_signal is None:
+
+            if breakout_signal is None and enable_trendline:
                 trendline = detect_descending_trendline_breakout(
-                    closes_float, highs_float, volumes_int
+                    closes_float, highs_float, volumes_int,
+                    volume_multiplier=vol_threshold,
                 )
                 if trendline is not None:
+                    if confirm_days > 0 and len(closes_float) > 1:
+                        from app.services.screener.breakout import check_false_breakout
+                        trendline = check_false_breakout(trendline, closes_float[-1], hold_days=confirm_days)
                     breakout_signal = {
                         "type": trendline.breakout_type.value,
                         "resistance": trendline.resistance_level,
@@ -293,6 +334,7 @@ class ScreenDataProvider:
                         "volume_ratio": trendline.volume_ratio,
                         "generates_buy_signal": trendline.generates_buy_signal,
                     }
+
             stock_data["breakout"] = breakout_signal
         except Exception:
             logger.debug("计算 breakout 失败", exc_info=True)

@@ -164,6 +164,9 @@ class BackfillService:
             try:
                 progress = json.loads(raw)
                 if progress.get("status") in ("running", "pending", "stopping"):
+                    progress["status"] = "stopping"
+                    await cache_set(REDIS_KEY, json.dumps(progress), ex=PROGRESS_TTL)
+
                     # 撤销已分发的 Celery 任务
                     task_ids = progress.get("task_ids", [])
                     if task_ids:
@@ -175,24 +178,21 @@ class BackfillService:
                             except Exception as exc:
                                 logger.warning("撤销任务 %s 失败: %s", tid, exc)
 
-                    # 清除 Redis 中的进度和停止信号，彻底释放状态
-                    await cache_delete(REDIS_KEY)
-                    await cache_delete(STOP_SIGNAL_KEY)
-                    logger.info("已清除 Redis 回填进度和停止信号")
-
-                    return {"message": "已停止回填并清除任务状态"}
+                    return {"message": "已发送停止信号"}
             except (json.JSONDecodeError, TypeError):
                 pass
-
-        # 即使没有活跃任务，也清除可能残留的 Redis 键
-        await cache_delete(REDIS_KEY)
-        await cache_delete(STOP_SIGNAL_KEY)
-        return {"message": "当前没有正在执行的回填任务，已清除残留状态"}
+        return {"message": "当前没有正在执行的回填任务"}
 
     async def get_progress(self) -> dict:
-        """从 Redis 读取回填进度，无数据时返回 idle 默认值。"""
+        """从 Redis 读取回填进度，无数据时返回 idle 默认值。
+
+        如果状态为 stopping 且停止信号存在，说明 Celery 任务已被 revoke 终止，
+        自动将状态更新为 stopped 并清理停止信号。
+        """
         raw = await cache_get(REDIS_KEY)
         if not raw:
+            # 如果进度键不存在但停止信号还在，清理它
+            await cache_delete(STOP_SIGNAL_KEY)
             return {
                 "total": 0,
                 "completed": 0,
@@ -202,7 +202,7 @@ class BackfillService:
                 "data_types": [],
             }
         try:
-            return json.loads(raw)
+            progress = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return {
                 "total": 0,
@@ -212,6 +212,19 @@ class BackfillService:
                 "status": "idle",
                 "data_types": [],
             }
+
+        # 如果状态卡在 stopping，检查停止信号是否存在
+        # 存在说明任务已被 revoke 终止但来不及更新状态
+        if progress.get("status") == "stopping":
+            stop_signal = await cache_get(STOP_SIGNAL_KEY)
+            if stop_signal is not None:
+                progress["status"] = "stopped"
+                progress["current_symbol"] = ""
+                await cache_set(REDIS_KEY, json.dumps(progress), ex=PROGRESS_TTL)
+                await cache_delete(STOP_SIGNAL_KEY)
+                logger.info("检测到回填任务卡在 stopping 状态，已自动更新为 stopped")
+
+        return progress
 
     async def _resolve_symbols(self, symbols: list[str]) -> list[str]:
         """解析股票代码列表。

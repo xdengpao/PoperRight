@@ -187,18 +187,20 @@ def detect_bullish_alignment(
     closes: list[float],
     periods: list[int] | None = None,
     ma_dict: dict[int, list[float]] | None = None,
+    slope_threshold: float = 0.0,
 ) -> BullishAlignmentResult:
     """
     识别多头排列形态。
 
     多头排列条件（需求 3.2）：
     1. 短期 MA > 长期 MA（所有相邻周期对）
-    2. 各均线斜率均 > 0
+    2. 各均线斜率均 > slope_threshold
 
     Args:
         closes:  收盘价序列
         periods: 均线周期列表
         ma_dict: 预计算的均线字典（可选，避免重复计算）
+        slope_threshold: 斜率阈值，默认 0.0（斜率需大于此值才视为上升）
 
     Returns:
         BullishAlignmentResult
@@ -246,9 +248,9 @@ def detect_bullish_alignment(
         if latest_ma[short_p] > latest_ma[long_p]:
             aligned_pairs += 1
 
-    # 检查斜率：所有可用均线斜率 > 0
+    # 检查斜率：所有可用均线斜率 > slope_threshold
     available_slopes = [slopes[p] for p in available_periods if p in slopes]
-    slopes_positive = len(available_slopes) > 0 and all(s > 0 for s in available_slopes)
+    slopes_positive = len(available_slopes) > 0 and all(s > slope_threshold for s in available_slopes)
 
     is_aligned = (
         total_pairs > 0
@@ -269,18 +271,20 @@ def detect_bullish_alignment(
 def score_ma_trend(
     closes: list[float],
     periods: list[int] | None = None,
+    slope_threshold: float = 0.0,
 ) -> MATrendScore:
     """
     计算均线趋势打分（0-100 分）。
 
     打分算法（需求 3.3）：
     1. 排列程度分（40%）：满足多头排列的 MA 对数占比 × 100
-    2. 斜率分（30%）：各均线斜率的归一化得分
+    2. 斜率分（30%）：各均线斜率的归一化得分（低于 slope_threshold 的斜率得 0 分）
     3. 距离分（30%）：当前价格在均线上方的程度
 
     Args:
         closes:  收盘价序列
         periods: 均线周期列表
+        slope_threshold: 斜率阈值，低于此值的均线斜率在评分中视为 0
 
     Returns:
         MATrendScore（score 保证在 [0, 100]）
@@ -297,7 +301,7 @@ def score_ma_trend(
         )
 
     ma_dict = calculate_multi_ma(closes, periods)
-    alignment = detect_bullish_alignment(closes, periods, ma_dict)
+    alignment = detect_bullish_alignment(closes, periods, ma_dict, slope_threshold=slope_threshold)
 
     # --- 1. 排列程度分 (0-100) ---
     if alignment.total_pairs > 0:
@@ -306,17 +310,16 @@ def score_ma_trend(
         alignment_score = 0.0
 
     # --- 2. 斜率分 (0-100) ---
+    # 低于 slope_threshold 的斜率视为 0（不贡献分数）
     slope_values = [
         alignment.slopes[p]
         for p in sorted(periods)
         if p in alignment.slopes
     ]
     if slope_values:
-        # 正斜率越大越好，负斜率得 0 分
-        # 将斜率映射到 0-100：斜率 0% → 0 分，斜率 >= 1% → 100 分
-        positive_slopes = [max(s, 0.0) for s in slope_values]
-        avg_slope = sum(positive_slopes) / len(positive_slopes)
-        # 使用 sigmoid-like 映射：score = min(avg_slope / 1.0 * 100, 100)
+        # 斜率高于阈值才贡献正分，低于阈值的视为 0
+        filtered_slopes = [max(s - slope_threshold, 0.0) if s > slope_threshold else 0.0 for s in slope_values]
+        avg_slope = sum(filtered_slopes) / len(filtered_slopes)
         slope_score = min(avg_slope * 100.0, 100.0)
     else:
         slope_score = 0.0

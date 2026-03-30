@@ -412,6 +412,7 @@ async def run_screen(body: ScreenRunRequest) -> dict:
         provider = ScreenDataProvider(
             pg_session=pg_session,
             ts_session=ts_session,
+            strategy_config=config_dict,
         )
         stocks_data = await provider.load_screen_data()
 
@@ -444,6 +445,7 @@ async def run_screen(body: ScreenRunRequest) -> dict:
         strategy_config=strategy_config,
         strategy_id=strategy_id_str,
         enabled_modules=enabled_modules,
+        raw_config=config_dict,
     )
 
     logger.info(
@@ -513,6 +515,8 @@ async def run_screen(body: ScreenRunRequest) -> dict:
 async def get_screen_results(
     strategy_id: UUID | None = Query(None),
     screen_type: str | None = Query(None),
+    sort_by: str = Query("trend_score", description="排序字段: trend_score, ref_buy_price, symbol, risk_level"),
+    sort_dir: str = Query("desc", description="排序方向: asc, desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
 ) -> dict:
@@ -533,6 +537,16 @@ async def get_screen_results(
     # 按 screen_type 过滤
     if screen_type and data.get("screen_type") != screen_type:
         return {"total": 0, "page": page, "page_size": page_size, "items": []}
+
+    # 全局排序（分页前）
+    _RISK_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+    reverse = sort_dir.lower() != "asc"
+    if sort_by == "risk_level":
+        all_items.sort(key=lambda x: _RISK_ORDER.get(x.get("risk_level", "HIGH"), 2), reverse=reverse)
+    elif sort_by in ("trend_score", "ref_buy_price"):
+        all_items.sort(key=lambda x: float(x.get(sort_by, 0) or 0), reverse=reverse)
+    elif sort_by == "symbol":
+        all_items.sort(key=lambda x: x.get("symbol", ""), reverse=reverse)
 
     # 分页
     total = len(all_items)
