@@ -143,10 +143,47 @@ class StrategyTemplateUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 内存策略存储（开发阶段，后续替换为数据库）
+# 策略存储（Redis 持久化，重启不丢失）
 # ---------------------------------------------------------------------------
 
 _strategies: dict[str, dict] = {}  # id -> strategy dict
+_STRATEGIES_REDIS_KEY = "strategies:all"
+
+
+def _sync_strategies_to_redis() -> None:
+    """将内存策略同步写入 Redis（同步调用，供非 async 上下文使用）。"""
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                pool.submit(asyncio.run, cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30)).result()
+        else:
+            loop.run_until_complete(cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30))
+    except RuntimeError:
+        asyncio.run(cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30))
+
+
+async def _async_sync_strategies_to_redis() -> None:
+    """将内存策略异步写入 Redis。"""
+    await cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30)
+
+
+async def _load_strategies_from_redis() -> None:
+    """从 Redis 加载策略到内存，不存在则用内置模板初始化。"""
+    global _strategies
+    raw = await cache_get(_STRATEGIES_REDIS_KEY)
+    if raw:
+        try:
+            _strategies = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            _strategies = {}
+    # 确保内置模板存在
+    for tpl in _BUILTIN_TEMPLATES:
+        if tpl["id"] not in _strategies:
+            _strategies[tpl["id"]] = dict(tpl)
+    await _async_sync_strategies_to_redis()
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +345,12 @@ def _seed_builtin_templates() -> None:
 
 
 _seed_builtin_templates()
+
+
+@router.on_event("startup")
+async def _startup_load_strategies():
+    """服务启动时从 Redis 加载策略模板。"""
+    await _load_strategies_from_redis()
 
 
 # ---------------------------------------------------------------------------
@@ -640,6 +683,7 @@ async def create_strategy(body: StrategyTemplateIn) -> dict:
         "created_at": datetime.now().isoformat(),
     }
     _strategies[sid] = strategy
+    await _async_sync_strategies_to_redis()
     return strategy
 
 
@@ -670,6 +714,7 @@ async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> di
     if body.enabled_modules is not None:
         s["enabled_modules"] = body.enabled_modules
     s.setdefault("enabled_modules", [])
+    await _async_sync_strategies_to_redis()
     return s
 
 
@@ -681,6 +726,7 @@ async def delete_strategy(strategy_id: UUID) -> dict:
         if _strategies[sid].get("is_builtin"):
             raise HTTPException(status_code=400, detail="内置策略模板不可删除")
         del _strategies[sid]
+    await _async_sync_strategies_to_redis()
     return {"id": sid, "deleted": True}
 
 
@@ -690,4 +736,5 @@ async def activate_strategy(strategy_id: UUID) -> dict:
     sid = str(strategy_id)
     for s in _strategies.values():
         s["is_active"] = (s["id"] == sid)
+    await _async_sync_strategies_to_redis()
     return {"id": sid, "is_active": True}

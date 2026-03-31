@@ -60,6 +60,7 @@ Desktop.ini
 # === Celery ===
 celerybeat-schedule
 celerybeat-schedule.db
+celerybeat-schedule-wal
 celerybeat.pid
 
 # === Docker volumes (local data) ===
