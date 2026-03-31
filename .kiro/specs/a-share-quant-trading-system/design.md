@@ -584,17 +584,256 @@ class RiskController:
 
 ### 4. BacktestEngine（回测引擎）
 
-历史回测、参数优化、过拟合检测。
+历史回测、参数优化、过拟合检测。系统核心回测引擎，支持策略驱动的逐日信号生成、A 股 T+1 交易规则模拟、多种卖出条件检测、仓位管理和大盘风控集成。
 
-**核心接口：**
+#### 4a. 核心接口
 
 ```python
 class BacktestEngine:
-    def run_backtest(config: BacktestConfig) -> BacktestResult
-    def run_segment_backtest(config: BacktestConfig, segments: list[MarketSegment]) -> dict[str, BacktestResult]
+    def run_backtest(config: BacktestConfig, kline_data: dict[str, list[KlineBar]], index_data: dict[str, list[KlineBar]] | None = None) -> BacktestResult
+    def run_segment_backtest(config: BacktestConfig, signals: list[dict], segments: list[tuple[str, date, date]]) -> dict[str, BacktestResult]
     def grid_search(param_grid: dict, base_config: BacktestConfig) -> list[ParamResult]
     def genetic_optimize(param_space: dict, base_config: BacktestConfig) -> ParamResult
     def detect_overfitting(train_result: BacktestResult, test_result: BacktestResult) -> OverfitReport
+```
+
+#### 4b. 策略驱动回测主循环（需求 12.5–12.7）
+
+回测引擎的核心是逐交易日主循环，每个交易日依次执行：卖出条件检测 → 卖出执行 → 信号生成 → 买入候选排序 → 买入执行 → 净值快照。
+
+```mermaid
+flowchart TD
+    A[开始回测] --> B[初始化：资金、持仓、日期序列]
+    B --> C{遍历每个交易日 T}
+    C --> D[步骤1：检查已持仓标的卖出条件]
+    D --> E[步骤2：执行卖出（T+1 开盘价）]
+    E --> F[步骤3：更新可用资金（卖出回收资金标记为次日可用）]
+    F --> G[步骤4：调用 ScreenExecutor 生成买入候选信号]
+    G --> H[步骤5：过滤已持仓标的、涨停标的、风控过滤]
+    H --> I[步骤6：候选排序 + 取前 N 只]
+    I --> J[步骤7：计算买入金额、取整100股、执行买入]
+    J --> K[步骤8：记录净值快照]
+    K --> C
+    C -->|遍历结束| L[计算绩效指标]
+    L --> M[返回 BacktestResult]
+```
+
+```python
+def run_backtest(
+    self,
+    config: BacktestConfig,
+    kline_data: dict[str, list[KlineBar]],
+    index_data: dict[str, list[KlineBar]] | None = None,
+) -> BacktestResult:
+    """
+    策略驱动回测主入口。
+
+    Parameters
+    ----------
+    config : BacktestConfig
+        回测配置（含策略配置、资金、费率、卖出参数等）
+    kline_data : dict[str, list[KlineBar]]
+        全市场前复权日 K 线数据，{symbol: [KlineBar, ...]}，按时间升序
+    index_data : dict[str, list[KlineBar]] | None
+        大盘指数 K 线数据（上证指数 "000001.SH"、创业板指 "399006.SZ"），
+        用于大盘风控模拟。None 或 enable_market_risk=False 时跳过。
+
+    Returns
+    -------
+    BacktestResult
+    """
+    ...
+```
+
+#### 4c. 信号生成子系统（需求 12.5–12.6）
+
+每个交易日收盘后，BacktestEngine 使用当日及之前的历史 K 线数据构建因子字典，调用 `ScreenExecutor` 按策略配置执行盘后选股，生成买入候选信号。
+
+```python
+def _generate_buy_signals(
+    self,
+    trade_date: date,
+    kline_data: dict[str, list[KlineBar]],
+    config: BacktestConfig,
+    market_risk_state: str,
+) -> list[ScreenItem]:
+    """
+    生成买入候选信号。
+
+    1. 截取 trade_date 及之前的 K 线数据
+    2. 构建 ScreenDataProvider 格式的因子字典
+    3. 实例化 ScreenExecutor 执行盘后选股
+    4. 根据 market_risk_state 调整趋势打分阈值
+    5. 过滤当日涨幅 >9% 和连续3日涨幅 >20% 的个股（需求 12.28）
+    6. 返回 ScreenItem 列表
+    """
+    ...
+```
+
+#### 4d. 卖出条件检测子系统（需求 12.17–12.23）
+
+每个交易日收盘后检查已持仓标的是否触发卖出条件，按优先级从高到低：固定止损 → 趋势破位 → 移动止盈 → 持仓超期。
+
+```python
+def _check_sell_conditions(
+    self,
+    position: _BacktestPosition,
+    trade_date: date,
+    kline_data: dict[str, list[KlineBar]],
+    config: BacktestConfig,
+) -> _SellSignal | None:
+    """
+    检查单只持仓标的的卖出条件。
+
+    优先级（需求 12.17）：
+    1. 固定止损：收盘价相对成本价亏损 >= stop_loss_pct（需求 12.18）
+    2. 趋势破位：收盘价跌破 MA20（需求 12.19）
+    3. 移动止盈：收盘价从最高价回撤 >= trailing_stop_pct（需求 12.20）
+       - 涨停日不计入回撤判断（需求 12.21）
+    4. 持仓超期：持仓天数 > max_holding_days（需求 12.22）
+
+    停牌处理（需求 12.32）：
+    - 无 K 线数据的交易日暂停检测，复牌后继续
+
+    Returns None 表示不触发卖出。
+    """
+    ...
+```
+
+#### 4e. 买入执行子系统（需求 12.8–12.16）
+
+```python
+def _execute_buys(
+    self,
+    candidates: list[ScreenItem],
+    trade_date: date,
+    kline_data: dict[str, list[KlineBar]],
+    state: _BacktestState,
+    config: BacktestConfig,
+) -> list[_TradeRecord]:
+    """
+    执行买入委托。
+
+    规则：
+    - T+1 开盘价执行（需求 12.8）
+    - 开盘价 == 涨停价 → 跳过（需求 12.9）
+    - 持仓数量达 max_holdings → 不买入（需求 12.10）
+    - 等权分配 or 评分加权分配（需求 12.11, 12.12）
+    - 单股仓位不超过 max_position_pct（需求 12.13）
+    - 买入数量向下取整为 100 股整数倍，不足 100 股放弃（需求 12.14）
+    - 已持仓标的跳过（需求 12.15）
+    - 候选超过空位数时按优先级排序取前 N 只（需求 12.16）
+    - 板块仓位上限检查（需求 12.27）
+    """
+    ...
+```
+
+#### 4f. 卖出执行子系统（需求 12.23）
+
+```python
+def _execute_sells(
+    self,
+    sell_signals: list[_SellSignal],
+    trade_date: date,
+    kline_data: dict[str, list[KlineBar]],
+    state: _BacktestState,
+    config: BacktestConfig,
+) -> list[_TradeRecord]:
+    """
+    执行卖出委托。
+
+    规则：
+    - T+1 开盘价执行
+    - 开盘价 == 跌停价 → 延迟至下一个非跌停交易日（需求 12.23）
+    - 卖出回收资金标记为当日不可用，次日可用（需求 12.24）
+    """
+    ...
+```
+
+#### 4g. 候选排序逻辑（需求 12.16）
+
+```python
+def _rank_candidates(
+    self,
+    candidates: list[ScreenItem],
+    available_slots: int,
+) -> list[ScreenItem]:
+    """
+    按优先级排序候选标的并取前 N 只。
+
+    排序规则（需求 12.16）：
+    1. 趋势评分从高到低
+    2. 风险等级从低到高（LOW > MEDIUM > HIGH）
+    3. 触发信号数量从多到少
+    4. 趋势强度从强到弱（同趋势评分时的二级排序）
+    """
+    ...
+```
+
+#### 4h. 资金分配逻辑（需求 12.11–12.14）
+
+```python
+def _calculate_buy_amount(
+    self,
+    candidate: ScreenItem,
+    state: _BacktestState,
+    config: BacktestConfig,
+    open_price: Decimal,
+    total_candidates_score: float | None = None,
+) -> int:
+    """
+    计算单只标的买入数量（股数）。
+
+    等权模式（需求 12.11）：
+        单笔金额 = 可用资金 / (max_holdings - 当前持仓数)
+
+    评分加权模式（需求 12.12）：
+        单笔金额 = 可用资金 * (该标的评分 / 所有候选评分之和)
+
+    约束：
+    - 单股仓位 <= max_position_pct * 总资产（需求 12.13）
+    - 向下取整为 100 股整数倍（需求 12.14）
+    - 不足 100 股 → 返回 0（放弃买入）
+    """
+    ...
+```
+
+#### 4i. 大盘风控模拟（需求 12.26）
+
+```python
+def _evaluate_market_risk(
+    self,
+    trade_date: date,
+    index_data: dict[str, list[KlineBar]],
+) -> str:
+    """
+    评估大盘风控状态。
+
+    复用 MarketEnvironmentClassifier 和 RiskController 逻辑：
+    - 指数跌破 20 日均线 → CAUTION（阈值 80→90）（需求 9.1）
+    - 指数跌破 60 日均线 → DANGER（暂停买入）（需求 9.2）
+    - 其他 → NORMAL
+
+    Returns "NORMAL" | "CAUTION" | "DANGER"
+    """
+    ...
+```
+
+#### 4j. 涨跌停价格计算（需求 12.33）
+
+```python
+@staticmethod
+def _calc_limit_prices(prev_close: Decimal) -> tuple[Decimal, Decimal]:
+    """
+    计算涨跌停价格。
+
+    主板与创业板统一按 ±10% 简化处理（需求 12.33）。
+    涨停价 = round(prev_close * 1.10, 2)
+    跌停价 = round(prev_close * 0.90, 2)
+    """
+    limit_up = (prev_close * Decimal("1.10")).quantize(Decimal("0.01"))
+    limit_down = (prev_close * Decimal("0.90")).quantize(Decimal("0.01"))
+    return limit_up, limit_down
 ```
 
 ### 5. TradeExecutor（交易执行）
@@ -863,6 +1102,73 @@ class BacktestResult:
     avg_holding_days: float
     equity_curve: list[tuple[date, float]]
     trade_records: list[dict]
+```
+
+#### 回测配置扩展字段（需求 12.5–12.33）
+
+`BacktestConfig` 在原有基础参数（起止日期、初始资金、手续费率、滑点、单股/板块仓位上限）之上，新增以下字段以支持策略驱动回测的完整交易规则：
+
+```python
+@dataclass
+class BacktestConfig:
+    # --- 原有字段 ---
+    strategy_config: StrategyConfig
+    start_date: date
+    end_date: date
+    initial_capital: Decimal = Decimal("1000000")
+    commission_buy: Decimal = Decimal("0.0003")
+    commission_sell: Decimal = Decimal("0.0013")
+    slippage: Decimal = Decimal("0.001")
+    max_position_pct: float = 0.15
+    max_sector_pct: float = 0.30
+
+    # --- 新增字段（需求 12.10–12.33）---
+    max_holdings: int = 10                          # 最大同时持仓数量（需求 12.10）
+    stop_loss_pct: float = 0.08                     # 固定止损阈值（需求 12.18）
+    trailing_stop_pct: float = 0.05                 # 移动止盈回撤阈值（需求 12.20）
+    max_holding_days: int = 20                      # 最大持仓交易日数（需求 12.22）
+    allocation_mode: str = "equal"                  # 资金分配模式："equal" | "score_weighted"（需求 12.11）
+    enable_market_risk: bool = True                 # 是否启用大盘风控模拟（需求 12.26）
+    trend_stop_ma: int = 20                         # 趋势破位均线周期（需求 12.19）
+```
+
+#### 回测内部数据结构（需求 12）
+
+以下数据结构仅在 `backtest_engine.py` 内部使用，不暴露给外部模块：
+
+```python
+@dataclass
+class _BacktestPosition:
+    """回测持仓记录（扩展版）"""
+    symbol: str
+    quantity: int
+    cost_price: Decimal
+    buy_date: date                      # 买入日期（T+1 判定）
+    buy_trade_day_index: int            # 买入交易日序号（用于持仓天数计算）
+    highest_close: Decimal              # 持仓期间最高收盘价（移动止盈用）
+    sector: str | None = None           # 所属板块（板块仓位上限用）
+    pending_sell: _SellSignal | None = None  # 待执行的卖出信号（跌停延迟用）
+
+
+@dataclass
+class _SellSignal:
+    """卖出信号"""
+    symbol: str
+    reason: str                         # "STOP_LOSS" | "TREND_BREAK" | "TRAILING_STOP" | "MAX_HOLDING_DAYS"
+    trigger_date: date                  # 触发日期（收盘后检测到）
+    priority: int                       # 优先级：1=止损, 2=趋势破位, 3=移动止盈, 4=超期
+
+
+@dataclass
+class _BacktestState:
+    """回测运行时状态"""
+    cash: Decimal                       # 当前可用现金
+    frozen_cash: Decimal                # 当日卖出回收的冻结资金（次日可用，需求 12.24）
+    positions: dict[str, _BacktestPosition]  # 当前持仓 {symbol: position}
+    trade_records: list[_TradeRecord]   # 交易流水
+    equity_snapshots: dict[date, Decimal]  # 每日净值快照
+    trade_day_index: int                # 当前交易日序号（用于持仓天数计算）
+```
 
 @dataclass
 class RiskCheckResult:
@@ -1894,6 +2200,86 @@ interface StrategyTemplate {
 
 ---
 
+### 属性 22a：回测买入以 T+1 开盘价执行
+
+*对任意*回测结果中的买入交易记录，其执行日期应为信号生成日的下一个交易日（T+1），执行价格应等于该标的在 T+1 日的开盘价；当 T+1 日开盘价等于涨停价（前一交易日收盘价 × 1.10 四舍五入至分）时，该买入信号应被跳过，不产生买入交易记录。
+
+**验证需求：12.8, 12.9**
+
+---
+
+### 属性 22b：回测持仓数量上限不变量
+
+*对任意*回测运行过程中的任意交易日快照，当前持仓标的数量不应超过 `max_holdings` 配置值；且不应存在对已持仓标的的重复买入交易记录。
+
+**验证需求：12.10, 12.15**
+
+---
+
+### 属性 22c：回测资金分配模式正确性
+
+*对任意*回测配置和买入候选列表：当 `allocation_mode="equal"` 时，每笔买入的目标金额应等于当前可用资金除以（`max_holdings` 减去当前持仓数量）；当 `allocation_mode="score_weighted"` 时，每笔买入的目标金额应与该候选标的的趋势评分占所有候选评分之和的比例成正比。
+
+**验证需求：12.11, 12.12**
+
+---
+
+### 属性 22d：回测仓位限制不变量
+
+*对任意*回测结果中的买入交易记录，买入执行后该标的的持仓市值不应超过总资产的 `max_position_pct`；买入执行后该标的所属板块的总持仓市值不应超过总资产的 `max_sector_pct`。
+
+**验证需求：12.13, 12.27**
+
+---
+
+### 属性 22e：回测买入数量为 100 股整数倍
+
+*对任意*回测结果中的买入交易记录，买入数量应为 100 的正整数倍（即 quantity > 0 且 quantity % 100 == 0）。
+
+**验证需求：12.14**
+
+---
+
+### 属性 22f：回测候选排序正确性
+
+*对任意*同一交易日的买入候选列表（长度 > 剩余持仓空位数），实际买入的标的应为按以下优先级排序后的前 N 只（N = 剩余空位数）：趋势评分从高到低 → 风险等级从低到高（LOW < MEDIUM < HIGH）→ 触发信号数量从多到少。
+
+**验证需求：12.16**
+
+---
+
+### 属性 22g：回测卖出条件触发与优先级正确性
+
+*对任意*持仓标的和价格序列，卖出条件应按以下优先级触发：（1）固定止损——当收盘价相对成本价亏损比例 ≥ `stop_loss_pct` 时触发；（2）趋势破位——当收盘价跌破 `trend_stop_ma` 日均线时触发；（3）移动止盈——当收盘价从持仓期间最高收盘价回撤 ≥ `trailing_stop_pct` 时触发（涨停日不计入回撤判断）；（4）持仓超期——当持仓交易日数 > `max_holding_days` 且未触发前三种条件时触发。当同一交易日触发多种卖出条件时，交易记录中的卖出原因应为最高优先级的条件。
+
+**验证需求：12.17, 12.18, 12.19, 12.20, 12.21, 12.22**
+
+---
+
+### 属性 22h：回测资金 T+1 可用规则
+
+*对任意*回测交易日，当日卖出回收的资金不应用于当日的买入委托；该资金应从次日起方可用于新的买入。即：当日可用资金 = 前日可用资金 + 前日冻结资金（卖出回收）- 当日买入支出。
+
+**验证需求：12.24**
+
+---
+
+### 属性 22i：回测大盘风控阈值联动
+
+*对任意*启用大盘风控模拟（`enable_market_risk=True`）的回测，当上证指数或创业板指收盘价跌破 20 日均线时，该交易日生成的买入候选信号中不应包含趋势评分低于 90 分的标的；当指数跌破 60 日均线时，该交易日不应生成任何买入信号。
+
+**验证需求：12.26**
+
+---
+
+### 属性 22j：涨跌停价格计算正确性
+
+*对任意*前一交易日收盘价 `prev_close`（正数），涨停价应等于 `round(prev_close × 1.10, 2)`，跌停价应等于 `round(prev_close × 0.90, 2)`，且涨停价 > 跌停价。
+
+**验证需求：12.33**
+
+---
+
 ### 属性 23：数据集划分比例
 
 *对任意*历史数据集，按时间顺序划分后，训练集应包含前 70% 的数据，测试集应包含后 30% 的数据，两个数据集不应有时间重叠。
@@ -2180,6 +2566,14 @@ interface StrategyTemplate {
 | 历史数据不足（<回测周期） | 返回错误提示，说明可用数据范围，拒绝执行回测 |
 | 参数优化超时 | 返回已完成的参数组合结果，标注"优化未完成" |
 | 遗传算法不收敛 | 设置最大迭代次数（默认 1000 次），超出后返回当前最优结果 |
+| ScreenExecutor 在回测日执行选股失败 | 记录 warning 日志，该交易日不生成买入信号，继续下一交易日 |
+| 个股 K 线数据缺失（停牌） | 暂停该标的的卖出条件检测，复牌后恢复检测（需求 12.32） |
+| 涨停无法买入 | 跳过该买入信号，记录日志，不影响其他标的买入（需求 12.9） |
+| 跌停无法卖出 | 将卖出信号标记为 pending_sell，延迟至下一个非跌停交易日执行（需求 12.23） |
+| 买入数量取整后不足 100 股 | 放弃该笔买入，记录日志（需求 12.14） |
+| 可用资金不足以买入任何标的 | 跳过当日所有买入信号，保持空仓等待（需求 12.25） |
+| 大盘指数数据缺失 | 当 enable_market_risk=True 但无指数数据时，默认 NORMAL 状态，记录 warning |
+| allocation_mode 参数非法 | 回退至 "equal" 模式，记录 warning 日志 |
 
 ### 前端层错误
 
@@ -2251,8 +2645,8 @@ def test_data_cleaning_invariant(stocks):
 - 单元测试：大盘跌破均线的边界示例、仓位恰好达到上限的边界示例
 
 **BacktestEngine（回测引擎）**
-- 属性测试：属性 20（T+1 规则）、属性 21（指标完整性）、属性 22（手续费计算）、属性 23（数据集划分）、属性 24（过拟合检测）
-- 单元测试：已知历史数据的回测结果验证、分段回测示例
+- 属性测试：属性 20（T+1 规则）、属性 21（指标完整性）、属性 22（手续费计算）、属性 22a（买入 T+1 开盘价）、属性 22b（持仓数量上限）、属性 22c（资金分配模式）、属性 22d（仓位限制）、属性 22e（100 股整数倍）、属性 22f（候选排序）、属性 22g（卖出条件与优先级）、属性 22h（资金 T+1 可用）、属性 22i（大盘风控阈值联动）、属性 22j（涨跌停价格计算）、属性 23（数据集划分）、属性 24（过拟合检测）
+- 单元测试：已知历史数据的回测结果验证、分段回测示例、涨停跳过买入示例、跌停延迟卖出示例、停牌暂停检测示例、空仓闲置示例、评分加权分配计算示例
 
 **TradeExecutor（交易执行）**
 - 属性测试：属性 25（条件单触发）、属性 26（非交易时段拒绝）、属性 27（盈亏计算）、属性 28（交易记录 round-trip）
@@ -5105,3 +5499,1904 @@ async def run_screen(body: ScreenRunRequest) -> dict:
 
 - 创建策略 → 写入测试 K 线数据 → 执行选股 → 验证返回真实结果全链路测试
 - 创建策略（enabled_modules=["ma_trend"]）→ 执行选股 → 验证仅应用均线模块筛选全链路测试
+
+
+---
+
+## 风险控制页面 API 实装与数据持久化（需求 28）
+
+### 概述
+
+当前 `app/api/v1/risk.py` 中所有风控端点均为 stub 实现，返回硬编码数据。后端服务层 `app/services/risk_controller.py` 已完整实现五大风控检查器（MarketRiskChecker、StockRiskFilter、BlackWhiteListManager、PositionRiskChecker、StopLossChecker），前端 `RiskView.vue` 已完整实现四个功能区域（大盘风控状态、止损止盈配置、黑白名单管理、仓位风控预警）。
+
+本次设计的核心目标是**打通 API 层与服务层/数据库的连接**，将 6 组 API 端点从 stub 升级为真实实现：
+
+1. `GET /risk/overview` → MarketRiskChecker + TimescaleDB kline
+2. `POST /risk/check` → PositionRiskChecker + StockRiskFilter + BlackWhiteListManager
+3. `POST /risk/stop-config` + `GET /risk/stop-config` → Redis 持久化
+4. `GET /risk/position-warnings` → 全部风控检查器 + Position 表
+5. 黑白名单 CRUD → PostgreSQL stock_list 表
+6. `GET /risk/strategy-health` → StopLossChecker + 交易记录
+
+设计原则：
+- API 层为薄编排层，业务逻辑全部委托给已有的服务层类
+- 数据库访问通过 FastAPI 依赖注入获取 session，不在 API 层直接创建连接
+- 止损止盈配置使用 Redis 存储（轻量、高频读写、支持 TTL）
+- 黑白名单使用 PostgreSQL stock_list 表（已有 ORM 模型，支持事务和分页）
+
+### 架构
+
+#### 风控 API 数据流
+
+```mermaid
+sequenceDiagram
+    participant FE as RiskView.vue
+    participant API as risk.py API 层
+    participant MRC as MarketRiskChecker
+    participant SRF as StockRiskFilter
+    participant BWL as BlackWhiteListManager
+    participant PRC as PositionRiskChecker
+    participant SLC as StopLossChecker
+    participant TS as TimescaleDB (kline)
+    participant PG as PostgreSQL (stock_list, position)
+    participant RD as Redis (stop_config)
+
+    Note over FE,RD: GET /risk/overview
+    FE->>API: 请求大盘风控状态
+    API->>TS: 查询 000001.SH + 399006.SZ 最近 60 日收盘价
+    TS-->>API: 收盘价序列
+    API->>MRC: check_market_risk(sh_closes)
+    API->>MRC: check_market_risk(cyb_closes)
+    MRC-->>API: MarketRiskLevel
+    API-->>FE: RiskOverviewResponse
+
+    Note over FE,RD: POST /risk/check
+    FE->>API: 委托风控校验请求
+    API->>PG: 查询黑名单 (stock_list)
+    API->>SRF: check_daily_gain()
+    API->>PRC: check_stock_position_limit()
+    API->>PRC: check_sector_position_limit()
+    API-->>FE: RiskCheckResponse
+
+    Note over FE,RD: POST/GET /risk/stop-config
+    FE->>API: 保存/读取止损配置
+    API->>RD: SET/GET risk:stop_config:{user_id}
+    RD-->>API: 配置数据
+    API-->>FE: StopConfigResponse
+
+    Note over FE,RD: GET /risk/position-warnings
+    FE->>API: 请求持仓预警
+    API->>PG: 查询 position 表
+    API->>TS: 查询持仓标的 K 线
+    API->>PRC: check_stock_position_limit()
+    API->>PRC: check_sector_position_limit()
+    API->>PRC: check_position_breakdown()
+    API->>SLC: check_fixed/trailing/trend_stop_loss()
+    API-->>FE: List[PositionWarning]
+```
+
+### 组件与接口
+
+#### 1. Pydantic 响应模型
+
+在 `app/api/v1/risk.py` 中新增/更新以下 Pydantic 模型，替代当前的 `dict` 返回值：
+
+```python
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+
+# --- 大盘风控概览 ---
+
+class RiskOverviewResponse(BaseModel):
+    """GET /risk/overview 响应"""
+    market_risk_level: str = Field(description="NORMAL / CAUTION / DANGER")
+    sh_above_ma20: bool
+    sh_above_ma60: bool
+    cyb_above_ma20: bool
+    cyb_above_ma60: bool
+    current_threshold: float = Field(description="当前趋势打分阈值")
+    data_insufficient: bool = Field(default=False, description="数据不足标记")
+
+
+# --- 委托风控校验 ---
+
+class RiskCheckRequest(BaseModel):
+    """POST /risk/check 请求"""
+    symbol: str
+    direction: str = "BUY"
+    quantity: int = 0
+    price: float | None = None
+
+class RiskCheckResponse(BaseModel):
+    """POST /risk/check 响应"""
+    passed: bool
+    reason: str | None = None
+
+
+# --- 止损止盈配置 ---
+
+class StopConfigRequest(BaseModel):
+    """POST /risk/stop-config 请求"""
+    fixed_stop_loss: float = Field(ge=1, le=50, description="固定止损比例 %")
+    trailing_stop: float = Field(ge=1, le=30, description="移动止损回撤比例 %")
+    trend_stop_ma: int = Field(description="趋势止损均线周期")
+
+class StopConfigResponse(BaseModel):
+    """GET/POST /risk/stop-config 响应"""
+    fixed_stop_loss: float
+    trailing_stop: float
+    trend_stop_ma: int
+    saved: bool = False
+
+
+# --- 持仓预警 ---
+
+class PositionWarningItem(BaseModel):
+    """单条持仓预警"""
+    symbol: str
+    type: str = Field(description="预警类型描述")
+    level: str = Field(description="danger / warning / info")
+    current_value: str
+    threshold: str
+    time: str
+
+
+# --- 黑白名单 ---
+
+class StockListItemIn(BaseModel):
+    """POST /blacklist, /whitelist 请求"""
+    symbol: str
+    reason: str | None = None
+
+class StockListItemOut(BaseModel):
+    """黑白名单条目"""
+    symbol: str
+    reason: str | None = None
+    created_at: str
+
+class StockListPageResponse(BaseModel):
+    """GET /blacklist, /whitelist 分页响应"""
+    total: int
+    page: int
+    page_size: int
+    items: list[StockListItemOut]
+
+
+# --- 策略健康 ---
+
+class StrategyHealthResponse(BaseModel):
+    """GET /risk/strategy-health 响应"""
+    strategy_id: str | None = None
+    win_rate: float
+    max_drawdown: float
+    is_healthy: bool
+    warnings: list[str]
+```
+
+#### 2. GET /risk/overview — 大盘风控状态实时计算（需求 28.1, 28.2）
+
+```python
+from fastapi import Depends
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.core.database import get_ts_session
+from app.models.kline import Kline
+from app.services.risk_controller import MarketRiskChecker
+
+_market_checker = MarketRiskChecker()
+
+# 替换现有的 GET /risk/check stub
+@router.get("/risk/overview", response_model=RiskOverviewResponse)
+async def risk_overview(
+    ts_session: AsyncSession = Depends(get_ts_session),
+) -> RiskOverviewResponse:
+    """
+    大盘风控状态实时计算。
+
+    从 TimescaleDB 查询上证指数和创业板指最近 60 个交易日收盘价，
+    调用 MarketRiskChecker 计算风险等级。
+    """
+    data_insufficient = False
+
+    # 查询指数收盘价
+    sh_closes = await _query_index_closes(ts_session, "000001.SH", 60)
+    cyb_closes = await _query_index_closes(ts_session, "399006.SZ", 60)
+
+    if len(sh_closes) < 20 or len(cyb_closes) < 20:
+        data_insufficient = True
+
+    # 计算各指数风险等级
+    sh_risk = _market_checker.check_market_risk(sh_closes)
+    cyb_risk = _market_checker.check_market_risk(cyb_closes)
+
+    # 取更严重的等级（DANGER > CAUTION > NORMAL）
+    severity = {MarketRiskLevel.NORMAL: 0, MarketRiskLevel.CAUTION: 1, MarketRiskLevel.DANGER: 2}
+    overall = sh_risk if severity[sh_risk] >= severity[cyb_risk] else cyb_risk
+
+    # 计算均线关系
+    sh_ma20 = _simple_ma(sh_closes, 20)
+    sh_ma60 = _simple_ma(sh_closes, 60)
+    cyb_ma20 = _simple_ma(cyb_closes, 20)
+    cyb_ma60 = _simple_ma(cyb_closes, 60)
+
+    return RiskOverviewResponse(
+        market_risk_level=overall.value,
+        sh_above_ma20=sh_closes[-1] >= sh_ma20 if sh_ma20 is not None and sh_closes else True,
+        sh_above_ma60=sh_closes[-1] >= sh_ma60 if sh_ma60 is not None and sh_closes else True,
+        cyb_above_ma20=cyb_closes[-1] >= cyb_ma20 if cyb_ma20 is not None and cyb_closes else True,
+        cyb_above_ma60=cyb_closes[-1] >= cyb_ma60 if cyb_ma60 is not None and cyb_closes else True,
+        current_threshold=_market_checker.get_trend_threshold(overall),
+        data_insufficient=data_insufficient,
+    )
+
+
+async def _query_index_closes(
+    session: AsyncSession, symbol: str, days: int
+) -> list[float]:
+    """从 TimescaleDB 查询指数最近 N 个交易日的收盘价（时间升序）。"""
+    stmt = (
+        select(Kline.close)
+        .where(Kline.symbol == symbol, Kline.freq == "1d")
+        .order_by(desc(Kline.time))
+        .limit(days)
+    )
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    # 反转为时间升序，转为 float
+    return [float(c) for c in reversed(rows) if c is not None]
+
+
+def _simple_ma(closes: list[float], period: int) -> float | None:
+    """计算简单移动平均线。"""
+    if len(closes) < period:
+        return None
+    return sum(closes[-period:]) / period
+```
+
+关键设计决策：
+- 复用 `MarketRiskChecker.check_market_risk()` 和 `get_trend_threshold()`，不重复实现均线逻辑
+- 两个指数分别计算风险等级，取更严重的作为综合等级（需求 28.1）
+- 数据不足时返回 NORMAL 默认值 + `data_insufficient: true` 标记（需求 28.2）
+- 均线关系（above_ma20/above_ma60）在 API 层计算，因为 MarketRiskChecker 只返回等级不返回均线值
+
+#### 3. POST /risk/check — 委托风控校验实装（需求 28.3, 28.4）
+
+```python
+from app.services.risk_controller import (
+    BlackWhiteListManager, StockRiskFilter, PositionRiskChecker,
+)
+
+@router.post("/risk/check", response_model=RiskCheckResponse)
+async def risk_check(
+    body: RiskCheckRequest,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> RiskCheckResponse:
+    """
+    委托风控校验（短路求值）。
+
+    按以下顺序依次检查，遇到第一个不通过即返回失败：
+    1. 黑名单检查
+    2. 当日涨幅检查（> 9%）
+    3. 单股仓位上限检查（> 15%）
+    4. 板块仓位上限检查（> 30%）
+    """
+    # 1. 黑名单检查 — 从 stock_list 表查询
+    bl_stmt = select(StockList).where(
+        StockList.symbol == body.symbol,
+        StockList.list_type == "BLACK",
+    )
+    bl_result = await pg_session.execute(bl_stmt)
+    if bl_result.scalar_one_or_none() is not None:
+        return RiskCheckResponse(passed=False, reason="该股票在黑名单中")
+
+    # 2. 当日涨幅检查 — 从 kline 查询最新涨跌幅
+    daily_gain = await _get_daily_gain(body.symbol, ts_session)
+    if StockRiskFilter.check_daily_gain(daily_gain):
+        return RiskCheckResponse(passed=False, reason="个股单日涨幅超过9%")
+
+    # 3. 单股仓位上限检查
+    stock_weight = await _calc_stock_weight(body.symbol, user_id, pg_session)
+    pos_result = PositionRiskChecker.check_stock_position_limit(stock_weight)
+    if not pos_result.passed:
+        return RiskCheckResponse(passed=False, reason="单股仓位超过15%上限")
+
+    # 4. 板块仓位上限检查
+    sector_weight = await _calc_sector_weight(body.symbol, user_id, pg_session)
+    sec_result = PositionRiskChecker.check_sector_position_limit(sector_weight)
+    if not sec_result.passed:
+        return RiskCheckResponse(passed=False, reason="板块仓位超过30%上限")
+
+    return RiskCheckResponse(passed=True)
+```
+
+关键设计决策：
+- 严格按需求 28.4 定义的顺序执行：黑名单 → 涨幅 → 单股仓位 → 板块仓位
+- 短路求值：第一个失败即返回，不执行后续检查
+- 黑名单检查直接查 PostgreSQL stock_list 表（替代内存 BlackWhiteListManager）
+- 涨幅和仓位数据需要辅助函数从数据库计算（`_get_daily_gain`、`_calc_stock_weight`、`_calc_sector_weight`）
+
+#### 4. POST/GET /risk/stop-config — 止损止盈配置 Redis 持久化（需求 28.5, 28.6, 28.7）
+
+```python
+import json
+from redis.asyncio import Redis
+from app.core.redis_client import get_redis
+
+_STOP_CONFIG_PREFIX = "risk:stop_config:"
+_STOP_CONFIG_TTL = 30 * 24 * 3600  # 30 天
+
+_DEFAULT_STOP_CONFIG = StopConfigResponse(
+    fixed_stop_loss=8.0,
+    trailing_stop=5.0,
+    trend_stop_ma=20,
+)
+
+
+@router.post("/risk/stop-config", response_model=StopConfigResponse)
+async def save_stop_config(
+    body: StopConfigRequest,
+    redis: Redis = Depends(get_redis),
+) -> StopConfigResponse:
+    """保存止损止盈配置至 Redis。"""
+    user_id = "default"  # TODO: 从 JWT 获取
+    key = f"{_STOP_CONFIG_PREFIX}{user_id}"
+    data = json.dumps({
+        "fixed_stop_loss": body.fixed_stop_loss,
+        "trailing_stop": body.trailing_stop,
+        "trend_stop_ma": body.trend_stop_ma,
+    })
+    await redis.set(key, data, ex=_STOP_CONFIG_TTL)
+    return StopConfigResponse(
+        fixed_stop_loss=body.fixed_stop_loss,
+        trailing_stop=body.trailing_stop,
+        trend_stop_ma=body.trend_stop_ma,
+        saved=True,
+    )
+
+
+@router.get("/risk/stop-config", response_model=StopConfigResponse)
+async def get_stop_config(
+    redis: Redis = Depends(get_redis),
+) -> StopConfigResponse:
+    """读取止损止盈配置，Redis 无数据时返回默认值。"""
+    user_id = "default"  # TODO: 从 JWT 获取
+    key = f"{_STOP_CONFIG_PREFIX}{user_id}"
+    raw = await redis.get(key)
+    if raw is None:
+        return _DEFAULT_STOP_CONFIG
+    data = json.loads(raw)
+    return StopConfigResponse(
+        fixed_stop_loss=data["fixed_stop_loss"],
+        trailing_stop=data["trailing_stop"],
+        trend_stop_ma=data["trend_stop_ma"],
+    )
+```
+
+关键设计决策：
+- Redis 键名格式 `risk:stop_config:{user_id}`，TTL 30 天（需求 28.5）
+- 配置以 JSON 字符串存储，结构简单无需 Redis Hash
+- 无数据时返回默认值 `fixed_stop_loss=8, trailing_stop=5, trend_stop_ma=20`（需求 28.6）
+- 通过 FastAPI `Depends(get_redis)` 注入 Redis 客户端，便于测试 mock
+
+#### 5. GET /risk/position-warnings — 持仓预警实时检测（需求 28.8, 28.9, 28.10）
+
+```python
+from app.models.trade import Position as PositionModel
+from app.models.kline import Kline
+from app.services.risk_controller import (
+    PositionRiskChecker, StopLossChecker, MarketRiskChecker,
+)
+
+@router.get("/risk/position-warnings", response_model=list[PositionWarningItem])
+async def position_warnings(
+    pg_session: AsyncSession = Depends(get_pg_session),
+    ts_session: AsyncSession = Depends(get_ts_session),
+    redis: Redis = Depends(get_redis),
+) -> list[PositionWarningItem]:
+    """
+    持仓预警实时检测。
+
+    查询当前用户所有持仓，对每只标的执行 6 项风控检测，
+    汇总所有触发的预警并返回。无持仓时返回空列表。
+    """
+    user_id = "default"  # TODO: 从 JWT 获取
+    now_str = datetime.now().isoformat(timespec="minutes")
+
+    # 1. 查询用户持仓
+    pos_stmt = select(PositionModel).where(PositionModel.user_id == user_id)
+    pos_result = await pg_session.execute(pos_stmt)
+    positions = list(pos_result.scalars().all())
+
+    if not positions:
+        return []  # 需求 28.10：无持仓返回空列表
+
+    # 2. 计算总资产（用于仓位占比）
+    total_value = await _calc_total_portfolio_value(positions, ts_session)
+    if total_value <= 0:
+        return []
+
+    # 3. 加载止损配置
+    stop_config = await _load_stop_config(redis, user_id)
+
+    warnings: list[PositionWarningItem] = []
+
+    for pos in positions:
+        symbol = pos.symbol
+        cost_price = float(pos.cost_price or 0)
+        quantity = pos.quantity or 0
+
+        # 查询该标的最近 60 日 K 线
+        closes = await _query_index_closes(ts_session, symbol, 60)
+        if not closes:
+            continue
+
+        current_price = closes[-1]
+        stock_value = current_price * quantity
+        stock_weight = (stock_value / total_value) * 100
+
+        # 检测 1：单股仓位超限（> 15%）→ danger
+        pos_check = PositionRiskChecker.check_stock_position_limit(stock_weight)
+        if not pos_check.passed:
+            warnings.append(PositionWarningItem(
+                symbol=symbol, type="单股仓位超限",
+                level="danger",
+                current_value=f"{stock_weight:.1f}%",
+                threshold="15%", time=now_str,
+            ))
+
+        # 检测 2：板块仓位超限（> 30%）→ warning
+        sector_weight = await _calc_sector_weight(symbol, user_id, pg_session)
+        sec_check = PositionRiskChecker.check_sector_position_limit(sector_weight)
+        if not sec_check.passed:
+            warnings.append(PositionWarningItem(
+                symbol=symbol, type="板块仓位超限",
+                level="warning",
+                current_value=f"{sector_weight:.1f}%",
+                threshold="30%", time=now_str,
+            ))
+
+        # 检测 3：破位预警（跌破 MA20 + 放量下跌 > 5%）→ danger
+        ma20 = _simple_ma(closes, 20)
+        if ma20 is not None and len(closes) >= 2:
+            daily_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100
+            vol_ratio = 1.5  # 简化：实际应从 kline 计算量比
+            if PositionRiskChecker.check_position_breakdown(
+                current_price, ma20, daily_change, vol_ratio
+            ):
+                warnings.append(PositionWarningItem(
+                    symbol=symbol, type="持仓破位预警",
+                    level="danger",
+                    current_value=f"价格{current_price:.2f} < MA20({ma20:.2f})",
+                    threshold="MA20", time=now_str,
+                ))
+
+        # 检测 4：固定止损 → danger
+        stop_pct = stop_config["fixed_stop_loss"] / 100
+        if StopLossChecker.check_fixed_stop_loss(cost_price, current_price, stop_pct):
+            loss_pct = ((cost_price - current_price) / cost_price) * 100
+            warnings.append(PositionWarningItem(
+                symbol=symbol, type="触发固定止损",
+                level="danger",
+                current_value=f"亏损{loss_pct:.1f}%",
+                threshold=f"{stop_config['fixed_stop_loss']}%",
+                time=now_str,
+            ))
+
+        # 检测 5：移动止损 → warning
+        peak_price = max(closes)  # 持仓期间最高价近似为历史最高
+        retrace_pct = stop_config["trailing_stop"] / 100
+        if StopLossChecker.check_trailing_stop_loss(peak_price, current_price, retrace_pct):
+            retrace = ((peak_price - current_price) / peak_price) * 100
+            warnings.append(PositionWarningItem(
+                symbol=symbol, type="触发移动止损",
+                level="warning",
+                current_value=f"回撤{retrace:.1f}%",
+                threshold=f"{stop_config['trailing_stop']}%",
+                time=now_str,
+            ))
+
+        # 检测 6：趋势止损 → warning
+        trend_ma_period = stop_config["trend_stop_ma"]
+        trend_ma = _simple_ma(closes, trend_ma_period)
+        if trend_ma is not None and StopLossChecker.check_trend_stop_loss(
+            current_price, trend_ma
+        ):
+            warnings.append(PositionWarningItem(
+                symbol=symbol, type="触发趋势止损",
+                level="warning",
+                current_value=f"价格{current_price:.2f}",
+                threshold=f"MA{trend_ma_period}({trend_ma:.2f})",
+                time=now_str,
+            ))
+
+    return warnings
+```
+
+关键设计决策：
+- 对每只持仓标的执行全部 6 项检测，一只股票可能同时触发多条预警
+- 预警级别按需求定义：仓位超限和破位/固定止损为 `danger`，板块超限和移动/趋势止损为 `warning`
+- 每条预警包含完整的 6 个字段（需求 28.9）
+- 无持仓时直接返回空列表（需求 28.10）
+- 止损配置从 Redis 加载（复用 stop-config 端点的存储）
+
+#### 6. 黑白名单 CRUD — PostgreSQL stock_list 表集成（需求 28.11–28.14）
+
+```python
+from sqlalchemy import func, select, and_
+from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException
+from app.models.stock import StockList
+
+@router.get("/blacklist", response_model=StockListPageResponse)
+async def list_blacklist(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StockListPageResponse:
+    """查询黑名单（分页）。"""
+    return await _list_stock_list(pg_session, "BLACK", page, page_size)
+
+
+@router.post("/blacklist", status_code=201, response_model=StockListItemOut)
+async def add_to_blacklist(
+    body: StockListItemIn,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StockListItemOut:
+    """添加股票到黑名单，已存在时返回 409。"""
+    return await _add_to_stock_list(pg_session, body, "BLACK")
+
+
+@router.delete("/blacklist/{symbol}")
+async def remove_from_blacklist(
+    symbol: str,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
+    """从黑名单移除股票。"""
+    return await _remove_from_stock_list(pg_session, symbol, "BLACK")
+
+
+@router.get("/whitelist", response_model=StockListPageResponse)
+async def list_whitelist(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StockListPageResponse:
+    """查询白名单（分页）。"""
+    return await _list_stock_list(pg_session, "WHITE", page, page_size)
+
+
+@router.post("/whitelist", status_code=201, response_model=StockListItemOut)
+async def add_to_whitelist(
+    body: StockListItemIn,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StockListItemOut:
+    """添加股票到白名单，已存在时返回 409。"""
+    return await _add_to_stock_list(pg_session, body, "WHITE")
+
+
+@router.delete("/whitelist/{symbol}")
+async def remove_from_whitelist(
+    symbol: str,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
+    """从白名单移除股票。"""
+    return await _remove_from_stock_list(pg_session, symbol, "WHITE")
+
+
+# --- 共享实现 ---
+
+async def _list_stock_list(
+    session: AsyncSession, list_type: str, page: int, page_size: int,
+) -> StockListPageResponse:
+    """分页查询黑/白名单。"""
+    user_id = "default"  # TODO: 从 JWT 获取
+
+    # 总数
+    count_stmt = select(func.count()).select_from(StockList).where(
+        StockList.list_type == list_type, StockList.user_id == user_id,
+    )
+    total = (await session.execute(count_stmt)).scalar() or 0
+
+    # 分页数据
+    offset = (page - 1) * page_size
+    data_stmt = (
+        select(StockList)
+        .where(StockList.list_type == list_type, StockList.user_id == user_id)
+        .order_by(StockList.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    rows = (await session.execute(data_stmt)).scalars().all()
+
+    return StockListPageResponse(
+        total=total, page=page, page_size=page_size,
+        items=[
+            StockListItemOut(
+                symbol=r.symbol,
+                reason=r.reason,
+                created_at=r.created_at.isoformat(),
+            )
+            for r in rows
+        ],
+    )
+
+
+async def _add_to_stock_list(
+    session: AsyncSession, body: StockListItemIn, list_type: str,
+) -> StockListItemOut:
+    """添加股票到黑/白名单，重复时返回 409。"""
+    user_id = "default"  # TODO: 从 JWT 获取
+
+    # 检查重复（需求 28.14）
+    exists_stmt = select(StockList).where(
+        StockList.symbol == body.symbol,
+        StockList.list_type == list_type,
+        StockList.user_id == user_id,
+    )
+    existing = (await session.execute(exists_stmt)).scalar_one_or_none()
+    if existing is not None:
+        list_name = "黑名单" if list_type == "BLACK" else "白名单"
+        raise HTTPException(
+            status_code=409,
+            detail=f"该股票已在{list_name}中",
+        )
+
+    entry = StockList(
+        symbol=body.symbol,
+        list_type=list_type,
+        user_id=user_id,
+        reason=body.reason,
+    )
+    session.add(entry)
+    await session.flush()
+
+    return StockListItemOut(
+        symbol=entry.symbol,
+        reason=entry.reason,
+        created_at=entry.created_at.isoformat(),
+    )
+
+
+async def _remove_from_stock_list(
+    session: AsyncSession, symbol: str, list_type: str,
+) -> dict:
+    """从黑/白名单移除股票。"""
+    user_id = "default"  # TODO: 从 JWT 获取
+    stmt = select(StockList).where(
+        StockList.symbol == symbol,
+        StockList.list_type == list_type,
+        StockList.user_id == user_id,
+    )
+    entry = (await session.execute(stmt)).scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    await session.delete(entry)
+    return {"symbol": symbol, "deleted": True}
+```
+
+关键设计决策：
+- 黑白名单共享 `_list_stock_list`、`_add_to_stock_list`、`_remove_from_stock_list` 三个内部函数，通过 `list_type` 参数区分
+- 分页查询返回 `total` + `items`（需求 28.13），按 `created_at` 降序排列
+- 添加重复股票返回 HTTP 409（需求 28.14），先查询再插入
+- 所有操作绑定 `user_id`，支持多用户隔离
+- 使用 `session.flush()` 确保 `created_at` 由数据库 `NOW()` 生成
+
+#### 7. GET /risk/strategy-health — 策略健康状态实时计算（需求 28.15, 28.16）
+
+```python
+from app.models.backtest import BacktestRun
+from app.services.risk_controller import StopLossChecker
+
+@router.get("/risk/strategy-health", response_model=StrategyHealthResponse)
+async def strategy_health(
+    strategy_id: str | None = Query(None),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StrategyHealthResponse:
+    """
+    策略健康状态实时计算。
+
+    从数据库查询策略关联的回测结果或交易记录，
+    计算胜率和最大回撤，判定策略是否健康。
+    """
+    # 无 strategy_id 时返回默认值（需求 28.16）
+    if not strategy_id:
+        return StrategyHealthResponse(
+            strategy_id=None, win_rate=0.0, max_drawdown=0.0,
+            is_healthy=True, warnings=[],
+        )
+
+    # 查询该策略的回测结果
+    stmt = (
+        select(BacktestRun)
+        .where(BacktestRun.strategy_id == strategy_id)
+        .order_by(BacktestRun.created_at.desc())
+        .limit(1)
+    )
+    result = await pg_session.execute(stmt)
+    run = result.scalar_one_or_none()
+
+    # 无交易记录时返回默认值（需求 28.16）
+    if run is None:
+        return StrategyHealthResponse(
+            strategy_id=strategy_id, win_rate=0.0, max_drawdown=0.0,
+            is_healthy=True, warnings=[],
+        )
+
+    win_rate = float(run.win_rate or 0)
+    max_drawdown = float(run.max_drawdown or 0)
+
+    # 调用 StopLossChecker 判定健康状态
+    is_unhealthy = StopLossChecker.check_strategy_health(win_rate, max_drawdown)
+
+    warnings = []
+    if is_unhealthy:
+        if win_rate < 0.5:
+            warnings.append(f"策略胜率 {win_rate*100:.1f}% 低于 50% 阈值")
+        if max_drawdown > 0.15:
+            warnings.append(f"最大回撤 {max_drawdown*100:.1f}% 超过 15% 阈值")
+
+    return StrategyHealthResponse(
+        strategy_id=strategy_id,
+        win_rate=win_rate,
+        max_drawdown=max_drawdown,
+        is_healthy=not is_unhealthy,
+        warnings=warnings,
+    )
+```
+
+关键设计决策：
+- 复用 `StopLossChecker.check_strategy_health()` 判定健康状态
+- 无 `strategy_id` 或无交易记录时返回安全默认值（需求 28.16）
+- 预警信息列表包含具体的数值和阈值，便于前端展示
+
+### 数据模型（需求 28）
+
+本次设计不引入新的数据库表，复用现有 ORM 模型：
+
+| ORM 模型 | 数据库 | 表名 | 用途 |
+|---|---|---|---|
+| `app.models.kline.Kline` | TimescaleDB | `kline` | 指数/个股 K 线数据（risk/overview、position-warnings） |
+| `app.models.stock.StockList` | PostgreSQL | `stock_list` | 黑白名单 CRUD（list_type='BLACK'/'WHITE'） |
+| `app.models.trade.Position` | PostgreSQL | `position` | 持仓记录（position-warnings） |
+| `app.models.backtest.BacktestRun` | PostgreSQL | `backtest_run` | 回测结果（strategy-health） |
+
+新增 Redis 键：
+
+| 键名模式 | 值类型 | TTL | 用途 |
+|---|---|---|---|
+| `risk:stop_config:{user_id}` | JSON 字符串 | 30 天 | 止损止盈配置持久化 |
+
+新增 Pydantic 模型（定义在 `app/api/v1/risk.py`）：
+
+| 模型 | 用途 |
+|---|---|
+| `RiskOverviewResponse` | GET /risk/overview 响应 |
+| `RiskCheckResponse` | POST /risk/check 响应 |
+| `StopConfigRequest` / `StopConfigResponse` | 止损配置请求/响应 |
+| `PositionWarningItem` | 单条持仓预警 |
+| `StockListItemOut` / `StockListPageResponse` | 黑白名单分页响应 |
+| `StrategyHealthResponse` | 策略健康状态响应 |
+
+### 正确性属性（需求 28）
+
+*属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
+
+#### 属性 86：大盘风控概览计算正确性
+
+*对任意*两组有效的指数收盘价序列（上证指数和创业板指，长度 0–60），`GET /risk/overview` 返回的 `market_risk_level` 应等于两个指数分别通过 `MarketRiskChecker.check_market_risk()` 计算后取更严重等级的结果；`current_threshold` 应等于 `MarketRiskChecker.get_trend_threshold(overall_level)` 的返回值；`sh_above_ma20` 应为 `True` 当且仅当上证最新收盘价 ≥ 其 20 日均线值（数据不足时默认 `True`）。
+
+**验证需求：28.1**
+
+---
+
+#### 属性 87：委托风控校验短路求值正确性
+
+*对任意*委托请求（symbol、direction、quantity、price）和任意风控状态组合（黑名单成员关系、当日涨幅、单股仓位占比、板块仓位占比），`POST /risk/check` 应返回按黑名单→涨幅→单股仓位→板块仓位顺序中第一个不通过检查的失败原因；当多个检查同时不通过时，仅返回顺序最靠前的那个检查的 reason；所有检查均通过时返回 `passed: true`。
+
+**验证需求：28.3, 28.4**
+
+---
+
+#### 属性 88：止损止盈配置 Redis round-trip
+
+*对任意*合法的止损止盈配置（`fixed_stop_loss` ∈ [1, 50]、`trailing_stop` ∈ [1, 30]、`trend_stop_ma` ∈ {5, 10, 20, 60}），通过 `POST /risk/stop-config` 保存后，再通过 `GET /risk/stop-config` 读取，返回的三个字段值应与保存时传入的值完全一致。
+
+**验证需求：28.5, 28.6**
+
+---
+
+#### 属性 89：持仓预警生成正确性与字段完整性
+
+*对任意*持仓集合（每只持仓有 symbol、cost_price、quantity）和对应的 K 线数据，`GET /risk/position-warnings` 返回的每条预警记录应同时满足：（1）包含 `symbol`、`type`、`level`、`current_value`、`threshold`、`time` 全部 6 个字段且均不为空；（2）预警的触发条件与对应的风控检查器（PositionRiskChecker / StopLossChecker）对相同输入的计算结果一致。
+
+**验证需求：28.8, 28.9**
+
+---
+
+#### 属性 90：黑白名单 CRUD round-trip
+
+*对任意*股票代码和名单类型（BLACK / WHITE），通过 `POST` 添加后再通过 `GET` 查询，返回的 `items` 中应包含该股票代码；通过 `DELETE` 移除后再查询，返回的 `items` 中应不包含该股票代码。
+
+**验证需求：28.11, 28.12**
+
+---
+
+#### 属性 91：黑白名单分页正确性
+
+*对任意*名单中包含 N 条记录和任意合法的分页参数（`page` ≥ 1、`page_size` ∈ [1, 100]），`GET /blacklist` 或 `GET /whitelist` 返回的 `total` 应等于 N；`items` 的长度应等于 `min(page_size, N - (page-1)*page_size)` 且不为负数；所有页的 `items` 合并后应包含全部 N 条记录且无重复。
+
+**验证需求：28.13**
+
+---
+
+#### 属性 92：黑名单重复添加返回 409
+
+*对任意*股票代码，第一次通过 `POST /blacklist` 添加应返回 201；对同一股票代码第二次调用 `POST /blacklist` 应返回 HTTP 409 状态码，且名单中该股票仅出现一次（无重复记录）。
+
+**验证需求：28.14**
+
+---
+
+#### 属性 93：策略健康状态计算正确性
+
+*对任意*胜率（win_rate ∈ [0, 1]）和最大回撤（max_drawdown ∈ [0, 1]），`GET /risk/strategy-health` 返回的 `is_healthy` 应等于 `NOT StopLossChecker.check_strategy_health(win_rate, max_drawdown)` 的结果；当 `win_rate < 0.5` 时 `warnings` 应包含胜率相关预警；当 `max_drawdown > 0.15` 时 `warnings` 应包含回撤相关预警。
+
+**验证需求：28.15**
+
+---
+
+### 错误处理（需求 28）
+
+| 错误场景 | 处理策略 |
+|---|---|
+| `GET /risk/overview` 指数 K 线数据不足或查询失败 | 返回 `market_risk_level: "NORMAL"` 默认值 + `data_insufficient: true`，不抛异常（需求 28.2） |
+| `GET /risk/overview` TimescaleDB 连接失败 | 捕获异常，返回 NORMAL 默认值 + `data_insufficient: true` |
+| `POST /risk/check` 黑名单查询失败 | 返回 HTTP 500，记录错误日志 |
+| `POST /risk/check` K 线数据查询失败（无法获取涨幅） | 跳过涨幅检查，继续后续检查（保守策略：不因数据缺失阻止交易） |
+| `POST /risk/stop-config` Redis 写入失败 | 返回 HTTP 503，提示"配置保存失败，请重试" |
+| `GET /risk/stop-config` Redis 读取失败 | 返回默认值（fixed_stop_loss=8, trailing_stop=5, trend_stop_ma=20） |
+| `GET /risk/position-warnings` 无持仓记录 | 返回空列表，不抛异常（需求 28.10） |
+| `GET /risk/position-warnings` 单只标的 K 线查询失败 | 跳过该标的，继续处理其他持仓 |
+| `POST /blacklist` 添加已存在的股票 | 返回 HTTP 409 + "该股票已在黑名单中"（需求 28.14） |
+| `POST /whitelist` 添加已存在的股票 | 返回 HTTP 409 + "该股票已在白名单中" |
+| `DELETE /blacklist/{symbol}` 股票不在名单中 | 返回 HTTP 404 + "记录不存在" |
+| `GET /risk/strategy-health` 无 strategy_id 或无交易记录 | 返回默认值 is_healthy=true, win_rate=0, max_drawdown=0（需求 28.16） |
+
+### 测试策略（需求 28）
+
+#### 属性测试（Hypothesis + pytest）
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 86：大盘风控概览计算正确性 | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 87：委托风控校验短路求值正确性 | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 88：止损止盈配置 Redis round-trip | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 89：持仓预警生成正确性与字段完整性 | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 90：黑白名单 CRUD round-trip | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 91：黑白名单分页正确性 | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 92：黑名单重复添加返回 409 | `tests/properties/test_risk_api_properties.py` | 100 |
+| 属性 93：策略健康状态计算正确性 | `tests/properties/test_risk_api_properties.py` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+`# Feature: a-share-quant-trading-system, Property 86: 大盘风控概览计算正确性`
+
+#### 单元测试
+
+**后端（pytest）：**
+- `GET /risk/overview` 正常数据返回正确风险等级的示例
+- `GET /risk/overview` 数据不足时返回 NORMAL + data_insufficient=true 的示例
+- `POST /risk/check` 黑名单命中返回 passed=false 的示例
+- `POST /risk/check` 涨幅超 9% 返回 passed=false 的示例
+- `POST /risk/check` 所有检查通过返回 passed=true 的示例
+- `POST /risk/stop-config` 保存配置成功的示例
+- `GET /risk/stop-config` Redis 无数据返回默认值的示例
+- `GET /risk/position-warnings` 无持仓返回空列表的示例
+- `GET /risk/position-warnings` 触发固定止损预警的示例
+- `POST /blacklist` 添加成功返回 201 的示例
+- `POST /blacklist` 重复添加返回 409 的示例
+- `GET /blacklist` 分页查询返回正确 total 和 items 的示例
+- `DELETE /blacklist/{symbol}` 移除成功的示例
+- `GET /risk/strategy-health` 无 strategy_id 返回默认值的示例
+- `GET /risk/strategy-health` 策略不健康时返回 warnings 的示例
+
+#### 集成测试
+
+- 保存止损配置 → 读取配置 → 验证一致性全链路测试
+- 添加黑名单 → 查询黑名单 → 移除黑名单 → 验证已移除全链路测试
+- 创建持仓 → 写入 K 线数据 → 查询持仓预警 → 验证预警内容全链路测试
+- 添加黑名单 → 委托风控校验 → 验证黑名单命中全链路测试
+
+
+---
+
+## 复盘分析页面 API 实装与数据持久化（需求 29）
+
+### 概述
+
+当前 `app/api/v1/review.py` 中所有复盘端点均为 stub 实现，返回硬编码空数据。后端服务层 `app/services/review_analyzer.py` 已完整实现四大分析器（ReviewAnalyzer、StrategyReportGenerator、MarketReviewAnalyzer、ReportExporter），前端 `ReviewView.vue` 已完整实现四个功能区域（每日复盘报告、策略绩效图表、多策略对比、报表导出）。Celery 任务 `app/tasks/review.py` 中的 `_load_trade_records()` 和 `_load_screen_results()` 返回空列表占位。
+
+本次设计的核心目标是**打通 API 层与服务层/数据库的连接**，将复盘分析的 6 组 API 端点从 stub 升级为真实实现：
+
+1. `GET /review/daily` → ReviewAnalyzer + trade_order 表 + screen_result 表 + Redis 缓存
+2. `GET /review/strategy-report` → StrategyReportGenerator + trade_order 表
+3. `GET /review/market` → MarketReviewAnalyzer（新增端点）
+4. `GET /review/export` → ReportExporter（CSV/JSON 文件下载）
+5. `POST /review/compare` → StrategyReportGenerator.compare_strategies()（新增端点）
+6. Celery 任务 `_load_trade_records()` / `_load_screen_results()` 数据库实装
+
+设计原则：
+- API 层为薄编排层，业务逻辑全部委托给已有的服务层类
+- 数据库访问通过 FastAPI 依赖注入获取 session，不在 API 层直接创建连接
+- 每日复盘报告使用 Redis cache-aside 模式缓存（TTL 7 天），避免重复计算
+- TradeOrder 表无 `strategy_id` 字段，策略绩效报表通过 ScreenResult 表关联策略
+- 导出端点使用 `StreamingResponse` 返回文件流，支持 CSV（含 BOM）和 JSON 两种格式
+
+### 架构
+
+#### 复盘 API 数据流
+
+```mermaid
+sequenceDiagram
+    participant FE as ReviewView.vue
+    participant API as review.py API 层
+    participant RA as ReviewAnalyzer
+    participant SRG as StrategyReportGenerator
+    participant MRA as MarketReviewAnalyzer
+    participant RE as ReportExporter
+    participant PG as PostgreSQL (trade_order, screen_result, strategy_template)
+    participant RD as Redis (review:daily:{date})
+    participant CEL as Celery Task (review.py)
+
+    Note over FE,CEL: GET /review/daily（cache-aside）
+    FE->>API: 请求每日复盘报告(date)
+    API->>RD: GET review:daily:{date}
+    alt 缓存命中
+        RD-->>API: 缓存的 JSON 数据
+    else 缓存未命中
+        RD-->>API: nil
+        API->>PG: 查询 trade_order (status='FILLED', date)
+        API->>PG: 查询 screen_result (date)
+        PG-->>API: 交易记录 + 选股结果
+        API->>RA: generate_daily_review(trades, screens, date)
+        RA-->>API: DailyReview
+        API->>RD: SET review:daily:{date} (TTL 7天)
+    end
+    API-->>FE: DailyReviewResponse
+
+    Note over FE,CEL: GET /review/strategy-report
+    FE->>API: 请求策略绩效报表(strategy_id, period)
+    API->>PG: 查询 strategy_template (name)
+    API->>PG: 查询 trade_order (通过 screen_result 关联 strategy_id)
+    PG-->>API: 交易记录
+    API->>SRG: generate_period_report(trades, period)
+    SRG-->>API: 绩效报表
+    API-->>FE: StrategyReportResponse
+
+    Note over FE,CEL: GET /review/market（新增）
+    FE->>API: 请求市场复盘分析(date)
+    API->>PG: 查询板块涨跌幅、个股趋势评分、资金流向
+    PG-->>API: 市场数据
+    API->>MRA: analyze_sector_rotation() + generate_trend_distribution() + analyze_money_flow()
+    MRA-->>API: 分析结果
+    API-->>FE: MarketReviewResponse
+
+    Note over FE,CEL: GET /review/export
+    FE->>API: 请求导出报表(period, format)
+    API->>PG: 查询交易记录
+    API->>SRG: generate_period_report()
+    API->>RE: export_to_csv() / export_to_json()
+    RE-->>API: bytes / str
+    API-->>FE: StreamingResponse (文件下载)
+
+    Note over FE,CEL: POST /review/compare（新增）
+    FE->>API: 多策略对比(strategy_ids, period)
+    API->>PG: 批量查询各策略交易记录
+    API->>SRG: generate_period_report() × N
+    API->>SRG: compare_strategies()
+    SRG-->>API: 对比结果
+    API-->>FE: CompareResponse
+
+    Note over FE,CEL: Celery Beat 15:45 自动触发
+    CEL->>PG: _load_trade_records(date)
+    CEL->>PG: _load_screen_results(date)
+    PG-->>CEL: 交易记录 + 选股结果
+    CEL->>RA: generate_daily_review()
+    CEL->>RD: SET review:daily:{date} (TTL 7天)
+```
+
+### 组件与接口
+
+#### 1. Pydantic 响应模型
+
+在 `app/api/v1/review.py` 中新增以下 Pydantic 模型，替代当前的 `dict` 返回值：
+
+```python
+from pydantic import BaseModel, Field
+from datetime import date
+from typing import Literal
+
+
+# --- 每日复盘报告 ---
+
+class TradeCaseItem(BaseModel):
+    """成功/失败交易案例"""
+    symbol: str
+    pnl: float
+    reason: str = ""
+
+class DailyReviewResponse(BaseModel):
+    """GET /review/daily 响应"""
+    date: str
+    win_rate: float = Field(ge=0, le=1)
+    total_pnl: float
+    trade_count: int = Field(ge=0)
+    success_cases: list[TradeCaseItem] = []
+    failure_cases: list[TradeCaseItem] = []
+
+
+# --- 策略绩效报表 ---
+
+class RiskMetrics(BaseModel):
+    """风险指标"""
+    max_drawdown: float
+    sharpe_ratio: float
+    win_rate: float
+    calmar_ratio: float = 0.0
+
+class ReturnPoint(BaseModel):
+    """日期-收益率数据点"""
+    date: str
+    return_pct: float
+
+class StrategyReportResponse(BaseModel):
+    """GET /review/strategy-report 响应"""
+    strategy_id: str
+    strategy_name: str = ""
+    period: str
+    returns: list[ReturnPoint] = []
+    risk_metrics: RiskMetrics
+
+
+# --- 市场复盘分析 ---
+
+class SectorItem(BaseModel):
+    """板块条目"""
+    name: str
+    change_pct: float
+
+class FlowItem(BaseModel):
+    """资金流向条目"""
+    sector: str
+    net_inflow: float
+
+class SectorRotation(BaseModel):
+    """板块轮动分析"""
+    top_sectors: list[SectorItem] = []
+    bottom_sectors: list[SectorItem] = []
+    rotation_summary: str = ""
+
+class TrendDistribution(BaseModel):
+    """趋势行情分布"""
+    bins: list[str] = []
+    counts: list[int] = []
+
+class MoneyFlow(BaseModel):
+    """资金流向分析"""
+    net_inflow_total: float = 0.0
+    top_inflow_sectors: list[FlowItem] = []
+    top_outflow_sectors: list[FlowItem] = []
+
+class MarketReviewResponse(BaseModel):
+    """GET /review/market 响应"""
+    sector_rotation: SectorRotation
+    trend_distribution: TrendDistribution
+    money_flow: MoneyFlow
+
+
+# --- 报表导出 ---
+# 无专用响应模型，使用 StreamingResponse
+
+
+# --- 多策略对比 ---
+
+class CompareRequest(BaseModel):
+    """POST /review/compare 请求"""
+    strategy_ids: list[str] = Field(min_length=2)
+    period: Literal["daily", "weekly", "monthly"] = "daily"
+
+class StrategySummary(BaseModel):
+    """单策略摘要"""
+    name: str
+    total_return: float
+    win_rate: float
+    total_trades: int
+    max_drawdown: float
+    sharpe_ratio: float
+
+class CompareResponse(BaseModel):
+    """POST /review/compare 响应"""
+    strategies: list[StrategySummary] = []
+    best_strategy: str | None = None
+```
+
+#### 2. GET /review/daily — 每日复盘报告实装（需求 29.1, 29.2, 29.3）
+
+```python
+import json
+from datetime import date
+from fastapi import Depends, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select, and_, cast, Date as SADate
+from sqlalchemy.ext.asyncio import AsyncSession
+from redis.asyncio import Redis
+
+from app.core.database import get_pg_session
+from app.core.redis_client import get_redis
+from app.models.trade import TradeOrder
+from app.models.strategy import ScreenResult
+from app.services.review_analyzer import ReviewAnalyzer
+
+_REVIEW_CACHE_PREFIX = "review:daily:"
+_REVIEW_CACHE_TTL = 7 * 24 * 3600  # 7 天
+
+
+@router.get("/daily", response_model=DailyReviewResponse)
+async def get_daily_review(
+    review_date: date | None = Query(None, alias="date", description="复盘日期，默认最近交易日"),
+    pg_session: AsyncSession = Depends(get_pg_session),
+    redis: Redis = Depends(get_redis),
+) -> DailyReviewResponse:
+    """
+    获取每日复盘报告（cache-aside 模式）。
+
+    1. 先查 Redis 缓存
+    2. 缓存未命中时从 trade_order + screen_result 表查询
+    3. 调用 ReviewAnalyzer.generate_daily_review() 生成报告
+    4. 写入 Redis 缓存（TTL 7 天）
+    """
+    target = review_date or date.today()
+    cache_key = f"{_REVIEW_CACHE_PREFIX}{target.isoformat()}"
+
+    # 1. 查缓存
+    cached = await redis.get(cache_key)
+    if cached is not None:
+        data = json.loads(cached)
+        return DailyReviewResponse(**data)
+
+    # 2. 查询当日已成交交易记录
+    trade_stmt = select(TradeOrder).where(
+        and_(
+            TradeOrder.status == "FILLED",
+            cast(TradeOrder.filled_at, SADate) == target,
+        )
+    )
+    trade_result = await pg_session.execute(trade_stmt)
+    trade_rows = trade_result.scalars().all()
+
+    trade_records = [
+        {
+            "symbol": t.symbol,
+            "profit": float((t.filled_price or 0) - (t.price or 0)) * (t.filled_qty or 0),
+            "direction": t.direction,
+            "price": float(t.price or 0),
+            "quantity": t.filled_qty or 0,
+        }
+        for t in trade_rows
+    ]
+
+    # 3. 查询当日选股结果
+    screen_stmt = select(ScreenResult).where(
+        cast(ScreenResult.screen_time, SADate) == target,
+    )
+    screen_result = await pg_session.execute(screen_stmt)
+    screen_rows = screen_result.scalars().all()
+    screen_results = [
+        {
+            "symbol": s.symbol,
+            "trend_score": float(s.trend_score or 0),
+            "risk_level": s.risk_level,
+            "signals": s.signals or {},
+        }
+        for s in screen_rows
+    ]
+
+    # 4. 生成复盘报告
+    review = ReviewAnalyzer.generate_daily_review(
+        trade_records, screen_results, review_date=target,
+    )
+
+    # 5. 构建响应
+    response = DailyReviewResponse(
+        date=target.isoformat(),
+        win_rate=review.win_rate,
+        total_pnl=review.total_pnl,
+        trade_count=review.total_trades,
+        success_cases=[
+            TradeCaseItem(
+                symbol=c.get("symbol", ""),
+                pnl=float(c.get("profit", 0)),
+                reason=c.get("direction", ""),
+            )
+            for c in review.successful_cases
+        ],
+        failure_cases=[
+            TradeCaseItem(
+                symbol=c.get("symbol", ""),
+                pnl=float(c.get("profit", 0)),
+                reason=c.get("direction", ""),
+            )
+            for c in review.failed_cases
+        ],
+    )
+
+    # 6. 写入缓存
+    await redis.set(cache_key, response.model_dump_json(), ex=_REVIEW_CACHE_TTL)
+
+    return response
+```
+
+关键设计决策：
+- **Cache-aside 模式**：先查 Redis，未命中时查数据库 + 计算 + 回写缓存。Celery Beat 15:45 自动触发时也会写入同一缓存键，因此大多数 API 请求会命中缓存。
+- **Redis 键名** `review:daily:{date}`，TTL 7 天（需求 29.3）。使用 `model_dump_json()` 序列化，保证与 Pydantic 模型一致。
+- **profit 计算**：`(filled_price - price) * filled_qty`，简化处理。实际生产环境应考虑买卖方向和手续费。
+- **无交易记录时**（需求 29.2）：`ReviewAnalyzer.generate_daily_review([])` 返回全零默认值，API 层无需额外处理。
+
+#### 3. GET /review/strategy-report — 策略绩效报表实装（需求 29.4, 29.5, 29.6）
+
+```python
+from uuid import UUID
+from fastapi import HTTPException
+from app.models.strategy import StrategyTemplate, ScreenResult
+from app.services.review_analyzer import StrategyReportGenerator
+
+@router.get("/strategy-report", response_model=StrategyReportResponse)
+async def get_strategy_report(
+    strategy_id: str | None = Query(None),
+    period: Literal["daily", "weekly", "monthly"] = Query("daily"),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StrategyReportResponse:
+    """
+    获取策略绩效报表。
+
+    TradeOrder 表无 strategy_id 字段，通过 ScreenResult 表关联：
+    1. 查询 ScreenResult 中该策略选出的 symbol 列表
+    2. 查询这些 symbol 对应的 TradeOrder 记录
+    3. 调用 StrategyReportGenerator 生成报表
+    """
+    # 需求 29.5：未传入 strategy_id 返回 400
+    if not strategy_id:
+        raise HTTPException(status_code=400, detail="请指定策略ID")
+
+    # 查询策略名称
+    strat_stmt = select(StrategyTemplate).where(
+        StrategyTemplate.id == UUID(strategy_id)
+    )
+    strat_result = await pg_session.execute(strat_stmt)
+    strategy = strat_result.scalar_one_or_none()
+    strategy_name = strategy.name if strategy else ""
+
+    # 通过 ScreenResult 关联策略 → 获取该策略选出的 symbol 列表
+    screen_stmt = select(ScreenResult.symbol).where(
+        ScreenResult.strategy_id == UUID(strategy_id),
+    ).distinct()
+    screen_result = await pg_session.execute(screen_stmt)
+    symbols = [row for row in screen_result.scalars().all() if row]
+
+    # 查询这些 symbol 的已成交交易记录
+    if not symbols:
+        # 需求 29.6：无关联交易记录返回空报表
+        return StrategyReportResponse(
+            strategy_id=strategy_id,
+            strategy_name=strategy_name,
+            period=period,
+            returns=[],
+            risk_metrics=RiskMetrics(
+                max_drawdown=0.0, sharpe_ratio=0.0, win_rate=0.0, calmar_ratio=0.0,
+            ),
+        )
+
+    trade_stmt = select(TradeOrder).where(
+        and_(
+            TradeOrder.symbol.in_(symbols),
+            TradeOrder.status == "FILLED",
+        )
+    ).order_by(TradeOrder.filled_at)
+    trade_result = await pg_session.execute(trade_stmt)
+    trade_rows = trade_result.scalars().all()
+
+    trades = [
+        {
+            "profit": float((t.filled_price or 0) - (t.price or 0)) * (t.filled_qty or 0),
+            "date": t.filled_at.date().isoformat() if t.filled_at else "",
+        }
+        for t in trade_rows
+    ]
+
+    # 生成绩效报表
+    report = StrategyReportGenerator.generate_period_report(trades, period)
+
+    # 构建收益率序列（按日期聚合）
+    returns_by_date: dict[str, float] = {}
+    for t in trades:
+        d = t["date"]
+        returns_by_date[d] = returns_by_date.get(d, 0.0) + t["profit"]
+
+    return StrategyReportResponse(
+        strategy_id=strategy_id,
+        strategy_name=strategy_name,
+        period=period,
+        returns=[
+            ReturnPoint(date=d, return_pct=v)
+            for d, v in sorted(returns_by_date.items())
+        ],
+        risk_metrics=RiskMetrics(
+            max_drawdown=report["risk_metrics"]["max_drawdown"],
+            sharpe_ratio=report["risk_metrics"]["sharpe_ratio"],
+            win_rate=report["win_rate"],
+            calmar_ratio=0.0,  # 预留
+        ),
+    )
+```
+
+关键设计决策：
+- **策略关联方式**：TradeOrder 无 `strategy_id`，通过 ScreenResult 表的 `strategy_id` 获取该策略选出的 symbol 列表，再查询这些 symbol 的交易记录。这是一种间接关联，适用于当前数据模型。
+- **需求 29.5**：`strategy_id` 为空时返回 HTTP 400。
+- **需求 29.6**：无关联交易记录时返回空 `returns` 和全零 `risk_metrics`，不抛异常。
+- **收益率序列**：按日期聚合每日总盈亏，供前端 ECharts 渲染折线图。
+
+#### 4. GET /review/market — 市场复盘分析（新增端点，需求 29.7, 29.8, 29.9）
+
+```python
+from app.services.review_analyzer import MarketReviewAnalyzer
+from app.models.stock import StockInfo
+
+@router.get("/market", response_model=MarketReviewResponse)
+async def get_market_review(
+    review_date: date | None = Query(None, alias="date", description="复盘日期，默认最近交易日"),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> MarketReviewResponse:
+    """
+    市场复盘分析（新增端点）。
+
+    从本地数据库获取板块涨跌幅、个股趋势评分、资金流向数据，
+    调用 MarketReviewAnalyzer 的三个分析方法。
+    """
+    target = review_date or date.today()
+
+    # 1. 板块涨跌幅数据 — 从 screen_result 按板块聚合
+    #    实际生产环境应有独立的板块数据表，此处从 stock_info 的 sector 字段聚合
+    sector_data = await _load_sector_data(pg_session, target)
+
+    # 2. 个股趋势评分 — 从 screen_result 表获取当日评分
+    score_stmt = select(ScreenResult.trend_score).where(
+        cast(ScreenResult.screen_time, SADate) == target,
+        ScreenResult.trend_score.isnot(None),
+    )
+    score_result = await pg_session.execute(score_stmt)
+    stock_scores = [float(s) for s in score_result.scalars().all()]
+
+    # 3. 资金流向数据 — 从本地数据库获取（需求 29.8）
+    flow_data = await _load_money_flow_data(pg_session, target)
+
+    # 调用分析方法
+    sector_rotation = MarketReviewAnalyzer.analyze_sector_rotation(sector_data)
+    trend_dist = MarketReviewAnalyzer.generate_trend_distribution(stock_scores)
+    money_flow = MarketReviewAnalyzer.analyze_money_flow(flow_data)
+
+    return MarketReviewResponse(
+        sector_rotation=SectorRotation(**sector_rotation),
+        trend_distribution=TrendDistribution(**trend_dist),
+        money_flow=MoneyFlow(**money_flow),
+    )
+
+
+async def _load_sector_data(
+    session: AsyncSession, target_date: date,
+) -> list[dict]:
+    """
+    从本地数据库加载板块涨跌幅数据。
+
+    通过 screen_result 表当日选股结果关联 stock_info 的 sector 字段，
+    按板块聚合平均涨跌幅。无数据时返回空列表（需求 29.9）。
+    """
+    # 简化实现：从 stock_info 获取板块列表
+    stmt = select(StockInfo.sector).distinct().where(StockInfo.sector.isnot(None))
+    result = await session.execute(stmt)
+    sectors = result.scalars().all()
+    if not sectors:
+        return []
+    # 实际应从行情数据计算板块涨跌幅，此处返回板块名称列表供后续实装
+    return [{"name": s, "change_pct": 0.0} for s in sectors]
+
+
+async def _load_money_flow_data(
+    session: AsyncSession, target_date: date,
+) -> list[dict]:
+    """
+    从本地数据库加载资金流向数据。
+
+    无数据时返回空列表（需求 29.9）。
+    """
+    # 预留：实际应从资金流向数据表查询
+    return []
+```
+
+关键设计决策：
+- **新增端点**：`GET /review/market` 是全新端点，当前 stub 中不存在。
+- **数据来源**（需求 29.8）：全部从本地数据库获取，不调用外部数据源。板块数据从 `stock_info.sector` 聚合，趋势评分从 `screen_result.trend_score` 获取。
+- **无数据处理**（需求 29.9）：各辅助函数返回空列表，`MarketReviewAnalyzer` 的方法对空输入返回安全默认值。
+
+#### 5. GET /review/export — 报表导出实装（需求 29.10, 29.11, 29.12）
+
+```python
+import io
+from fastapi.responses import StreamingResponse
+from app.services.review_analyzer import ReportExporter, StrategyReportGenerator
+
+@router.get("/export")
+async def export_report(
+    period: Literal["daily", "weekly", "monthly"] = Query("daily"),
+    strategy_id: str | None = Query(None),
+    format: Literal["csv", "json"] = Query("csv"),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StreamingResponse:
+    """
+    导出报表为 CSV 或 JSON 文件下载。
+
+    1. 查询交易记录（可选按策略过滤）
+    2. 调用 StrategyReportGenerator 生成报表数据
+    3. 调用 ReportExporter 转换为目标格式
+    4. 以 StreamingResponse 返回文件流
+    """
+    # 查询交易记录
+    if strategy_id:
+        # 通过 ScreenResult 关联策略
+        screen_stmt = select(ScreenResult.symbol).where(
+            ScreenResult.strategy_id == UUID(strategy_id),
+        ).distinct()
+        screen_result = await pg_session.execute(screen_stmt)
+        symbols = [row for row in screen_result.scalars().all() if row]
+        if symbols:
+            trade_stmt = select(TradeOrder).where(
+                and_(TradeOrder.symbol.in_(symbols), TradeOrder.status == "FILLED")
+            )
+        else:
+            trade_stmt = select(TradeOrder).where(TradeOrder.status == "NEVER_MATCH")
+    else:
+        trade_stmt = select(TradeOrder).where(TradeOrder.status == "FILLED")
+
+    trade_result = await pg_session.execute(trade_stmt)
+    trade_rows = trade_result.scalars().all()
+    trades = [
+        {"profit": float((t.filled_price or 0) - (t.price or 0)) * (t.filled_qty or 0)}
+        for t in trade_rows
+    ]
+
+    # 生成报表数据
+    report = StrategyReportGenerator.generate_period_report(trades, period)
+
+    # 导出
+    filename = f"review_{period}_{strategy_id or 'all'}"
+    if format == "csv":
+        csv_bytes = ReportExporter.export_to_csv(report)
+        return StreamingResponse(
+            io.BytesIO(csv_bytes),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.csv"',
+            },
+        )
+    else:
+        json_str = ReportExporter.export_to_json(report)
+        return StreamingResponse(
+            io.BytesIO(json_str.encode("utf-8")),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}.json"',
+            },
+        )
+```
+
+关键设计决策：
+- **StreamingResponse**：使用 `io.BytesIO` 包装导出内容，以文件下载流形式返回（`Content-Disposition: attachment`）。
+- **CSV 编码**（需求 29.11）：`ReportExporter.export_to_csv()` 已内置 UTF-8 BOM（`\xef\xbb\xbf`），Content-Type 为 `text/csv; charset=utf-8`。
+- **JSON 格式**（需求 29.12）：Content-Type 为 `application/json`。
+- **策略过滤**：可选 `strategy_id` 参数，通过 ScreenResult 关联过滤交易记录。
+
+#### 6. POST /review/compare — 多策略对比（新增端点，需求 29.16, 29.17）
+
+```python
+@router.post("/compare", response_model=CompareResponse)
+async def compare_strategies(
+    body: CompareRequest,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> CompareResponse:
+    """
+    多策略并排对比分析（新增端点）。
+
+    1. 验证 strategy_ids 至少 2 个
+    2. 对每个策略查询交易记录并生成绩效报表
+    3. 调用 StrategyReportGenerator.compare_strategies() 生成对比结果
+    """
+    # 需求 29.17：少于 2 个策略返回 400
+    if len(body.strategy_ids) < 2:
+        raise HTTPException(status_code=400, detail="请至少选择2个策略进行对比")
+
+    strategy_reports: dict[str, dict] = {}
+
+    for sid in body.strategy_ids:
+        # 查询策略名称
+        strat_stmt = select(StrategyTemplate).where(
+            StrategyTemplate.id == UUID(sid)
+        )
+        strat_result = await pg_session.execute(strat_stmt)
+        strategy = strat_result.scalar_one_or_none()
+        name = strategy.name if strategy else sid
+
+        # 通过 ScreenResult 关联获取交易记录
+        screen_stmt = select(ScreenResult.symbol).where(
+            ScreenResult.strategy_id == UUID(sid),
+        ).distinct()
+        screen_result = await pg_session.execute(screen_stmt)
+        symbols = [row for row in screen_result.scalars().all() if row]
+
+        trades: list[dict] = []
+        if symbols:
+            trade_stmt = select(TradeOrder).where(
+                and_(TradeOrder.symbol.in_(symbols), TradeOrder.status == "FILLED")
+            )
+            trade_result = await pg_session.execute(trade_stmt)
+            trade_rows = trade_result.scalars().all()
+            trades = [
+                {"profit": float((t.filled_price or 0) - (t.price or 0)) * (t.filled_qty or 0)}
+                for t in trade_rows
+            ]
+
+        report = StrategyReportGenerator.generate_period_report(trades, body.period)
+        strategy_reports[name] = report
+
+    # 生成对比结果
+    comparison = StrategyReportGenerator.compare_strategies(strategy_reports)
+
+    return CompareResponse(
+        strategies=[
+            StrategySummary(**s) for s in comparison["strategies"]
+        ],
+        best_strategy=comparison["best_strategy"],
+    )
+```
+
+关键设计决策：
+- **新增端点**：`POST /review/compare` 是全新端点，接受 JSON body。
+- **需求 29.17**：`strategy_ids` 少于 2 个时返回 HTTP 400。Pydantic 模型的 `min_length=2` 也会在请求验证阶段拦截，但显式检查提供更友好的中文错误信息。
+- **策略名称**：从 `strategy_template` 表查询，找不到时使用 strategy_id 作为 fallback。
+- **复用 `compare_strategies()`**：直接调用已实现的服务层方法，API 层仅做数据编排。
+
+#### 7. Celery 任务数据加载实装（需求 29.13, 29.14, 29.15）
+
+更新 `app/tasks/review.py` 中的两个数据加载函数和任务主体：
+
+```python
+# app/tasks/review.py — 更新后
+
+import json
+from datetime import date
+from sqlalchemy import select, and_, cast, Date as SADate
+from app.core.database import AsyncSessionPG
+from app.models.trade import TradeOrder
+from app.models.strategy import ScreenResult
+
+
+def _load_trade_records(review_date: date) -> list[dict]:
+    """
+    从 PostgreSQL trade_order 表查询指定日期已成交交易记录。
+
+    注意：Celery 任务运行在同步上下文中，使用同步 session。
+    实际实现需要同步数据库 session 或在 async event loop 中运行。
+    此处展示查询逻辑，实际可通过 asyncio.run() 包装。
+    """
+    import asyncio
+    return asyncio.run(_async_load_trade_records(review_date))
+
+
+async def _async_load_trade_records(review_date: date) -> list[dict]:
+    """异步加载交易记录。"""
+    async with AsyncSessionPG() as session:
+        stmt = select(TradeOrder).where(
+            and_(
+                TradeOrder.status == "FILLED",
+                cast(TradeOrder.filled_at, SADate) == review_date,
+            )
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "symbol": t.symbol,
+                "profit": float((t.filled_price or 0) - (t.price or 0)) * (t.filled_qty or 0),
+                "direction": t.direction,
+                "price": float(t.price or 0),
+                "quantity": t.filled_qty or 0,
+            }
+            for t in rows
+        ]
+
+
+def _load_screen_results(review_date: date) -> list[dict]:
+    """
+    从 PostgreSQL screen_result 表查询指定日期盘后选股结果（screen_type='EOD'）。
+    """
+    import asyncio
+    return asyncio.run(_async_load_screen_results(review_date))
+
+
+async def _async_load_screen_results(review_date: date) -> list[dict]:
+    """异步加载选股结果。"""
+    async with AsyncSessionPG() as session:
+        stmt = select(ScreenResult).where(
+            and_(
+                cast(ScreenResult.screen_time, SADate) == review_date,
+                ScreenResult.screen_type == "EOD",
+            )
+        )
+        result = await session.execute(stmt)
+        rows = result.scalars().all()
+        return [
+            {
+                "symbol": s.symbol,
+                "trend_score": float(s.trend_score or 0),
+                "risk_level": s.risk_level,
+                "signals": s.signals or {},
+            }
+            for s in rows
+        ]
+```
+
+任务主体更新（需求 29.15 — 生成后写入 Redis 缓存）：
+
+```python
+import json
+from app.core.redis_client import get_redis_client
+
+_REVIEW_CACHE_PREFIX = "review:daily:"
+_REVIEW_CACHE_TTL = 7 * 24 * 3600  # 7 天
+
+
+@celery_app.task(
+    base=ReviewTask,
+    name="app.tasks.review.generate_daily_review",
+    bind=True,
+    queue="review",
+)
+def generate_daily_review(self, review_date_str: str | None = None) -> dict:
+    review_date = (
+        date.fromisoformat(review_date_str) if review_date_str else date.today()
+    )
+    logger.info("开始生成 %s 复盘报告", review_date.isoformat())
+
+    trade_records = _load_trade_records(review_date)
+    screen_results = _load_screen_results(review_date)
+
+    review = ReviewAnalyzer.generate_daily_review(
+        trade_records, screen_results, review_date=review_date,
+    )
+
+    result = {
+        "date": review.date.isoformat(),
+        "win_rate": review.win_rate,
+        "total_pnl": review.total_pnl,
+        "trade_count": review.total_trades,
+        "success_cases": [
+            {"symbol": c.get("symbol", ""), "pnl": float(c.get("profit", 0)), "reason": c.get("direction", "")}
+            for c in review.successful_cases
+        ],
+        "failure_cases": [
+            {"symbol": c.get("symbol", ""), "pnl": float(c.get("profit", 0)), "reason": c.get("direction", "")}
+            for c in review.failed_cases
+        ],
+    }
+
+    # 需求 29.15：写入 Redis 缓存
+    cache_key = f"{_REVIEW_CACHE_PREFIX}{review_date.isoformat()}"
+    try:
+        import asyncio
+        asyncio.run(_cache_review(cache_key, result))
+    except Exception:
+        logger.warning("复盘报告缓存写入失败", exc_info=True)
+
+    logger.info("复盘报告生成完成: 总交易 %d 笔, 胜率 %.2f%%",
+                review.total_trades, review.win_rate * 100)
+    return {"status": "success", **result}
+
+
+async def _cache_review(key: str, data: dict) -> None:
+    """将复盘结果写入 Redis。"""
+    client = get_redis_client()
+    try:
+        await client.set(key, json.dumps(data, default=str), ex=_REVIEW_CACHE_TTL)
+    finally:
+        await client.aclose()
+```
+
+关键设计决策：
+- **Celery 同步上下文**：Celery worker 运行在同步线程中，数据库查询通过 `asyncio.run()` 包装异步 session。
+- **需求 29.13**：`_load_trade_records()` 查询 `trade_order` 表 `status='FILLED'` 的记录，返回包含 symbol、profit、direction、price、quantity 的字典列表。
+- **需求 29.14**：`_load_screen_results()` 查询 `screen_result` 表 `screen_type='EOD'` 的记录，返回包含 symbol、trend_score、risk_level、signals 的字典列表。
+- **需求 29.15**：任务完成后将结果写入 Redis `review:daily:{date}` 键（TTL 7 天），与 API 端点共享同一缓存键。缓存写入失败仅记录 warning 日志，不影响任务结果。
+
+### Redis 缓存设计
+
+#### 每日复盘报告缓存（Cache-Aside 模式）
+
+| 配置项 | 值 |
+|---|---|
+| 键名模式 | `review:daily:{YYYY-MM-DD}` |
+| 值类型 | JSON 字符串（DailyReviewResponse 序列化） |
+| TTL | 7 天（604800 秒） |
+| 写入时机 | API 端点首次查询时 / Celery Beat 15:45 自动生成时 |
+| 读取时机 | `GET /review/daily` 端点优先读取缓存 |
+| 失效策略 | TTL 自动过期，无主动失效需求（历史复盘数据不变） |
+
+```
+写入流程：
+  API 请求 → Redis GET → miss → DB 查询 → ReviewAnalyzer → Redis SET (TTL 7d) → 返回
+  Celery Beat 15:45 → DB 查询 → ReviewAnalyzer → Redis SET (TTL 7d)
+
+读取流程：
+  API 请求 → Redis GET → hit → 反序列化 → 返回（跳过 DB 查询）
+```
+
+### 数据模型（需求 29）
+
+本次设计不引入新的数据库表，复用现有 ORM 模型：
+
+| ORM 模型 | 数据库 | 表名 | 用途 |
+|---|---|---|---|
+| `app.models.trade.TradeOrder` | PostgreSQL | `trade_order` | 已成交交易记录（daily、strategy-report、export、compare） |
+| `app.models.strategy.ScreenResult` | PostgreSQL | `screen_result` | 选股结果（daily）+ 策略关联（strategy-report、compare） |
+| `app.models.strategy.StrategyTemplate` | PostgreSQL | `strategy_template` | 策略名称查询（strategy-report、compare） |
+| `app.models.stock.StockInfo` | PostgreSQL | `stock_info` | 板块数据聚合（market） |
+
+新增 Redis 键：
+
+| 键名模式 | 值类型 | TTL | 用途 |
+|---|---|---|---|
+| `review:daily:{YYYY-MM-DD}` | JSON 字符串 | 7 天 | 每日复盘报告缓存 |
+
+新增 Pydantic 模型（定义在 `app/api/v1/review.py`）：
+
+| 模型 | 用途 |
+|---|---|
+| `DailyReviewResponse` / `TradeCaseItem` | GET /review/daily 响应 |
+| `StrategyReportResponse` / `RiskMetrics` / `ReturnPoint` | GET /review/strategy-report 响应 |
+| `MarketReviewResponse` / `SectorRotation` / `TrendDistribution` / `MoneyFlow` | GET /review/market 响应 |
+| `CompareRequest` / `CompareResponse` / `StrategySummary` | POST /review/compare 请求/响应 |
+
+策略关联说明：
+- `TradeOrder` 表无 `strategy_id` 字段
+- 策略绩效报表和多策略对比通过 `ScreenResult.strategy_id` 间接关联：先查询策略选出的 symbol 列表，再查询这些 symbol 的交易记录
+- 这种间接关联意味着同一 symbol 的交易可能被多个策略共享，这是当前数据模型的已知限制
+
+### 正确性属性（需求 29）
+
+*属性（Property）是在系统所有有效执行中都应成立的特征或行为——本质上是对系统应做什么的形式化陈述。属性是人类可读规范与机器可验证正确性保证之间的桥梁。*
+
+#### 属性 94：每日复盘报告 API 计算正确性
+
+*对任意*一组已成交交易记录（每条含 profit 字段）和任意复盘日期，`GET /review/daily` 返回的 `win_rate` 应等于 `ReviewAnalyzer.generate_daily_review()` 对相同输入计算的胜率；`total_pnl` 应等于所有交易 profit 之和；`trade_count` 应等于交易记录总数；`success_cases` 的长度应等于 profit > 0 的交易数量；`failure_cases` 的长度应等于 profit ≤ 0 的交易数量。
+
+**验证需求：29.1**
+
+---
+
+#### 属性 95：每日复盘报告 Redis 缓存 round-trip
+
+*对任意*复盘日期和任意一组交易记录，`GET /review/daily` 首次调用后，Redis 键 `review:daily:{date}` 应存在且 TTL ≤ 7 天；对同一日期的第二次调用应返回与首次调用完全一致的响应数据（从缓存读取）。Celery 任务 `generate_daily_review` 执行后也应写入同一 Redis 键，后续 API 调用应命中该缓存。
+
+**验证需求：29.3, 29.15**
+
+---
+
+#### 属性 96：策略绩效报表生成正确性
+
+*对任意*合法的 `strategy_id`（关联至少一条 ScreenResult 记录）和任意周期参数（daily/weekly/monthly），`GET /review/strategy-report` 返回的 `risk_metrics` 中的 `max_drawdown`、`sharpe_ratio`、`win_rate` 应分别等于 `StrategyReportGenerator.generate_period_report()` 对相同交易记录和周期计算的结果；`returns` 列表中每个日期的 `return_pct` 应等于该日期所有关联交易 profit 之和。
+
+**验证需求：29.4**
+
+---
+
+#### 属性 97：市场复盘分析计算正确性
+
+*对任意*一组板块数据（每条含 name 和 change_pct）、任意一组个股趋势评分（0–100）和任意一组资金流向数据（每条含 sector 和 net_inflow），`GET /review/market` 返回的 `sector_rotation` 应等于 `MarketReviewAnalyzer.analyze_sector_rotation()` 对相同板块数据的计算结果；`trend_distribution.counts` 各桶计数之和应等于输入评分总数；`money_flow.net_inflow_total` 应等于所有 net_inflow 之和。
+
+**验证需求：29.7**
+
+---
+
+#### 属性 98：报表导出格式与内容正确性
+
+*对任意*合法的报表数据和导出格式参数，`GET /review/export` 应满足：当 `format="csv"` 时，响应 Content-Type 为 `text/csv; charset=utf-8` 且响应体以 UTF-8 BOM（`\xef\xbb\xbf`）开头；当 `format="json"` 时，响应 Content-Type 为 `application/json` 且响应体为合法的 JSON 字符串；两种格式的响应均包含 `Content-Disposition: attachment` 头。对任意报表数据，CSV 导出后解析回字典列表应包含原始报表的所有键。
+
+**验证需求：29.10, 29.11, 29.12**
+
+---
+
+#### 属性 99：Celery 任务数据加载正确性
+
+*对任意*日期，当 `trade_order` 表中存在该日期 `status='FILLED'` 的记录时，`_load_trade_records()` 返回的列表长度应等于该日期已成交记录数，且每条记录应包含 `symbol`、`profit`、`direction`、`price`、`quantity` 全部 5 个字段；当 `screen_result` 表中存在该日期 `screen_type='EOD'` 的记录时，`_load_screen_results()` 返回的列表长度应等于该日期盘后选股记录数，且每条记录应包含 `symbol`、`trend_score`、`risk_level`、`signals` 全部 4 个字段。
+
+**验证需求：29.13, 29.14**
+
+---
+
+#### 属性 100：多策略对比计算正确性
+
+*对任意*至少 2 个策略 ID 列表和任意周期参数，`POST /review/compare` 返回的 `strategies` 列表长度应等于输入的策略数量；每个策略摘要的 `total_return` 和 `win_rate` 应分别等于 `StrategyReportGenerator.generate_period_report()` 对该策略交易记录计算的结果；`best_strategy` 应等于 `total_return` 最大的策略名称，与 `StrategyReportGenerator.compare_strategies()` 的结果一致。
+
+**验证需求：29.16**
+
+---
+
+### 错误处理（需求 29）
+
+| 错误场景 | 处理策略 |
+|---|---|
+| `GET /review/daily` 查询日期无交易记录 | 返回 `win_rate: 0`、`total_pnl: 0`、`trade_count: 0`、空案例列表，不抛异常（需求 29.2） |
+| `GET /review/daily` Redis 缓存读取失败 | 降级为数据库查询，记录 warning 日志 |
+| `GET /review/daily` Redis 缓存写入失败 | 正常返回响应，记录 warning 日志（下次请求重试写入） |
+| `GET /review/daily` PostgreSQL 查询失败 | 返回 HTTP 500，记录错误日志 |
+| `GET /review/strategy-report` 未传入 strategy_id | 返回 HTTP 400 + "请指定策略ID"（需求 29.5） |
+| `GET /review/strategy-report` strategy_id 无关联交易 | 返回空 `returns` 和全零 `risk_metrics`，不抛异常（需求 29.6） |
+| `GET /review/strategy-report` strategy_id 格式非法（非 UUID） | 返回 HTTP 422（FastAPI 自动验证） |
+| `GET /review/market` 查询日期无市场数据 | 返回各字段空默认值，不抛异常（需求 29.9） |
+| `GET /review/market` 数据库查询失败 | 返回 HTTP 500，记录错误日志 |
+| `GET /review/export` 无交易数据可导出 | 返回空 CSV（仅含表头）或空 JSON 对象 |
+| `GET /review/export` 导出过程异常 | 返回 HTTP 500，记录错误日志 |
+| `POST /review/compare` strategy_ids 少于 2 个 | 返回 HTTP 400 + "请至少选择2个策略进行对比"（需求 29.17） |
+| `POST /review/compare` 某策略无交易记录 | 该策略返回全零绩效，不影响其他策略的对比 |
+| Celery 任务 `_load_trade_records()` 数据库连接失败 | 任务重试（Celery 自动重试机制），记录错误日志 |
+| Celery 任务缓存写入失败 | 记录 warning 日志，不影响任务结果返回 |
+
+### 测试策略（需求 29）
+
+#### 属性测试（Hypothesis + pytest）
+
+| 属性 | 测试文件 | 最少迭代 |
+|---|---|---|
+| 属性 94：每日复盘报告 API 计算正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 95：每日复盘报告 Redis 缓存 round-trip | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 96：策略绩效报表生成正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 97：市场复盘分析计算正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 98：报表导出格式与内容正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 99：Celery 任务数据加载正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+| 属性 100：多策略对比计算正确性 | `tests/properties/test_review_api_properties.py` | 100 |
+
+每个属性测试必须通过注释标注对应的设计文档属性编号，格式：
+`# Feature: a-share-quant-trading-system, Property 94: 每日复盘报告 API 计算正确性`
+
+#### 单元测试
+
+**后端（pytest）：**
+- `GET /review/daily` 有交易记录时返回正确胜率和盈亏的示例
+- `GET /review/daily` 无交易记录时返回全零默认值的示例（需求 29.2）
+- `GET /review/daily` 缓存命中时直接返回缓存数据的示例
+- `GET /review/strategy-report` 未传入 strategy_id 返回 400 的示例（需求 29.5）
+- `GET /review/strategy-report` 策略无交易记录返回空报表的示例（需求 29.6）
+- `GET /review/strategy-report` 正常返回绩效报表的示例
+- `GET /review/market` 有市场数据时返回分析结果的示例
+- `GET /review/market` 无市场数据时返回空默认值的示例（需求 29.9）
+- `GET /review/export` CSV 格式导出含 BOM 的示例（需求 29.11）
+- `GET /review/export` JSON 格式导出的示例（需求 29.12）
+- `POST /review/compare` 少于 2 个策略返回 400 的示例（需求 29.17）
+- `POST /review/compare` 正常对比返回 best_strategy 的示例
+- `_load_trade_records()` 返回正确字段的示例（需求 29.13）
+- `_load_screen_results()` 返回正确字段的示例（需求 29.14）
+
+#### 集成测试
+
+- 写入交易记录 → 调用 GET /review/daily → 验证返回真实复盘数据 → 再次调用验证缓存命中全链路测试
+- 创建策略 → 写入选股结果 → 写入交易记录 → 调用 GET /review/strategy-report → 验证绩效报表全链路测试
+- 创建多个策略 → 写入各策略交易数据 → 调用 POST /review/compare → 验证对比结果全链路测试
+- 写入交易记录 → 调用 GET /review/export?format=csv → 解析 CSV 验证内容全链路测试
+- 触发 Celery 任务 → 验证 Redis 缓存已写入 → 调用 API 验证缓存命中全链路测试

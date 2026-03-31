@@ -264,7 +264,7 @@ const riskLevelLabel = computed(() => {
 async function fetchRiskOverview() {
   overviewLoading.value = true
   try {
-    const res = await apiClient.get<RiskOverview>('/risk/check')
+    const res = await apiClient.get<RiskOverview>('/risk/overview')
     riskOverview.value = res.data
   } catch {
     // API 暂不可用时使用默认值
@@ -389,8 +389,18 @@ async function fetchPositionWarnings() {
 
 // ─── 初始化 ───────────────────────────────────────────────────────────────────
 
+async function loadStopConfig() {
+  try {
+    const res = await apiClient.get<StopConfig>('/risk/stop-config')
+    Object.assign(stopConfig, res.data)
+  } catch {
+    // 加载失败时保留前端默认值
+  }
+}
+
 onMounted(() => {
   fetchRiskOverview()
+  loadStopConfig()
   fetchLists()
   fetchPositionWarnings()
 })

@@ -456,6 +456,13 @@ class BacktestConfig:
     slippage: Decimal = Decimal("0.001")            # 滑点
     max_position_pct: float = 0.15                  # 单股最大仓位比例
     max_sector_pct: float = 0.30                    # 单板块最大仓位比例
+    max_holdings: int = 10                          # 最大同时持仓数量
+    stop_loss_pct: float = 0.08                     # 固定止损阈值
+    trailing_stop_pct: float = 0.05                 # 移动止盈回撤阈值
+    max_holding_days: int = 20                      # 最大持仓交易日数
+    allocation_mode: str = "equal"                  # 资金分配模式："equal" | "score_weighted"
+    enable_market_risk: bool = True                 # 是否启用大盘风控模拟
+    trend_stop_ma: int = 20                         # 趋势破位均线周期
 
 
 @dataclass

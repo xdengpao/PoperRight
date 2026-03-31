@@ -1750,3 +1750,730 @@
 - 检查点任务确保增量验证
 - 属性测试验证普遍正确性属性（使用 Hypothesis）
 - 单元测试验证具体示例和边界条件
+- 阶段 27 仅覆盖需求 12 验收标准 5–33（策略驱动回测交易规则），不涉及其他需求
+
+
+---
+
+## 阶段 27：策略驱动回测交易规则实现（需求 12 验收标准 5–33）
+
+### 概述
+
+将现有基于预生成信号的 `BacktestEngine.run_backtest()` 重构为策略驱动的逐日回测主循环，集成 ScreenExecutor 每日信号生成、A股 T+1 交易规则模拟、多种卖出条件检测、仓位管理和大盘风控联动。
+
+- [x] 27.1 扩展 BacktestConfig 新增回测交易规则字段
+  - [x] 27.1.1 在 `app/core/schemas.py` 的 `BacktestConfig` 数据类中新增以下字段：
+    - `max_holdings: int = 10`（最大同时持仓数量）
+    - `stop_loss_pct: float = 0.08`（固定止损阈值）
+    - `trailing_stop_pct: float = 0.05`（移动止盈回撤阈值）
+    - `max_holding_days: int = 20`（最大持仓交易日数）
+    - `allocation_mode: str = "equal"`（资金分配模式："equal" | "score_weighted"）
+    - `enable_market_risk: bool = True`（是否启用大盘风控模拟）
+    - `trend_stop_ma: int = 20`（趋势破位均线周期）
+    - _需求：12.10, 12.11, 12.18, 12.19, 12.20, 12.22, 12.26_
+
+- [x] 27.2 新增回测内部数据结构
+  - [x] 27.2.1 在 `app/services/backtest_engine.py` 中新增（替换或扩展现有 `_PositionEntry`）：
+    - `_BacktestPosition` 数据类：symbol、quantity、cost_price、buy_date、buy_trade_day_index、highest_close、sector（可选）、pending_sell（可选 `_SellSignal`）
+    - `_SellSignal` 数据类：symbol、reason（"STOP_LOSS" | "TREND_BREAK" | "TRAILING_STOP" | "MAX_HOLDING_DAYS"）、trigger_date、priority（1-4）
+    - `_BacktestState` 数据类：cash、frozen_cash、positions（dict）、trade_records（list）、equity_snapshots（dict）、trade_day_index
+    - _需求：12.17, 12.24_
+
+- [x] 27.3 检查点 - 确保数据结构扩展无语法错误
+  - 确保 `app/core/schemas.py` 和 `app/services/backtest_engine.py` 无导入错误和类型错误，ask the user if questions arise.
+
+- [x] 27.4 实现涨跌停价格计算工具方法
+  - [x] 27.4.1 在 `BacktestEngine` 中实现 `_calc_limit_prices(prev_close: Decimal) -> tuple[Decimal, Decimal]` 静态方法
+    - 涨停价 = `round(prev_close × 1.10, 2)`，跌停价 = `round(prev_close × 0.90, 2)`
+    - 主板与创业板统一按 ±10% 简化处理
+    - _需求：12.33_
+
+  - [x] 27.4.2 编写属性 22j 测试：涨跌停价格计算正确性
+    - **属性 22j：涨跌停价格计算正确性**
+    - 测试文件：`tests/properties/test_backtest_limit_price_properties.py`
+    - 对任意正数 `prev_close`，验证涨停价 == `round(prev_close × 1.10, 2)`，跌停价 == `round(prev_close × 0.90, 2)`，且涨停价 > 跌停价
+    - 最少 100 次迭代
+    - **验证需求：12.33**
+
+- [x] 27.5 实现大盘风控模拟子系统
+  - [x] 27.5.1 在 `BacktestEngine` 中实现 `_evaluate_market_risk(trade_date, index_data) -> str` 方法
+    - 计算上证指数和创业板指的 20 日和 60 日均线
+    - 指数跌破 20 日均线 → 返回 "CAUTION"（阈值 80→90）
+    - 指数跌破 60 日均线 → 返回 "DANGER"（暂停买入）
+    - 其他 → 返回 "NORMAL"
+    - `enable_market_risk=False` 时直接返回 "NORMAL"
+    - _需求：12.26, 9.1, 9.2_
+
+  - [x] 27.5.2 编写属性 22i 测试：回测大盘风控阈值联动
+    - **属性 22i：回测大盘风控阈值联动**
+    - 测试文件：`tests/properties/test_backtest_market_risk_properties.py`
+    - 对任意指数价格序列，验证：指数跌破 20 日均线时买入候选不含趋势评分 < 90 的标的；指数跌破 60 日均线时不生成任何买入信号
+    - 最少 100 次迭代
+    - **验证需求：12.26**
+
+- [x] 27.6 实现信号生成子系统
+  - [x] 27.6.1 在 `BacktestEngine` 中实现 `_generate_buy_signals(trade_date, kline_data, config, market_risk_state) -> list[ScreenItem]` 方法
+    - 截取 trade_date 及之前的 K 线数据，构建因子字典
+    - 实例化 `ScreenExecutor` 执行盘后选股（`run_eod_screen`）
+    - 根据 market_risk_state 调整趋势打分阈值过滤
+    - 过滤当日涨幅 > 9% 的个股（需求 12.28 / 9.3）
+    - 过滤连续 3 日累计涨幅 > 20% 的个股（需求 12.28 / 9.4）
+    - _需求：12.5, 12.6, 12.28_
+
+- [x] 27.7 实现卖出条件检测子系统
+  - [x] 27.7.1 在 `BacktestEngine` 中实现 `_check_sell_conditions(position, trade_date, kline_data, config) -> _SellSignal | None` 方法
+    - 按优先级从高到低检测四种卖出条件：
+      1. 固定止损（priority=1）：收盘价相对成本价亏损 ≥ `stop_loss_pct`
+      2. 趋势破位（priority=2）：收盘价跌破 `trend_stop_ma` 日均线
+      3. 移动止盈（priority=3）：收盘价从 `highest_close` 回撤 ≥ `trailing_stop_pct`（涨停日不计入回撤判断）
+      4. 持仓超期（priority=4）：持仓交易日数 > `max_holding_days` 且未触发前三种
+    - 停牌处理：无 K 线数据的交易日暂停检测，返回 None
+    - 更新 `_BacktestPosition.highest_close`（排除涨停日）
+    - _需求：12.17, 12.18, 12.19, 12.20, 12.21, 12.22, 12.32_
+
+  - [x] 27.7.2 编写属性 22g 测试：回测卖出条件触发与优先级正确性
+    - **属性 22g：回测卖出条件触发与优先级正确性**
+    - 测试文件：`tests/properties/test_backtest_sell_conditions_properties.py`
+    - 对任意持仓和价格序列，验证：止损优先级最高；趋势破位次之；移动止盈再次；超期最低；涨停日不计入移动止盈回撤；同日多条件触发时记录最高优先级原因
+    - 最少 100 次迭代
+    - **验证需求：12.17, 12.18, 12.19, 12.20, 12.21, 12.22**
+
+- [x] 27.8 实现候选排序逻辑
+  - [x] 27.8.1 在 `BacktestEngine` 中实现 `_rank_candidates(candidates, available_slots) -> list[ScreenItem]` 方法
+    - 排序规则：趋势评分从高到低 → 风险等级从低到高（LOW > MEDIUM > HIGH）→ 触发信号数量从多到少 → 趋势强度从强到弱
+    - 取前 N 只（N = available_slots）
+    - _需求：12.16_
+
+  - [x] 27.8.2 编写属性 22f 测试：回测候选排序正确性
+    - **属性 22f：回测候选排序正确性**
+    - 测试文件：`tests/properties/test_backtest_ranking_properties.py`
+    - 对任意候选列表（长度 > 剩余空位数），验证实际买入标的为按优先级排序后的前 N 只
+    - 最少 100 次迭代
+    - **验证需求：12.16**
+
+- [x] 27.9 实现资金分配逻辑
+  - [x] 27.9.1 在 `BacktestEngine` 中实现 `_calculate_buy_amount(candidate, state, config, open_price, total_candidates_score) -> int` 方法
+    - 等权模式：单笔金额 = 可用资金 / (max_holdings - 当前持仓数)
+    - 评分加权模式：单笔金额 = 可用资金 × (该标的评分 / 所有候选评分之和)
+    - 单股仓位不超过 `max_position_pct` × 总资产
+    - 向下取整为 100 股整数倍，不足 100 股返回 0（放弃买入）
+    - _需求：12.11, 12.12, 12.13, 12.14_
+
+  - [x] 27.9.2 编写属性 22c 测试：回测资金分配模式正确性
+    - **属性 22c：回测资金分配模式正确性**
+    - 测试文件：`tests/properties/test_backtest_allocation_properties.py`
+    - 对任意回测配置和候选列表，验证：equal 模式下目标金额 = 可用资金 / (max_holdings - 持仓数)；score_weighted 模式下目标金额与评分占比成正比
+    - 最少 100 次迭代
+    - **验证需求：12.11, 12.12**
+
+  - [x] 27.9.3 编写属性 22e 测试：回测买入数量为 100 股整数倍
+    - **属性 22e：回测买入数量为 100 股整数倍**
+    - 测试文件：`tests/properties/test_backtest_allocation_properties.py`
+    - 对任意买入交易记录，验证 quantity > 0 且 quantity % 100 == 0
+    - 最少 100 次迭代
+    - **验证需求：12.14**
+
+- [x] 27.10 实现买入执行子系统
+  - [x] 27.10.1 在 `BacktestEngine` 中实现 `_execute_buys(candidates, trade_date, kline_data, state, config) -> list[_TradeRecord]` 方法
+    - T+1 开盘价执行买入
+    - 开盘价 == 涨停价 → 跳过该买入信号
+    - 持仓数量达 max_holdings → 不买入
+    - 已持仓标的跳过（不重复买入）
+    - 候选超过空位数时调用 `_rank_candidates` 排序取前 N 只
+    - 调用 `_calculate_buy_amount` 计算买入数量
+    - 板块仓位上限检查（`max_sector_pct`）
+    - 扣除买入成本（含手续费 + 滑点）
+    - _需求：12.8, 12.9, 12.10, 12.13, 12.14, 12.15, 12.16, 12.27_
+
+  - [x] 27.10.2 编写属性 22a 测试：回测买入以 T+1 开盘价执行
+    - **属性 22a：回测买入以 T+1 开盘价执行**
+    - 测试文件：`tests/properties/test_backtest_buy_execution_properties.py`
+    - 对任意回测结果中的买入记录，验证执行日期为信号日 T+1，执行价格为 T+1 开盘价；T+1 开盘价 == 涨停价时无买入记录
+    - 最少 100 次迭代
+    - **验证需求：12.8, 12.9**
+
+  - [x] 27.10.3 编写属性 22b 测试：回测持仓数量上限不变量
+    - **属性 22b：回测持仓数量上限不变量**
+    - 测试文件：`tests/properties/test_backtest_buy_execution_properties.py`
+    - 对任意回测运行过程中的任意交易日快照，验证持仓数量 ≤ max_holdings 且无重复买入
+    - 最少 100 次迭代
+    - **验证需求：12.10, 12.15**
+
+  - [x] 27.10.4 编写属性 22d 测试：回测仓位限制不变量
+    - **属性 22d：回测仓位限制不变量**
+    - 测试文件：`tests/properties/test_backtest_buy_execution_properties.py`
+    - 对任意买入记录，验证买入后单股仓位 ≤ max_position_pct × 总资产，板块仓位 ≤ max_sector_pct × 总资产
+    - 最少 100 次迭代
+    - **验证需求：12.13, 12.27**
+
+- [x] 27.11 实现卖出执行子系统
+  - [x] 27.11.1 在 `BacktestEngine` 中实现 `_execute_sells(sell_signals, trade_date, kline_data, state, config) -> list[_TradeRecord]` 方法
+    - T+1 开盘价执行卖出
+    - 开盘价 == 跌停价 → 延迟至下一个非跌停交易日（设置 `pending_sell`）
+    - 卖出回收资金标记为 `frozen_cash`（当日不可用，次日可用）
+    - 扣除卖出成本（含手续费 + 滑点 + 印花税）
+    - _需求：12.23, 12.24_
+
+  - [x] 27.11.2 编写属性 22h 测试：回测资金 T+1 可用规则
+    - **属性 22h：回测资金 T+1 可用规则**
+    - 测试文件：`tests/properties/test_backtest_sell_execution_properties.py`
+    - 对任意回测交易日，验证当日卖出回收资金不用于当日买入；次日起方可用于新买入
+    - 最少 100 次迭代
+    - **验证需求：12.24**
+
+- [x] 27.12 实现策略驱动回测主循环
+  - [x] 27.12.1 在 `BacktestEngine` 中实现新的 `run_backtest(config, kline_data, index_data) -> BacktestResult` 方法（替换/重载现有方法）
+    - 接受参数：`config: BacktestConfig`、`kline_data: dict[str, list[KlineBar]]`（全市场前复权日 K 线）、`index_data: dict[str, list[KlineBar]] | None`（大盘指数 K 线）
+    - 初始化 `_BacktestState`（cash=initial_capital, frozen_cash=0, positions={}, ...）
+    - 构建交易日序列（从 kline_data 中提取所有唯一日期并排序）
+    - 逐交易日主循环：
+      1. 解冻前日 frozen_cash → cash
+      2. 处理 pending_sell（跌停延迟卖出）
+      3. 检查已持仓标的卖出条件 → 生成 _SellSignal 列表
+      4. 执行卖出（T+1 开盘价）
+      5. 评估大盘风控状态
+      6. 调用 ScreenExecutor 生成买入候选信号
+      7. 过滤已持仓标的、风控过滤
+      8. 候选排序 + 取前 N 只
+      9. 执行买入（T+1 开盘价）
+      10. 记录净值快照
+    - 循环结束后调用 `_calculate_metrics` 计算 9 项绩效指标
+    - 保持原有 `run_backtest(config, signals)` 签名向后兼容（通过参数类型判断分发）
+    - _需求：12.5, 12.6, 12.7, 12.25, 12.29, 12.30, 12.31_
+
+  - [x] 27.12.2 编写属性 20 测试（增强版）：回测 T+1 规则不变量
+    - **属性 20：回测 T+1 规则不变量**
+    - 测试文件：`tests/properties/test_backtest_t1_rule_properties.py`
+    - 对任意策略驱动回测结果的交易记录，验证不存在同一标的在同一交易日既有买入又有卖出
+    - 最少 100 次迭代
+    - **验证需求：12.30**
+
+- [x] 27.13 检查点 - 确保策略驱动回测主循环功能完整
+  - 确保新的 `run_backtest(config, kline_data, index_data)` 方法可正常执行
+  - 确保原有 `run_backtest(config, signals)` 签名向后兼容
+  - 确保所有子系统（信号生成、买入执行、卖出执行、仓位管理、风控联动）正确集成
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 27.14 实现停牌处理逻辑
+  - [x] 27.14.1 在卖出条件检测和买入执行中集成停牌处理
+    - 持仓标的无 K 线数据时暂停止损/止盈/趋势破位检测
+    - 复牌后继续检测，复牌首日触发止损条件时在 T+1 日执行卖出
+    - 买入时跳过停牌标的（无开盘价数据）
+    - _需求：12.32_
+
+- [x] 27.15 编写回测引擎单元测试
+  - [x] 27.15.1 编写涨停跳过买入单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 构造 T+1 开盘价 == 涨停价的场景，验证买入被跳过
+    - _需求：12.9_
+
+  - [x] 27.15.2 编写跌停延迟卖出单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 构造卖出执行日开盘价 == 跌停价的场景，验证卖出延迟至下一个非跌停日
+    - _需求：12.23_
+
+  - [x] 27.15.3 编写停牌暂停检测单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 构造持仓标的停牌（无 K 线数据）场景，验证止损/止盈检测暂停，复牌后恢复
+    - _需求：12.32_
+
+  - [x] 27.15.4 编写空仓闲置单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 构造无选股结果且无持仓的场景，验证资金保持闲置，不强制买入
+    - _需求：12.25_
+
+  - [x] 27.15.5 编写评分加权分配计算单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 构造多个候选标的不同评分的场景，验证 score_weighted 模式下资金按评分比例分配
+    - _需求：12.12_
+
+  - [x] 27.15.6 编写回测不模拟黑白名单过滤单元测试
+    - 测试文件：`tests/services/test_backtest_engine_trading_rules.py`
+    - 验证回测中不过滤黑白名单标的，确保回测结果反映策略本身表现
+    - _需求：12.29_
+
+- [x] 27.16 编写回测引擎集成测试
+  - [x] 27.16.1 策略驱动回测全链路集成测试
+    - 测试文件：`tests/integration/test_backtest_strategy_driven.py`
+    - 构造 30 个交易日的多只股票 K 线数据和指数数据
+    - 配置策略（含均线趋势因子）和回测参数（max_holdings=3, stop_loss_pct=0.08）
+    - 执行策略驱动回测，验证：
+      - 返回完整的 BacktestResult（9 项绩效指标均有值）
+      - 交易记录中买入日期为信号日 T+1
+      - 持仓数量从未超过 max_holdings
+      - 买入数量均为 100 股整数倍
+      - 存在止损卖出记录（构造下跌场景）
+    - _需求：12.5–12.33_
+
+  - [x] 27.16.2 大盘风控联动集成测试
+    - 测试文件：`tests/integration/test_backtest_strategy_driven.py`
+    - 构造指数跌破 60 日均线的场景，验证回测期间暂停所有买入信号
+    - 构造指数跌破 20 日均线的场景，验证趋势打分阈值提升至 90
+    - _需求：12.26_
+
+- [x] 27.17 更新回测 API 端点适配新签名
+  - [x] 27.17.1 更新 `app/api/v1/backtest.py` 和 `app/tasks/backtest.py`
+    - 回测 API 端点在调用 `BacktestEngine.run_backtest()` 时传入 `kline_data` 和 `index_data` 参数
+    - 从数据库加载回测区间内的全市场 K 线数据和指数数据
+    - 回测请求参数新增可选字段：max_holdings、stop_loss_pct、trailing_stop_pct、max_holding_days、allocation_mode、enable_market_risk、trend_stop_ma
+    - _需求：12.5, 12.10, 12.18, 12.20, 12.22, 12.26_
+
+- [x] 27.18 最终检查点 - 确保阶段 27 所有功能和测试通过
+  - 确保 `BacktestConfig` 包含所有新增字段且默认值正确
+  - 确保策略驱动回测主循环正确执行：信号生成 → 买入 → 卖出 → 仓位管理 → 风控联动
+  - 确保 A 股特殊规则正确实现：T+1 交易、涨停跳过买入、跌停延迟卖出、停牌暂停检测、前复权价格、100 股整数倍
+  - 确保原有 `run_backtest(config, signals)` 签名向后兼容
+  - 确保所有新增属性测试（22a–22j）和单元测试通过
+  - 确保所有测试通过，ask the user if questions arise.
+
+
+---
+
+## 阶段 28：风险控制页面 API 实装与数据持久化（需求 28）
+
+- [x] 28.1 重写 `GET /risk/overview` — 大盘风控状态实时计算
+  - [x] 28.1.1 在 `app/api/v1/risk.py` 中新增 `RiskOverviewResponse` Pydantic 响应模型
+    - 字段：`market_risk_level`（str）、`sh_above_ma20`（bool）、`sh_above_ma60`（bool）、`cyb_above_ma20`（bool）、`cyb_above_ma60`（bool）、`current_threshold`（float）、`data_insufficient`（bool，默认 False）
+    - _需求：28.1_
+
+  - [x] 28.1.2 重写 `risk_overview()` 端点，替换现有 `GET /risk/check` stub
+    - 将路由从 `GET /risk/check` 改为 `GET /risk/overview`
+    - 通过 `Depends(get_ts_session)` 注入 TimescaleDB session
+    - 查询上证指数（000001.SH）和创业板指（399006.SZ）最近 60 个交易日的 kline 收盘价
+    - 调用 `MarketRiskChecker.check_market_risk()` 分别计算两个指数风险等级，取更严重的作为综合等级
+    - 在 API 层计算 `sh_above_ma20/ma60`、`cyb_above_ma20/ma60`（对比最新收盘价与均线值）
+    - 调用 `MarketRiskChecker.get_trend_threshold()` 获取当前阈值
+    - 数据不足或查询异常时返回 NORMAL 默认值 + `data_insufficient: true`
+    - _需求：28.1, 28.2_
+
+- [x] 28.2 重写 `POST /risk/check` — 委托风控校验实装
+  - [x] 28.2.1 重写 `risk_check()` 端点，连接服务层实现短路求值
+    - 通过 `Depends(get_pg_session)` 和 `Depends(get_ts_session)` 注入数据库 session
+    - 按顺序执行四项检查（遇到第一个失败即返回）：
+      1. 查询 PostgreSQL `stock_list` 表检查黑名单（`list_type='BLACK'`）
+      2. 从 TimescaleDB 查询当日 K 线计算涨幅，调用 `StockRiskFilter.check_daily_gain()`
+      3. 计算单股仓位占比，调用 `PositionRiskChecker.check_stock_position_limit()`
+      4. 计算板块仓位占比，调用 `PositionRiskChecker.check_sector_position_limit()`
+    - 新增 `RiskCheckResponse` Pydantic 模型（`passed: bool`、`reason: str | None`）
+    - _需求：28.3, 28.4_
+
+- [x] 28.3 重写 `POST/GET /risk/stop-config` — 止损止盈配置 Redis 持久化
+  - [x] 28.3.1 更新 `StopConfigRequest` 模型并实现 Redis 读写
+    - 更新请求模型字段为 `fixed_stop_loss`（float）、`trailing_stop`（float）、`trend_stop_ma`（int）
+    - 新增 `StopConfigResponse` 响应模型
+    - `POST /risk/stop-config`：将配置 JSON 写入 Redis 键 `risk:stop_config:{user_id}`，TTL 30 天
+    - `GET /risk/stop-config`：从 Redis 读取配置，无数据时返回默认值（`fixed_stop_loss=8, trailing_stop=5, trend_stop_ma=20`）
+    - 通过 `Depends(get_redis)` 注入 Redis 客户端
+    - _需求：28.5, 28.6_
+
+- [x] 28.4 重写 `GET /risk/position-warnings` — 持仓预警实时检测
+  - [x] 28.4.1 实现持仓预警端点，遍历持仓执行全部 6 项风控检测
+    - 新增 `PositionWarningItem` Pydantic 模型（`symbol`、`type`、`level`、`current_value`、`threshold`、`time`）
+    - 从 PostgreSQL `position` 表查询当前用户所有持仓
+    - 无持仓时返回空列表
+    - 对每只持仓标的执行 6 项检测：
+      1. `PositionRiskChecker.check_stock_position_limit()` → danger
+      2. `PositionRiskChecker.check_sector_position_limit()` → warning
+      3. `PositionRiskChecker.check_position_breakdown()` → danger
+      4. `StopLossChecker.check_fixed_stop_loss()` → danger
+      5. `StopLossChecker.check_trailing_stop_loss()` → warning
+      6. `StopLossChecker.check_trend_stop_loss()` → warning
+    - 从 Redis 加载止损配置（复用 stop-config 存储）
+    - 从 TimescaleDB 查询持仓标的 K 线数据（MA20、当日涨跌幅、量比）
+    - 单只标的 K 线查询失败时跳过该标的，继续处理其他持仓
+    - _需求：28.8, 28.9, 28.10_
+
+- [x] 28.5 重写黑白名单 CRUD — PostgreSQL stock_list 表集成
+  - [x] 28.5.1 实现 `_list_stock_list`、`_add_to_stock_list`、`_remove_from_stock_list` 内部函数
+    - 通过 `list_type` 参数区分黑名单（BLACK）和白名单（WHITE）
+    - 新增 `StockListItemOut`（symbol、reason、created_at）和 `StockListPageResponse`（total、items）Pydantic 模型
+    - _需求：28.11, 28.12_
+
+  - [x] 28.5.2 重写 `GET /blacklist` 和 `GET /whitelist` 端点
+    - 连接 PostgreSQL `stock_list` 表，支持分页查询（`page`、`page_size` 参数）
+    - 返回 `total`（总数）和 `items`（当前页数据），按 `created_at` 降序排列
+    - _需求：28.13_
+
+  - [x] 28.5.3 重写 `POST /blacklist` 和 `POST /whitelist` 端点
+    - 添加前先查询是否已存在，重复添加返回 HTTP 409
+    - 成功添加返回 201
+    - _需求：28.14_
+
+  - [x] 28.5.4 重写 `DELETE /blacklist/{symbol}` 和 `DELETE /whitelist/{symbol}` 端点
+    - 记录不存在时返回 HTTP 404
+    - _需求：28.11, 28.12_
+
+- [x] 28.6 重写 `GET /risk/strategy-health` — 策略健康状态实时计算
+  - [x] 28.6.1 实现策略健康状态端点，连接 BacktestRun 表和 StopLossChecker
+    - 新增 `StrategyHealthResponse` Pydantic 模型（`strategy_id`、`win_rate`、`max_drawdown`、`is_healthy`、`warnings`）
+    - 接受可选 `strategy_id` 查询参数
+    - 从 PostgreSQL `backtest_run` 表查询该策略最新回测结果
+    - 调用 `StopLossChecker.check_strategy_health()` 判定健康状态
+    - 无 `strategy_id` 或无交易记录时返回默认值（`is_healthy=true, win_rate=0, max_drawdown=0, warnings=[]`）
+    - 不健康时生成具体预警信息（胜率低于 50%、回撤超过 15%）
+    - _需求：28.15, 28.16_
+
+- [x] 28.7 更新前端 RiskView.vue 适配新 API
+  - [x] 28.7.1 更新 RiskView.vue 的 API 调用
+    - 将 `fetchRiskOverview` 的请求 URL 从 `GET /risk/check` 改为 `GET /risk/overview`
+    - 在 `onMounted` 中新增调用 `GET /risk/stop-config` 加载已保存的止损止盈配置并回填至配置表单
+    - _需求：28.7_
+
+- [x] 28.8 检查点 - 确保所有 API 端点功能正常
+  - 确保所有 6 组 API 端点从 stub 升级为真实实现
+  - 确保前端 RiskView.vue 正确调用新 API
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 28.9 编写风控 API 属性测试（Hypothesis + pytest）
+  - [x] 28.9.1 编写属性 86 测试：大盘风控概览计算正确性
+    - **属性 86：大盘风控概览计算正确性**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意两组有效的指数收盘价序列（长度 0–60），验证 `market_risk_level` 等于两个指数分别计算后取更严重等级；`current_threshold` 等于 `get_trend_threshold(overall_level)`；`sh_above_ma20` 正确反映均线关系
+    - 最少 100 次迭代
+    - **验证需求：28.1**
+
+  - [x] 28.9.2 编写属性 87 测试：委托风控校验短路求值正确性
+    - **属性 87：委托风控校验短路求值正确性**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意委托请求和风控状态组合，验证按黑名单→涨幅→单股仓位→板块仓位顺序返回第一个不通过的 reason；所有通过时返回 `passed: true`
+    - 最少 100 次迭代
+    - **验证需求：28.3, 28.4**
+
+  - [x] 28.9.3 编写属性 88 测试：止损止盈配置 Redis round-trip
+    - **属性 88：止损止盈配置 Redis round-trip**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意合法配置（fixed_stop_loss ∈ [1,50]、trailing_stop ∈ [1,30]、trend_stop_ma ∈ {5,10,20,60}），POST 保存后 GET 读取值完全一致
+    - 最少 100 次迭代
+    - **验证需求：28.5, 28.6**
+
+  - [x] 28.9.4 编写属性 89 测试：持仓预警生成正确性与字段完整性
+    - **属性 89：持仓预警生成正确性与字段完整性**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意持仓集合和 K 线数据，验证每条预警包含 6 个必需字段且均不为空；预警触发条件与对应风控检查器计算结果一致
+    - 最少 100 次迭代
+    - **验证需求：28.8, 28.9**
+
+  - [x] 28.9.5 编写属性 90 测试：黑白名单 CRUD round-trip
+    - **属性 90：黑白名单 CRUD round-trip**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意股票代码和名单类型，POST 添加后 GET 查询包含该代码；DELETE 移除后 GET 查询不包含
+    - 最少 100 次迭代
+    - **验证需求：28.11, 28.12**
+
+  - [x] 28.9.6 编写属性 91 测试：黑白名单分页正确性
+    - **属性 91：黑白名单分页正确性**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意 N 条记录和合法分页参数，验证 `total` 等于 N；`items` 长度正确；所有页合并后无重复且覆盖全部记录
+    - 最少 100 次迭代
+    - **验证需求：28.13**
+
+  - [x] 28.9.7 编写属性 92 测试：黑名单重复添加返回 409
+    - **属性 92：黑名单重复添加返回 409**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意股票代码，第一次 POST 返回 201；第二次 POST 返回 409；名单中该股票仅出现一次
+    - 最少 100 次迭代
+    - **验证需求：28.14**
+
+  - [x] 28.9.8 编写属性 93 测试：策略健康状态计算正确性
+    - **属性 93：策略健康状态计算正确性**
+    - 测试文件：`tests/properties/test_risk_api_properties.py`
+    - 对任意 win_rate ∈ [0,1] 和 max_drawdown ∈ [0,1]，验证 `is_healthy` 等于 `NOT check_strategy_health()`；win_rate < 0.5 时 warnings 包含胜率预警；max_drawdown > 0.15 时 warnings 包含回撤预警
+    - 最少 100 次迭代
+    - **验证需求：28.15**
+
+- [x] 28.10 编写风控 API 单元测试
+  - [x] 28.10.1 编写 `GET /risk/overview` 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 正常数据返回正确风险等级的示例
+    - 数据不足时返回 NORMAL + `data_insufficient=true` 的示例
+    - _需求：28.1, 28.2_
+
+  - [x] 28.10.2 编写 `POST /risk/check` 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 黑名单命中返回 `passed=false` 的示例
+    - 涨幅超 9% 返回 `passed=false` 的示例
+    - 所有检查通过返回 `passed=true` 的示例
+    - _需求：28.3, 28.4_
+
+  - [x] 28.10.3 编写 `POST/GET /risk/stop-config` 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 保存配置成功的示例
+    - Redis 无数据返回默认值的示例
+    - _需求：28.5, 28.6_
+
+  - [x] 28.10.4 编写 `GET /risk/position-warnings` 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 无持仓返回空列表的示例
+    - 触发固定止损预警的示例
+    - _需求：28.8, 28.9, 28.10_
+
+  - [x] 28.10.5 编写黑白名单 CRUD 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 添加成功返回 201 的示例
+    - 重复添加返回 409 的示例
+    - 分页查询返回正确 total 和 items 的示例
+    - 移除成功的示例
+    - _需求：28.11, 28.12, 28.13, 28.14_
+
+  - [x] 28.10.6 编写 `GET /risk/strategy-health` 单元测试
+    - 测试文件：`tests/api/test_risk_api.py`
+    - 无 strategy_id 返回默认值的示例
+    - 策略不健康时返回 warnings 的示例
+    - _需求：28.15, 28.16_
+
+- [x] 28.11 编写风控 API 集成测试
+  - [x] 28.11.1 止损配置 round-trip 集成测试
+    - 测试文件：`tests/integration/test_risk_api_integration.py`
+    - 保存止损配置 → 读取配置 → 验证一致性全链路测试
+    - _需求：28.5, 28.6_
+
+  - [x] 28.11.2 黑名单 CRUD 全链路集成测试
+    - 测试文件：`tests/integration/test_risk_api_integration.py`
+    - 添加黑名单 → 查询黑名单 → 移除黑名单 → 验证已移除全链路测试
+    - _需求：28.11, 28.14_
+
+  - [x] 28.11.3 持仓预警全链路集成测试
+    - 测试文件：`tests/integration/test_risk_api_integration.py`
+    - 创建持仓 → 写入 K 线数据 → 查询持仓预警 → 验证预警内容全链路测试
+    - _需求：28.8, 28.9_
+
+  - [x] 28.11.4 黑名单联动委托风控集成测试
+    - 测试文件：`tests/integration/test_risk_api_integration.py`
+    - 添加黑名单 → 委托风控校验 → 验证黑名单命中全链路测试
+    - _需求：28.3, 28.11_
+
+- [x] 28.12 最终检查点 - 确保阶段 28 所有功能和测试通过
+  - 确保 `app/api/v1/risk.py` 所有 6 组端点从 stub 升级为真实实现
+  - 确保 `RiskView.vue` 正确调用 `GET /risk/overview` 和 `GET /risk/stop-config`
+  - 确保止损配置 Redis 持久化正常工作
+  - 确保黑白名单 PostgreSQL CRUD 正常工作（含分页和 409 重复检测）
+  - 确保持仓预警遍历全部 6 项风控检测
+  - 确保策略健康状态连接 BacktestRun 表和 StopLossChecker
+  - 确保所有属性测试（86–93）和单元测试通过
+  - 确保所有测试通过，ask the user if questions arise.
+
+---
+
+## 阶段 29：复盘分析页面 API 实装与数据持久化（需求 29）
+
+- [x] 29.1 新增 Pydantic 响应模型（`app/api/v1/review.py`）
+  - [x] 29.1.1 定义所有复盘 API 的请求与响应模型
+    - `DailyReviewResponse`：`date`（str）、`win_rate`（float）、`total_pnl`（float）、`trade_count`（int）、`success_cases`（list[dict]，每条含 symbol、pnl、reason）、`failure_cases`（list[dict]）
+    - `StrategyReportResponse`：`strategy_id`（str）、`strategy_name`（str）、`period`（str）、`returns`（list[dict]，每条含 date、return_pct）、`risk_metrics`（dict，含 max_drawdown、sharpe_ratio、win_rate、calmar_ratio）
+    - `MarketReviewResponse`：`sector_rotation`（dict）、`trend_distribution`（dict）、`money_flow`（dict）
+    - `ExportParams`：`period`（str）、`strategy_id`（str | None）、`format`（"csv" | "json"，默认 "csv"）
+    - `CompareRequest`：`strategy_ids`（list[str]，min_length=2）、`period`（str）
+    - `CompareResponse`：`strategies`（list[dict]）、`best_strategy`（str | None）
+    - _需求：29.1, 29.4, 29.7, 29.10, 29.16_
+
+- [x] 29.2 重写 `GET /review/daily` — 每日复盘报告实装
+  - [x] 29.2.1 重写 `get_daily_review()` 端点，连接数据库与 Redis 缓存
+    - 接受可选 `date` 查询参数（默认 `date.today()`）
+    - 先查询 Redis 缓存键 `review:daily:{date}`，命中时直接返回缓存数据
+    - 缓存未命中时：通过 `Depends(get_pg_session)` 注入 PostgreSQL session
+    - 查询 `trade_order` 表该日期所有 `status='FILLED'` 的交易记录
+    - 查询 `screen_result` 表该日期的选股结果
+    - 将查询结果转为 dict 列表，调用 `ReviewAnalyzer.generate_daily_review()`
+    - 将生成的报告 JSON 缓存至 Redis（键 `review:daily:{date}`，TTL 7 天）
+    - 无交易记录时返回全零默认值，不抛出异常
+    - _需求：29.1, 29.2, 29.3_
+
+- [x] 29.3 重写 `GET /review/strategy-report` — 策略绩效报表实装
+  - [x] 29.3.1 重写 `get_strategy_report()` 端点，连接 StrategyReportGenerator
+    - 接受 `strategy_id`（必填）、`period`（默认 "daily"）查询参数
+    - 未传入 `strategy_id` 时返回 HTTP 400，消息"请指定策略ID"
+    - 通过 `Depends(get_pg_session)` 注入 PostgreSQL session
+    - 查询 `trade_order` 表中通过 `screen_result.strategy_id` 关联的交易记录（JOIN `screen_result` 表获取策略关联）
+    - 调用 `StrategyReportGenerator.generate_period_report()` 生成绩效报表
+    - 构建 `returns` 列表：按日期分组计算每日 profit 之和
+    - 查询 `strategy_template` 表获取 `strategy_name`
+    - 无关联交易记录时返回空 `returns` 和全零 `risk_metrics`
+    - _需求：29.4, 29.5, 29.6_
+
+- [x] 29.4 新增 `GET /review/market` — 市场复盘分析端点
+  - [x] 29.4.1 实现 `get_market_review()` 端点
+    - 接受可选 `date` 查询参数（默认 `date.today()`）
+    - 通过 `Depends(get_pg_session)` 和 `Depends(get_ts_session)` 注入数据库 session
+    - 从本地数据库获取板块数据（`stock_info` 表按 `board` 分组计算涨跌幅，或从 Redis 缓存读取板块涨跌数据）
+    - 从 `screen_result` 表获取该日期个股趋势评分列表
+    - 从本地数据库获取资金流向数据（按板块聚合 `net_inflow`）
+    - 调用 `MarketReviewAnalyzer.analyze_sector_rotation()` 生成板块轮动分析
+    - 调用 `MarketReviewAnalyzer.generate_trend_distribution()` 生成趋势分布
+    - 调用 `MarketReviewAnalyzer.analyze_money_flow()` 生成资金流向分析
+    - 无市场数据时返回各字段空默认值
+    - _需求：29.7, 29.8, 29.9_
+
+- [x] 29.5 检查点 - 确保核心 API 端点实装正确
+  - 确保 `GET /review/daily` 正确查询 trade_order 和 screen_result 表并调用 ReviewAnalyzer
+  - 确保 `GET /review/daily` Redis 缓存读写正常（首次计算 → 缓存 → 二次命中）
+  - 确保 `GET /review/strategy-report` 正确关联策略交易记录并生成报表
+  - 确保 `GET /review/market` 从本地数据库获取数据并调用 MarketReviewAnalyzer 三个方法
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 29.6 新增 `GET /review/export` — 报表导出端点
+  - [x] 29.6.1 实现 `export_report()` 端点，连接 ReportExporter
+    - 接受 `period`（必填）、`strategy_id`（可选）、`format`（"csv" / "json"，默认 "csv"）查询参数
+    - 通过 `Depends(get_pg_session)` 注入 PostgreSQL session
+    - 查询对应周期和策略的交易记录，调用 `StrategyReportGenerator.generate_period_report()` 生成报表数据
+    - `format="csv"` 时：调用 `ReportExporter.export_to_csv()` 生成 bytes，返回 `StreamingResponse`，Content-Type 为 `text/csv; charset=utf-8`，Content-Disposition 为 `attachment; filename="review_{period}_{date}.csv"`
+    - `format="json"` 时：调用 `ReportExporter.export_to_json()` 生成 str，返回 `StreamingResponse`，Content-Type 为 `application/json`，Content-Disposition 为 `attachment; filename="review_{period}_{date}.json"`
+    - _需求：29.10, 29.11, 29.12_
+
+- [x] 29.7 新增 `POST /review/compare` — 多策略对比端点
+  - [x] 29.7.1 实现 `compare_strategies()` 端点
+    - 接受 `CompareRequest` 请求体（`strategy_ids` 列表 + `period`）
+    - `strategy_ids` 少于 2 个时返回 HTTP 400，消息"请至少选择2个策略进行对比"
+    - 通过 `Depends(get_pg_session)` 注入 PostgreSQL session
+    - 对每个 `strategy_id` 查询关联交易记录，调用 `StrategyReportGenerator.generate_period_report()` 生成报表
+    - 将所有策略报表传入 `StrategyReportGenerator.compare_strategies()` 生成对比结果
+    - 返回 `CompareResponse`
+    - _需求：29.16, 29.17_
+
+- [x] 29.8 实装 Celery 任务数据加载函数（`app/tasks/review.py`）
+  - [x] 29.8.1 重写 `_load_trade_records()` 函数
+    - 创建同步 PostgreSQL session（Celery 任务中使用同步 engine）
+    - 查询 `trade_order` 表指定日期所有 `status='FILLED'` 的记录
+    - 返回包含 `symbol`、`profit`、`direction`、`price`、`quantity` 字段的字典列表
+    - `profit` 字段：若 ORM 模型无 profit 列，则通过 `(filled_price - price) * filled_qty * (1 if direction='BUY' else -1)` 计算
+    - _需求：29.13_
+
+  - [x] 29.8.2 重写 `_load_screen_results()` 函数
+    - 查询 `screen_result` 表指定日期 `screen_type='EOD'` 的记录
+    - 返回包含 `symbol`、`trend_score`、`risk_level`、`signals` 字段的字典列表
+    - _需求：29.14_
+
+  - [x] 29.8.3 更新 `generate_daily_review` 任务，生成报告后写入 Redis 缓存
+    - 在 `analyzer.generate_daily_review()` 调用后，将结果序列化为 JSON
+    - 写入 Redis 键 `review:daily:{date}`，TTL 7 天
+    - 供 `GET /review/daily` 接口直接读取
+    - _需求：29.15_
+
+- [x] 29.9 检查点 - 确保所有端点和 Celery 任务实装正确
+  - 确保 `GET /review/export` 正确生成 CSV（含 BOM）和 JSON 文件下载流
+  - 确保 `POST /review/compare` 正确执行多策略对比并返回最佳策略标识
+  - 确保 `_load_trade_records()` 和 `_load_screen_results()` 从数据库正确加载数据
+  - 确保 Celery 任务生成报告后写入 Redis 缓存
+  - 确保所有测试通过，ask the user if questions arise.
+
+- [x] 29.10 编写复盘 API 属性测试（Hypothesis + pytest）
+  - [x] 29.10.1 编写属性 94 测试：每日复盘报告 API 计算正确性
+    - **属性 94：每日复盘报告 API 计算正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意一组已成交交易记录（每条含 profit 字段）和任意复盘日期，验证 `win_rate` 等于 `ReviewAnalyzer.generate_daily_review()` 计算的胜率；`total_pnl` 等于所有 profit 之和；`trade_count` 等于记录总数；`success_cases` 长度等于 profit > 0 的数量
+    - 最少 100 次迭代
+    - **验证需求：29.1**
+
+  - [x] 29.10.2 编写属性 95 测试：每日复盘报告 Redis 缓存 round-trip
+    - **属性 95：每日复盘报告 Redis 缓存 round-trip**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意复盘日期和交易记录，首次调用后 Redis 键 `review:daily:{date}` 应存在且 TTL ≤ 7 天；二次调用返回与首次完全一致的响应
+    - 最少 100 次迭代
+    - **验证需求：29.3**
+
+  - [x] 29.10.3 编写属性 96 测试：策略绩效报表生成正确性
+    - **属性 96：策略绩效报表生成正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意合法 `strategy_id` 和周期参数，验证 `risk_metrics` 中的 `max_drawdown`、`sharpe_ratio`、`win_rate` 等于 `StrategyReportGenerator.generate_period_report()` 的计算结果
+    - 最少 100 次迭代
+    - **验证需求：29.4**
+
+  - [x] 29.10.4 编写属性 97 测试：市场复盘分析计算正确性
+    - **属性 97：市场复盘分析计算正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意板块数据、趋势评分和资金流向数据，验证 `sector_rotation` 等于 `MarketReviewAnalyzer.analyze_sector_rotation()` 的结果；`trend_distribution.counts` 各桶之和等于输入评分总数；`money_flow.net_inflow_total` 等于所有 net_inflow 之和
+    - 最少 100 次迭代
+    - **验证需求：29.7**
+
+  - [x] 29.10.5 编写属性 98 测试：报表导出格式与内容正确性
+    - **属性 98：报表导出格式与内容正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意报表数据和导出格式，验证 CSV 响应以 UTF-8 BOM 开头且 Content-Type 为 `text/csv; charset=utf-8`；JSON 响应为合法 JSON 且 Content-Type 为 `application/json`；两种格式均包含 `Content-Disposition: attachment` 头
+    - 最少 100 次迭代
+    - **验证需求：29.10, 29.11, 29.12**
+
+  - [x] 29.10.6 编写属性 99 测试：Celery 任务数据加载正确性
+    - **属性 99：Celery 任务数据加载正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意日期，验证 `_load_trade_records()` 返回列表长度等于该日期 `status='FILLED'` 记录数，每条含 symbol、profit、direction、price、quantity 全部 5 个字段；`_load_screen_results()` 返回列表长度等于该日期 `screen_type='EOD'` 记录数，每条含 symbol、trend_score、risk_level、signals 全部 4 个字段
+    - 最少 100 次迭代
+    - **验证需求：29.13, 29.14**
+
+  - [x] 29.10.7 编写属性 100 测试：多策略对比计算正确性
+    - **属性 100：多策略对比计算正确性**
+    - 测试文件：`tests/properties/test_review_api_properties.py`
+    - 对任意至少 2 个策略 ID 和周期参数，验证 `strategies` 列表长度等于输入策略数量；`best_strategy` 等于 `total_return` 最大的策略名称，与 `StrategyReportGenerator.compare_strategies()` 结果一致
+    - 最少 100 次迭代
+    - **验证需求：29.16**
+
+- [x] 29.11 编写复盘 API 单元测试
+  - [x] 29.11.1 编写 `GET /review/daily` 单元测试
+    - 测试文件：`tests/api/test_review_api.py`
+    - 有交易记录时返回正确 win_rate 和 total_pnl 的示例
+    - 无交易记录时返回全零默认值的示例
+    - Redis 缓存命中时直接返回缓存数据的示例
+    - _需求：29.1, 29.2, 29.3_
+
+  - [x] 29.11.2 编写 `GET /review/strategy-report` 单元测试
+    - 测试文件：`tests/api/test_review_api.py`
+    - 未传 strategy_id 返回 HTTP 400 的示例
+    - 有交易记录时返回正确 risk_metrics 的示例
+    - 无交易记录时返回空 returns 和全零 risk_metrics 的示例
+    - _需求：29.4, 29.5, 29.6_
+
+  - [x] 29.11.3 编写 `GET /review/market` 单元测试
+    - 测试文件：`tests/api/test_review_api.py`
+    - 有市场数据时返回正确板块轮动和趋势分布的示例
+    - 无市场数据时返回空默认值的示例
+    - _需求：29.7, 29.8, 29.9_
+
+  - [x] 29.11.4 编写 `GET /review/export` 单元测试
+    - 测试文件：`tests/api/test_review_api.py`
+    - CSV 导出返回正确 Content-Type 和 BOM 的示例
+    - JSON 导出返回正确 Content-Type 的示例
+    - _需求：29.10, 29.11, 29.12_
+
+  - [x] 29.11.5 编写 `POST /review/compare` 单元测试
+    - 测试文件：`tests/api/test_review_api.py`
+    - strategy_ids 少于 2 个返回 HTTP 400 的示例
+    - 正常对比返回 best_strategy 的示例
+    - _需求：29.16, 29.17_
+
+  - [x] 29.11.6 编写 Celery 任务数据加载单元测试
+    - 测试文件：`tests/tasks/test_review_task.py`
+    - `_load_trade_records()` 正确查询 FILLED 记录的示例
+    - `_load_screen_results()` 正确查询 EOD 记录的示例
+    - Celery 任务执行后 Redis 缓存写入的示例
+    - _需求：29.13, 29.14, 29.15_
+
+- [x] 29.12 编写复盘 API 集成测试
+  - [x] 29.12.1 每日复盘 round-trip 集成测试
+    - 测试文件：`tests/integration/test_review_api_integration.py`
+    - 写入 trade_order 测试数据 → 调用 GET /review/daily → 验证 win_rate 和 trade_count → 二次调用验证缓存命中
+    - _需求：29.1, 29.2, 29.3_
+
+  - [x] 29.12.2 策略绩效报表全链路集成测试
+    - 测试文件：`tests/integration/test_review_api_integration.py`
+    - 创建策略 → 写入关联交易记录 → 调用 GET /review/strategy-report → 验证 risk_metrics
+    - _需求：29.4, 29.6_
+
+  - [x] 29.12.3 报表导出全链路集成测试
+    - 测试文件：`tests/integration/test_review_api_integration.py`
+    - 写入交易记录 → 调用 GET /review/export?format=csv → 验证 CSV 内容可解析 → 调用 format=json → 验证 JSON 可解析
+    - _需求：29.10, 29.11, 29.12_
+
+  - [x] 29.12.4 多策略对比全链路集成测试
+    - 测试文件：`tests/integration/test_review_api_integration.py`
+    - 创建 2 个策略 → 写入各自交易记录 → 调用 POST /review/compare → 验证 best_strategy 正确
+    - _需求：29.16, 29.17_
+
+- [x] 29.13 最终检查点 - 确保阶段 29 所有功能和测试通过
+  - 确保 `app/api/v1/review.py` 所有 5 个端点从 stub 升级为真实实现
+  - 确保 `GET /review/daily` Redis cache-aside 模式正常工作
+  - 确保 `GET /review/strategy-report` 通过 ScreenResult 关联正确查询策略交易记录
+  - 确保 `GET /review/market` 从本地数据库获取板块、趋势、资金流向数据
+  - 确保 `GET /review/export` 以 StreamingResponse 返回 CSV（含 BOM）和 JSON 文件
+  - 确保 `POST /review/compare` 正确执行多策略对比
+  - 确保 `_load_trade_records()` 和 `_load_screen_results()` 从 PostgreSQL 正确加载数据
+  - 确保 Celery 任务和 API 端点均写入 Redis 缓存（键 `review:daily:{date}`，TTL 7 天）
+  - 确保所有属性测试（94–100）、单元测试和集成测试通过
+  - 确保所有测试通过，ask the user if questions arise.

@@ -323,7 +323,26 @@ async function fetchKline(symbol: string) {
     const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
     const vols = bars.map((b: any) => b.volume)
     klineOptions[symbol] = {
-      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: (params: any) => {
+          const p = Array.isArray(params) ? params[0] : params
+          if (!p || !p.data) return ''
+          const idx = p.dataIndex
+          const [open, close, low, high] = ohlc[idx]
+          const chg = open ? ((close - open) / open * 100).toFixed(2) : '0.00'
+          const color = close >= open ? '#f85149' : '#3fb950'
+          const vol = (vols[idx] / 10000).toFixed(0)
+          return `<div style="font-size:12px;line-height:1.6">
+            <div style="font-weight:600">${dates[idx]}</div>
+            <div>开 ${open.toFixed(2)}　高 ${high.toFixed(2)}</div>
+            <div>低 ${low.toFixed(2)}　收 ${close.toFixed(2)}</div>
+            <div>涨跌幅 <span style="color:${color};font-weight:600">${chg}%</span></div>
+            <div>成交量 ${vol} 万手</div>
+          </div>`
+        },
+      },
       grid: [
         { left: 50, right: 20, top: 20, height: '55%' },
         { left: 50, right: 20, top: '72%', height: '18%' },

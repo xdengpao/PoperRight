@@ -179,11 +179,59 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 
 #### 验收标准
 
+##### 基础参数与输出
+
 1. THE BacktestEngine SHALL 支持用户自定义回测起止日期、初始资金金额、买入手续费率（默认0.03%）、卖出手续费率（默认0.13%加0.1%印花税）、滑点比例（默认0.1%）。
 2. THE BacktestEngine SHALL 输出年化收益率、累计收益率、胜率、盈亏比、最大回撤、夏普比率、卡玛比率、总交易次数、平均持仓天数共9项绩效指标。
 3. THE BacktestEngine SHALL 以图表形式展示收益曲线、最大回撤曲线、持仓明细列表、交易流水记录，并支持导出为数据文件。
 4. THE BacktestEngine SHALL 支持按牛市、熊市、震荡市三种市场环境分段执行回测，分别输出各阶段绩效指标。
-5. FOR ALL 回测结果，THE BacktestEngine SHALL 严格按照A股T+1交易规则计算，不允许当日买入当日卖出同一标的。
+
+##### 信号生成规则
+
+5. THE BacktestEngine SHALL 在回测区间内逐交易日执行策略驱动选股：每个交易日收盘后，使用当日及之前的历史K线数据调用 ScreenExecutor 按策略配置（StrategyConfig）执行选股，自动生成买入候选信号。
+6. THE BacktestEngine SHALL 仅采用日频盘后选股模式生成信号，与需求7验收标准4的盘后选股逻辑一致，不模拟盘中实时选股。
+7. THE BacktestEngine SHALL 在每个交易日收盘后同时检查已持仓标的是否触发卖出条件（止损、移动止盈、趋势破位、持仓超期），生成卖出信号。
+
+##### 买入执行规则
+
+8. WHEN 选股信号于交易日T收盘后生成时，THE BacktestEngine SHALL 在T+1日以开盘价执行买入委托。
+9. WHEN T+1日该股开盘价等于涨停价时，THE BacktestEngine SHALL 视为无法买入，跳过该买入信号。
+10. THE BacktestEngine SHALL 支持用户配置最大同时持仓数量（`max_holdings`，默认10只），WHEN 当前持仓数量已达上限时，不执行新的买入信号。
+11. THE BacktestEngine SHALL 采用等权资金分配策略，单笔买入金额 = 当前可用资金 / （最大持仓数量 - 当前持仓数量），同时支持可选的评分加权分配模式（`allocation_mode`，取值 "equal" 或 "score_weighted"，默认 "equal"）。
+12. WHEN 采用评分加权分配模式时，THE BacktestEngine SHALL 按各候选标的的趋势评分占比分配买入资金，评分高的标的获得更多资金。
+13. THE BacktestEngine SHALL 限制单股买入后仓位不超过总资产的 `max_position_pct`（默认15%），WHEN 计算买入金额超过该上限时，缩减买入数量至仓位上限以内。
+14. THE BacktestEngine SHALL 将买入数量向下取整为100股（1手）的整数倍，WHEN 取整后买入数量不足100股时，放弃该笔买入。
+15. WHEN 选股结果中包含已持仓的标的时，THE BacktestEngine SHALL 跳过该标的，不重复买入。
+16. WHEN 同一交易日的买入候选标的数量超过剩余持仓空位数时，THE BacktestEngine SHALL 按以下优先级排序后取前N只（N=剩余空位数）：趋势评分从高到低 → 风险等级从低到高（LOW > MEDIUM > HIGH）→ 触发信号数量从多到少 → 趋势强度从强到弱。
+
+##### 卖出执行规则
+
+17. THE BacktestEngine SHALL 支持以下四种卖出条件，按优先级从高到低依次为：固定止损、趋势破位、移动止盈、持仓超期。
+18. WHEN 持仓个股收盘价相对买入成本价的亏损比例达到固定止损阈值（`stop_loss_pct`，默认8%，可配置）时，THE BacktestEngine SHALL 在T+1日以开盘价执行止损卖出。
+19. WHEN 持仓个股收盘价跌破用户指定的关键均线（默认20日均线）时，THE BacktestEngine SHALL 在T+1日以开盘价执行趋势破位卖出，复用 RiskController 的趋势止损逻辑。
+20. THE BacktestEngine SHALL 跟踪每只持仓个股持仓期间的最高收盘价，WHEN 收盘价从最高价回撤达到移动止盈阈值（`trailing_stop_pct`，默认5%，可配置）时，在T+1日以开盘价执行移动止盈卖出。
+21. WHEN 持仓个股涨停时（收盘价等于涨停价），THE BacktestEngine SHALL 不将该日计入移动止盈的回撤判断。
+22. WHEN 持仓天数超过最大持仓天数（`max_holding_days`，默认20个交易日，可配置）且未触发其他卖出条件时，THE BacktestEngine SHALL 在超期次日以开盘价执行强制卖出。
+23. WHEN 卖出执行日该股开盘价等于跌停价时，THE BacktestEngine SHALL 视为无法卖出，延迟至下一个非跌停交易日以开盘价执行卖出。
+
+##### 仓位管理规则
+
+24. THE BacktestEngine SHALL 将卖出回收的资金标记为当日不可用，次日起方可用于新的买入委托，模拟A股资金T+1可用规则。
+25. WHEN 某交易日无选股结果且无持仓时，THE BacktestEngine SHALL 保持资金闲置，不强制买入，空仓期间资金不计算额外收益。
+
+##### 风控集成规则
+
+26. THE BacktestEngine SHALL 默认启用大盘风控模拟（`enable_market_risk`，默认True，可配置关闭），回测期间同步计算上证指数和创业板指的均线状态：指数跌破20日均线时将趋势打分纳入初选池的阈值从80分提升至90分（需求9.1），指数跌破60日均线时暂停所有买入信号直至指数重新站上60日均线（需求9.2）。
+27. THE BacktestEngine SHALL 在买入时检查板块仓位上限（`max_sector_pct`，默认30%），WHEN 买入后该板块总仓位超过总资产的30%时，跳过该标的。
+28. THE BacktestEngine SHALL 在选股阶段过滤当日涨幅超过9%的个股（需求9.3）和连续3个交易日累计涨幅超过20%的个股（需求9.4），不生成买入信号。
+29. THE BacktestEngine SHALL 在回测中不模拟黑白名单过滤，以确保回测结果反映策略本身的表现，不受人工干预影响。
+
+##### A股特殊交易规则
+
+30. FOR ALL 回测结果，THE BacktestEngine SHALL 严格按照A股T+1交易规则计算，不允许当日买入当日卖出同一标的。
+31. THE BacktestEngine SHALL 使用前复权价格进行回测计算（与需求2验收标准2一致），确保历史价格可比。
+32. WHEN 持仓标的停牌（无K线数据）时，THE BacktestEngine SHALL 暂停该标的的止损、止盈、趋势破位检测，复牌后继续检测，WHEN 复牌首日触发止损条件时在T+1日执行卖出。
+33. THE BacktestEngine SHALL 使用前一交易日收盘价乘以（1±10%）计算涨跌停价格（主板与创业板统一按10%简化处理），用于判定涨停无法买入和跌停无法卖出。
 
 ### 需求 13：策略参数优化与过拟合检测
 
@@ -411,3 +459,95 @@ A股右侧股票交易量化选股系统，专为A股市场设计，聚焦趋势
 10. THE StockScreener `POST /api/v1/screen/run` 接口 SHALL 从本地数据库获取选股所需的股票数据，不直接调用外部数据源接口，具体包括：从 TimescaleDB `kline` 表查询各股票最近 N 个交易日的日 K 线数据（用于均线计算、形态识别、量价分析），从 PostgreSQL `stock_info` 表查询股票基本面数据（PE/PB/ROE/市值等），从 PostgreSQL 资金流向相关表查询主力资金和北向资金数据。
 11. IF `POST /api/v1/screen/run` 接口传入的 `strategy_id` 在策略存储中不存在，THEN THE StockScreener SHALL 返回 HTTP 404 状态码和明确的错误提示信息"策略不存在"。
 12. IF `POST /api/v1/screen/run` 接口执行选股时本地数据库中无可用的行情数据，THEN THE StockScreener SHALL 返回空的选股结果集（`items` 为空列表）并在响应中标注 `is_complete: true`，不抛出异常。
+
+### 需求 28：风险控制页面 API 实装与数据持久化
+
+**用户故事：** 作为量化交易员，我希望风险控制页面展示的大盘风控状态、止损止盈配置、黑白名单和仓位预警信息均来自真实的服务端计算和数据库存储，而非硬编码的占位数据，以便在实盘交易中依赖风控系统做出准确的风险管理决策。
+
+#### 验收标准
+
+##### 大盘风控状态实时计算
+
+1. THE RiskController SHALL 提供 `GET /api/v1/risk/overview` 接口，该接口从 TimescaleDB kline 表查询上证指数（000001.SH）和创业板指（399006.SZ）最近 60 个交易日的日 K 线收盘价，调用 `MarketRiskChecker.check_market_risk()` 分别计算两个指数的风险等级，返回包含以下字段的响应：`market_risk_level`（NORMAL / CAUTION / DANGER，取两个指数中更严重的等级）、`sh_above_ma20`（布尔值）、`sh_above_ma60`（布尔值）、`cyb_above_ma20`（布尔值）、`cyb_above_ma60`（布尔值）、`current_threshold`（当前趋势打分阈值，NORMAL 时为 80，CAUTION/DANGER 时为 90）。
+2. IF `GET /api/v1/risk/overview` 接口查询指数 K 线数据失败或数据不足，THEN THE RiskController SHALL 返回 `market_risk_level: "NORMAL"` 的保守默认值，不抛出异常，并在响应中标注 `data_insufficient: true`。
+
+##### 委托风控校验实装
+
+3. THE RiskController SHALL 更新 `POST /api/v1/risk/check` 接口，接受委托请求参数（symbol、direction、quantity、price），依次调用以下风控检查并返回综合校验结果：
+   - 调用 `BlackWhiteListManager.is_blacklisted(symbol)` 检查黑名单，命中时返回 `passed: false, reason: "该股票在黑名单中"`
+   - 调用 `StockRiskFilter.check_daily_gain()` 检查当日涨幅，超过 9% 时返回 `passed: false, reason: "个股单日涨幅超过9%"`
+   - 调用 `PositionRiskChecker.check_stock_position_limit()` 检查单股仓位上限，超过 15% 时返回 `passed: false, reason: "单股仓位超过15%上限"`
+   - 调用 `PositionRiskChecker.check_sector_position_limit()` 检查板块仓位上限，超过 30% 时返回 `passed: false, reason: "板块仓位超过30%上限"`
+   - 所有检查通过时返回 `passed: true`
+4. THE RiskController `POST /api/v1/risk/check` 接口 SHALL 按以上顺序依次执行风控检查，遇到第一个不通过的检查即返回失败结果，不继续执行后续检查。
+
+##### 止损止盈配置持久化
+
+5. THE RiskController SHALL 提供 `POST /api/v1/risk/stop-config` 接口，接受止损止盈配置参数（`fixed_stop_loss`: 固定止损比例，`trailing_stop`: 移动止损回撤比例，`trend_stop_ma`: 趋势止损均线周期），将配置持久化至 Redis（键名 `risk:stop_config:{user_id}`，过期时间 30 天），返回保存成功确认。
+6. THE RiskController SHALL 提供 `GET /api/v1/risk/stop-config` 接口，从 Redis 读取当前用户的止损止盈配置，Redis 无数据时返回默认值（`fixed_stop_loss: 8`, `trailing_stop: 5`, `trend_stop_ma: 20`）。
+7. WHEN 用户打开风险控制页面时，THE WebUI SHALL 调用 `GET /api/v1/risk/stop-config` 接口加载已保存的止损止盈配置并回填至配置表单，替代当前的前端硬编码默认值。
+
+##### 持仓预警实时检测
+
+8. THE RiskController SHALL 提供 `GET /api/v1/risk/position-warnings` 接口，该接口从数据库查询当前用户的所有持仓记录，对每只持仓标的执行以下检测并返回预警列表：
+   - 调用 `PositionRiskChecker.check_stock_position_limit()` 检测单股仓位是否超过 15%，超过时生成 `danger` 级别预警
+   - 调用 `PositionRiskChecker.check_sector_position_limit()` 检测板块仓位是否超过 30%，超过时生成 `warning` 级别预警
+   - 调用 `PositionRiskChecker.check_position_breakdown()` 检测是否触发破位预警（跌破 MA20 + 放量下跌 > 5%），触发时生成 `danger` 级别预警
+   - 调用 `StopLossChecker.check_fixed_stop_loss()` 检测是否触发固定止损，触发时生成 `danger` 级别预警
+   - 调用 `StopLossChecker.check_trailing_stop_loss()` 检测是否触发移动止损，触发时生成 `warning` 级别预警
+   - 调用 `StopLossChecker.check_trend_stop_loss()` 检测是否触发趋势止损，触发时生成 `warning` 级别预警
+9. THE RiskController `GET /api/v1/risk/position-warnings` 接口返回的每条预警记录 SHALL 包含以下字段：`symbol`（股票代码）、`type`（预警类型描述）、`level`（"danger" | "warning" | "info"）、`current_value`（当前值）、`threshold`（阈值）、`time`（检测时间）。
+10. IF 当前用户无持仓记录，THEN `GET /api/v1/risk/position-warnings` 接口 SHALL 返回空列表，不抛出异常。
+
+##### 黑白名单数据库持久化
+
+11. THE RiskController SHALL 更新黑名单 CRUD 接口（`GET /api/v1/blacklist`、`POST /api/v1/blacklist`、`DELETE /api/v1/blacklist/{symbol}`），连接 PostgreSQL `stock_list` 表（`list_type='BLACK'`）进行真实的数据库读写操作，替代当前的 stub 实现。
+12. THE RiskController SHALL 更新白名单 CRUD 接口（`GET /api/v1/whitelist`、`POST /api/v1/whitelist`、`DELETE /api/v1/whitelist/{symbol}`），连接 PostgreSQL `stock_list` 表（`list_type='WHITE'`）进行真实的数据库读写操作，替代当前的 stub 实现。
+13. THE RiskController 黑白名单 `GET` 接口 SHALL 支持分页查询（`page` 和 `page_size` 参数），返回 `total`（总数）、`items`（当前页数据列表）字段。
+14. WHEN 用户通过 `POST /api/v1/blacklist` 添加已存在于黑名单中的股票代码时，THE RiskController SHALL 返回 HTTP 409 状态码和提示信息"该股票已在黑名单中"，不产生重复记录。
+
+##### 策略健康状态实时计算
+
+15. THE RiskController SHALL 更新 `GET /api/v1/risk/strategy-health` 接口，接受可选的 `strategy_id` 查询参数，从数据库查询该策略关联的回测结果或交易记录，计算实时胜率和最大回撤，调用 `StopLossChecker.check_strategy_health()` 判定策略是否健康，返回 `strategy_id`、`win_rate`、`max_drawdown`、`is_healthy`（布尔值）、`warnings`（预警信息列表）字段。
+16. IF `GET /api/v1/risk/strategy-health` 接口未传入 `strategy_id` 或该策略无交易记录，THEN THE RiskController SHALL 返回 `is_healthy: true`、`win_rate: 0`、`max_drawdown: 0`、`warnings: []` 的默认值。
+
+### 需求 29：复盘分析页面 API 实装与数据持久化
+
+**用户故事：** 作为量化交易员，我希望复盘分析页面展示的每日复盘报告、策略绩效报表、市场复盘分析和报表导出功能均来自真实的服务端计算和数据库查询，而非硬编码的占位数据，以便在每个交易日收盘后通过复盘数据持续优化交易策略。
+
+#### 验收标准
+
+##### 每日复盘报告 API 实装
+
+1. THE ReviewAnalyzer SHALL 更新 `GET /api/v1/review/daily` 接口，接受可选的 `date` 查询参数（默认最近交易日），从 PostgreSQL `trade_order` 表查询该日期所有已成交（status='FILLED'）的交易记录，从 `screen_result` 表查询该日期的选股结果，调用 `ReviewAnalyzer.generate_daily_review()` 生成真实的复盘报告，返回包含以下字段的响应：`date`（复盘日期）、`win_rate`（胜率）、`total_pnl`（总盈亏）、`trade_count`（交易笔数）、`success_cases`（成功案例列表，每条含 symbol、pnl、reason）、`failure_cases`（失败案例列表，每条含 symbol、pnl、reason）。
+2. IF `GET /api/v1/review/daily` 接口查询的日期无交易记录，THEN THE ReviewAnalyzer SHALL 返回 `win_rate: 0`、`total_pnl: 0`、`trade_count: 0`、`success_cases: []`、`failure_cases: []` 的默认值，不抛出异常。
+3. THE ReviewAnalyzer SHALL 将生成的每日复盘报告以 JSON 格式缓存至 Redis（键名 `review:daily:{date}`，过期时间 7 天），后续相同日期的请求直接从缓存读取，避免重复计算。
+
+##### 策略绩效报表 API 实装
+
+4. THE ReviewAnalyzer SHALL 更新 `GET /api/v1/review/strategy-report` 接口，接受 `strategy_id`（必填）、`period`（"daily" / "weekly" / "monthly"，默认 "daily"）查询参数，从 PostgreSQL `trade_order` 表查询该策略关联的交易记录，调用 `StrategyReportGenerator.generate_period_report()` 生成绩效报表，返回包含以下字段的响应：`strategy_id`、`strategy_name`、`period`、`returns`（日期-收益率序列，供前端 ECharts 渲染折线图和柱状图）、`risk_metrics`（含 `max_drawdown`、`sharpe_ratio`、`win_rate`、`calmar_ratio`）。
+5. IF `GET /api/v1/review/strategy-report` 接口未传入 `strategy_id`，THEN THE ReviewAnalyzer SHALL 返回 HTTP 400 状态码和提示信息"请指定策略ID"。
+6. IF `GET /api/v1/review/strategy-report` 接口传入的 `strategy_id` 无关联交易记录，THEN THE ReviewAnalyzer SHALL 返回空的 `returns` 列表和全零的 `risk_metrics`，不抛出异常。
+
+##### 市场复盘分析 API 新增
+
+7. THE ReviewAnalyzer SHALL 提供 `GET /api/v1/review/market` 接口，接受可选的 `date` 查询参数（默认最近交易日），调用 `MarketReviewAnalyzer` 的三个分析方法，返回包含以下字段的响应：`sector_rotation`（板块轮动分析，含 `top_sectors`、`bottom_sectors`、`rotation_summary`）、`trend_distribution`（趋势行情分布，含 `bins` 和 `counts`）、`money_flow`（资金流向分析，含 `net_inflow_total`、`top_inflow_sectors`、`top_outflow_sectors`）。
+8. THE ReviewAnalyzer `GET /api/v1/review/market` 接口 SHALL 从本地数据库获取板块数据（板块涨跌幅）、个股趋势评分和资金流向数据，不直接调用外部数据源接口。
+9. IF `GET /api/v1/review/market` 接口查询的日期无市场数据，THEN THE ReviewAnalyzer SHALL 返回各字段的空默认值（空列表和零值），不抛出异常。
+
+##### 报表导出 API 实装
+
+10. THE ReviewAnalyzer SHALL 提供 `GET /api/v1/review/export` 接口，接受 `period`（"daily" / "weekly" / "monthly"）和可选的 `strategy_id`、`format`（"csv" / "json"，默认 "csv"）查询参数，调用 `ReportExporter` 生成对应格式的报表文件，以文件下载流形式返回（Content-Disposition: attachment）。
+11. WHEN `format` 为 "csv" 时，THE ReviewAnalyzer `GET /api/v1/review/export` 接口 SHALL 返回 UTF-8 编码（含 BOM）的 CSV 文件，Content-Type 为 `text/csv; charset=utf-8`。
+12. WHEN `format` 为 "json" 时，THE ReviewAnalyzer `GET /api/v1/review/export` 接口 SHALL 返回 JSON 文件，Content-Type 为 `application/json`。
+
+##### Celery 任务数据加载实装
+
+13. THE ReviewAnalyzer SHALL 更新 Celery 任务 `generate_daily_review` 中的 `_load_trade_records()` 函数，从 PostgreSQL `trade_order` 表查询指定日期所有已成交的交易记录（status='FILLED'），返回包含 symbol、profit、direction、price、quantity 字段的字典列表。
+14. THE ReviewAnalyzer SHALL 更新 Celery 任务 `generate_daily_review` 中的 `_load_screen_results()` 函数，从 PostgreSQL `screen_result` 表查询指定日期的盘后选股结果（screen_type='EOD'），返回包含 symbol、trend_score、risk_level、signals 字段的字典列表。
+15. THE ReviewAnalyzer Celery 任务 `generate_daily_review` SHALL 在生成复盘报告后将结果缓存至 Redis（键名 `review:daily:{date}`，过期时间 7 天），供 `GET /api/v1/review/daily` 接口直接读取。
+
+##### 多策略对比 API 支持
+
+16. THE ReviewAnalyzer SHALL 提供 `POST /api/v1/review/compare` 接口，接受 `strategy_ids`（策略ID列表，至少2个）和 `period` 参数，对每个策略调用 `StrategyReportGenerator.generate_period_report()` 生成报表，再调用 `StrategyReportGenerator.compare_strategies()` 生成对比分析结果，返回包含各策略绩效摘要和最佳策略标识的响应。
+17. IF `POST /api/v1/review/compare` 接口传入的 `strategy_ids` 少于 2 个，THEN THE ReviewAnalyzer SHALL 返回 HTTP 400 状态码和提示信息"请至少选择2个策略进行对比"。
