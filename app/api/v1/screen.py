@@ -518,7 +518,7 @@ async def get_screen_results(
     sort_by: str = Query("trend_score", description="排序字段: trend_score, ref_buy_price, symbol, risk_level"),
     sort_dir: str = Query("desc", description="排序方向: asc, desc"),
     page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
+    page_size: int = Query(20, ge=1, le=10000),
 ) -> dict:
     """查询选股结果（从 Redis 缓存读取最近一次执行结果）。"""
     # 优先按 strategy_id 查询，否则取最新结果

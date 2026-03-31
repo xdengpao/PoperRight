@@ -51,6 +51,9 @@ def upgrade() -> None:
     # 3. 创建复合索引，支持按股票代码、频率、时间范围快速查询
     op.execute("CREATE INDEX IF NOT EXISTS ix_kline_symbol_freq_time ON kline (symbol, freq, time DESC)")
 
+    # 4. 创建唯一索引，防止重复 K 线数据
+    op.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_kline_time_symbol_freq_adj ON kline (time, symbol, freq, adj_type)")
+
 
 def downgrade() -> None:
     op.execute("DROP TABLE IF EXISTS kline CASCADE")

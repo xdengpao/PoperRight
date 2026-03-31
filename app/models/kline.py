@@ -41,7 +41,7 @@ class Kline(TSBase):
 
     __table_args__ = (
         Index("ix_kline_symbol_freq_time", "symbol", "freq", "time"),
-        # 不使用 UniqueConstraint，TimescaleDB 超表主键由 time+symbol+freq 联合保证
+        Index("uq_kline_time_symbol_freq_adj", "time", "symbol", "freq", "adj_type", unique=True),
     )
 
     def __repr__(self) -> str:

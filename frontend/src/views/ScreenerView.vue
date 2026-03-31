@@ -1574,8 +1574,9 @@ async function runScreen() {
       timeout: 120_000, // 全市场选股需要遍历所有股票，120s 超时
     })
     router.push('/screener/results')
-  } catch (e) {
-    runError.value = e instanceof Error ? e.message : '执行选股失败，请重试'
+  } catch (e: any) {
+    const msg = e?.response?.data?.detail ?? e?.message ?? '执行选股失败，请重试'
+    runError.value = typeof msg === 'string' ? msg : JSON.stringify(msg)
     running.value = false
   }
 }

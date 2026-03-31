@@ -4,7 +4,7 @@
       <h1 class="page-title">选股结果</h1>
       <div class="header-actions">
         <button class="btn btn-outline" @click="loadResults">🔄 刷新</button>
-        <button class="btn btn-export" :disabled="exporting || !results.length" @click="exportExcel">
+        <button class="btn btn-export" :disabled="exporting || !allResults.length" @click="exportExcel">
           <span v-if="exporting" class="spinner" aria-hidden="true"></span>
           {{ exporting ? '导出中...' : '📥 导出 Excel' }}
         </button>
@@ -18,7 +18,7 @@
     <ErrorBanner v-else-if="state.error" :message="state.error" :retryFn="loadResults" />
 
     <!-- 空状态 -->
-    <div v-else-if="!results.length" class="empty-state">
+    <div v-else-if="!allResults.length" class="empty-state">
       <div class="empty-icon">📊</div>
       <p class="empty-text">暂无选股结果</p>
       <p class="empty-hint">请先在「智能选股」页面执行选股</p>
@@ -41,7 +41,7 @@
             {{ sortDir === 'asc' ? '↑' : '↓' }}
           </span>
         </button>
-        <span class="result-count">共 {{ results.length }} 条</span>
+        <span class="result-count">共 {{ allResults.length }} 条</span>
       </div>
 
       <table class="result-table" aria-label="选股结果列表">
@@ -71,7 +71,7 @@
           </tr>
         </thead>
         <tbody>
-          <template v-for="row in sortedResults" :key="row.symbol">
+          <template v-for="row in results" :key="row.symbol">
             <!-- 主行 -->
             <tr
               class="result-row"
@@ -114,18 +114,30 @@
             <!-- 展开详情行 -->
             <tr v-if="expandedSymbols.has(row.symbol)" class="detail-row">
               <td colspan="7">
-                <div class="detail-panel">
-                  <div class="detail-header">触发信号详情</div>
-                  <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
-                  <div v-else class="signal-tags">
-                    <span
-                      v-for="(sig, idx) in row.signals"
-                      :key="idx"
-                      :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category]]"
-                    >
-                      {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.label }}
-                      <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
-                    </span>
+                <div class="detail-panel detail-panel-flex">
+                  <div class="detail-signals">
+                    <div class="detail-header">触发信号详情</div>
+                    <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
+                    <div v-else class="signal-tags">
+                      <span
+                        v-for="(sig, idx) in row.signals"
+                        :key="idx"
+                        :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category]]"
+                      >
+                        {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.label }}
+                        <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
+                      </span>
+                    </div>
+                  </div>
+                  <div class="detail-chart">
+                    <div v-if="klineLoading[row.symbol]" class="chart-loading">加载K线中...</div>
+                    <div v-else-if="klineError[row.symbol]" class="chart-error">{{ klineError[row.symbol] }}</div>
+                    <v-chart
+                      v-else-if="klineOptions[row.symbol]"
+                      :option="klineOptions[row.symbol]"
+                      :autoresize="true"
+                      class="kline-chart"
+                    />
                   </div>
                 </div>
               </td>
@@ -137,7 +149,7 @@
       <!-- 分页 -->
       <div v-if="totalPages > 1" class="pagination">
         <button class="btn-page" :disabled="currentPage <= 1" @click="changePage(currentPage - 1)">上一页</button>
-        <span class="page-info">第 {{ currentPage }} 页 / 共 {{ totalPages }} 页（{{ totalCount }} 条）</span>
+        <span class="page-info">第 {{ currentPage }} 页 / 共 {{ totalPages }} 页（{{ allResults.length }} 条）</span>
         <button class="btn-page" :disabled="currentPage >= totalPages" @click="changePage(currentPage + 1)">下一页</button>
       </div>
     </div>
@@ -145,12 +157,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiClient } from '@/api'
 import { usePageState } from '@/composables/usePageState'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
+import VChart from 'vue-echarts'
+import { use } from 'echarts/core'
+import { CandlestickChart, BarChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
+import { CanvasRenderer } from 'echarts/renderers'
+
+use([CandlestickChart, BarChart, GridComponent, TooltipComponent, DataZoomComponent, CanvasRenderer])
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -176,7 +195,7 @@ interface ScreenResultRow {
   has_fake_breakout: boolean
 }
 
-type SortKey = 'trend_score' | 'risk_level'
+type SortKey = 'trend_score' | 'risk_level' | 'signal_count'
 type SortDir = 'asc' | 'desc'
 
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
@@ -186,6 +205,7 @@ const RISK_ORDER: Record<string, number> = { LOW: 0, MEDIUM: 1, HIGH: 2 }
 const sortOptions: { key: SortKey; label: string }[] = [
   { key: 'trend_score', label: '趋势评分' },
   { key: 'risk_level', label: '风险等级' },
+  { key: 'signal_count', label: '信号数量' },
 ]
 
 // 信号分类 → 颜色 CSS 类
@@ -227,20 +247,37 @@ function signalSummary(signals: SignalDetail[]): string {
 const router = useRouter()
 const { state, execute } = usePageState<ScreenResultRow[]>()
 
-const results = computed<ScreenResultRow[]>(() => state.data ?? [])
+// ─── 全量数据（一次性加载，前端排序+分页）─────────────────────────────────────
+
+const allResults = ref<ScreenResultRow[]>([])
 const expandedSymbols = ref<Set<string>>(new Set())
 const sortKey = ref<SortKey>('trend_score')
 const sortDir = ref<SortDir>('desc')
 const exporting = ref(false)
 const currentPage = ref(1)
-const totalCount = ref(0)
 const pageSize = 20
 
-const totalPages = computed(() => Math.ceil(totalCount.value / pageSize))
+const sortedResults = computed(() => {
+  const arr = [...allResults.value]
+  arr.sort((a, b) => {
+    let cmp = 0
+    if (sortKey.value === 'trend_score') {
+      cmp = a.trend_score - b.trend_score
+    } else if (sortKey.value === 'risk_level') {
+      cmp = (RISK_ORDER[a.risk_level] ?? 0) - (RISK_ORDER[b.risk_level] ?? 0)
+    } else if (sortKey.value === 'signal_count') {
+      cmp = (a.signals?.length ?? 0) - (b.signals?.length ?? 0)
+    }
+    return sortDir.value === 'asc' ? cmp : -cmp
+  })
+  return arr
+})
 
-// ─── 排序后结果（排序由后端完成，前端直接使用返回结果）───────────────────────
-
-const sortedResults = computed(() => results.value)
+const totalPages = computed(() => Math.ceil(sortedResults.value.length / pageSize))
+const results = computed(() => {
+  const start = (currentPage.value - 1) * pageSize
+  return sortedResults.value.slice(start, start + pageSize)
+})
 
 // ─── 辅助函数 ─────────────────────────────────────────────────────────────────
 
@@ -259,6 +296,65 @@ function formatTime(iso: string): string {
   return iso.replace('T', ' ').slice(0, 16)
 }
 
+// ─── K线图数据 ────────────────────────────────────────────────────────────────
+
+const klineLoading = reactive<Record<string, boolean>>({})
+const klineError = reactive<Record<string, string>>({})
+const klineOptions = reactive<Record<string, any>>({})
+
+async function fetchKline(symbol: string) {
+  if (klineOptions[symbol] || klineLoading[symbol]) return
+  klineLoading[symbol] = true
+  klineError[symbol] = ''
+  try {
+    const today = new Date()
+    const oneYearAgo = new Date(today)
+    oneYearAgo.setFullYear(today.getFullYear() - 1)
+    const fmt = (d: Date) => d.toISOString().slice(0, 10)
+    const res = await apiClient.get(`/data/kline/${symbol}`, {
+      params: { freq: '1d', start: fmt(oneYearAgo), end: fmt(today) },
+    })
+    const bars = res.data?.bars ?? []
+    if (!bars.length) {
+      klineError[symbol] = '暂无K线数据'
+      return
+    }
+    const dates = bars.map((b: any) => b.time.slice(0, 10))
+    const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
+    const vols = bars.map((b: any) => b.volume)
+    klineOptions[symbol] = {
+      tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+      grid: [
+        { left: 50, right: 20, top: 20, height: '55%' },
+        { left: 50, right: 20, top: '72%', height: '18%' },
+      ],
+      xAxis: [
+        { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#8b949e', fontSize: 10 } },
+        { type: 'category', data: dates, gridIndex: 1, show: false },
+      ],
+      yAxis: [
+        { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: '#21262d' } }, axisLabel: { color: '#8b949e' } },
+        { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false } },
+      ],
+      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 }],
+      series: [
+        {
+          type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0,
+          itemStyle: { color: '#f85149', color0: '#3fb950', borderColor: '#f85149', borderColor0: '#3fb950' },
+        },
+        {
+          type: 'bar', data: vols, xAxisIndex: 1, yAxisIndex: 1,
+          itemStyle: { color: '#30363d' },
+        },
+      ],
+    }
+  } catch {
+    klineError[symbol] = '加载K线失败'
+  } finally {
+    klineLoading[symbol] = false
+  }
+}
+
 // ─── 交互 ─────────────────────────────────────────────────────────────────────
 
 function toggleExpand(symbol: string) {
@@ -266,6 +362,7 @@ function toggleExpand(symbol: string) {
     expandedSymbols.value.delete(symbol)
   } else {
     expandedSymbols.value.add(symbol)
+    fetchKline(symbol)
   }
 }
 
@@ -274,33 +371,35 @@ function toggleSort(key: SortKey) {
     sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
   } else {
     sortKey.value = key
-    sortDir.value = key === 'trend_score' ? 'desc' : 'asc'
+    sortDir.value = (key === 'trend_score' || key === 'signal_count') ? 'desc' : 'asc'
   }
   currentPage.value = 1
-  loadResults()
 }
 
 // ─── 数据加载 ─────────────────────────────────────────────────────────────────
 
 async function loadResults() {
   await execute(async () => {
-    const res = await apiClient.get<{ total?: number; items?: ScreenResultRow[] } | ScreenResultRow[]>(
-      '/screen/results',
-      { params: { page: currentPage.value, page_size: pageSize, sort_by: sortKey.value, sort_dir: sortDir.value } },
-    )
-    const data = res.data
-    if (Array.isArray(data)) {
-      totalCount.value = data.length
-      return data
+    try {
+      const res = await apiClient.get<{ total?: number; items?: ScreenResultRow[] } | ScreenResultRow[]>(
+        '/screen/results',
+        { params: { page: 1, page_size: 10000 } },
+      )
+      const data = res.data
+      const items = Array.isArray(data) ? data : (data.items ?? [])
+      allResults.value = items
+      currentPage.value = 1
+      return items
+    } catch (e: any) {
+      allResults.value = []
+      const detail = e?.response?.data?.detail
+      throw new Error(typeof detail === 'string' ? detail : (e?.message ?? '加载选股结果失败'))
     }
-    totalCount.value = data.total ?? (data.items ?? []).length
-    return data.items ?? []
   })
 }
 
 function changePage(p: number) {
   currentPage.value = p
-  loadResults()
 }
 
 // ─── 导出 Excel ───────────────────────────────────────────────────────────────
@@ -442,6 +541,16 @@ onMounted(() => {
 .detail-panel {
   padding: 14px 20px 14px 40px;
   border-top: 1px solid #21262d;
+}
+.detail-panel-flex {
+  display: flex; gap: 20px; align-items: flex-start;
+}
+.detail-signals { flex: 0 0 280px; min-width: 200px; }
+.detail-chart { flex: 1; min-width: 0; }
+.kline-chart { width: 100%; height: 280px; }
+.chart-loading, .chart-error {
+  display: flex; align-items: center; justify-content: center;
+  height: 280px; color: #8b949e; font-size: 13px;
 }
 .detail-header {
   font-size: 13px; font-weight: 600; color: #8b949e;
