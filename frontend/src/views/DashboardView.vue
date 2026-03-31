@@ -4,13 +4,20 @@
 
     <!-- 指数卡片 -->
     <section class="index-cards" aria-label="大盘指数">
-      <div v-for="idx in indexCards" :key="idx.label" class="index-card">
-        <span class="idx-label">{{ idx.label }}</span>
-        <span class="idx-value">{{ idx.value.toFixed(2) }}</span>
-        <span class="idx-change" :class="idx.changePct >= 0 ? 'up' : 'down'">
-          {{ idx.changePct >= 0 ? '+' : '' }}{{ idx.changePct.toFixed(2) }}%
-        </span>
+      <div v-if="marketStore.loading" class="loading-text">加载大盘数据中...</div>
+      <div v-else-if="marketStore.error" class="error-banner-inline">
+        {{ marketStore.error }}
+        <button class="btn retry-btn" @click="marketStore.fetchOverview()">重试</button>
       </div>
+      <template v-else>
+        <div v-for="idx in indexCards" :key="idx.label" class="index-card">
+          <span class="idx-label">{{ idx.label }}</span>
+          <span class="idx-value">{{ idx.value.toFixed(2) }}</span>
+          <span class="idx-change" :class="idx.changePct >= 0 ? 'up' : 'down'">
+            {{ idx.changePct >= 0 ? '+' : '' }}{{ idx.changePct.toFixed(2) }}%
+          </span>
+        </div>
+      </template>
     </section>
 
     <!-- 市场情绪 -->
@@ -595,17 +602,26 @@ function connectWs() {
   } catch { /* WebSocket not available */ }
 }
 
+// ─── 图表 resize 处理 ────────────────────────────────────────────────────────
+
+function handleResize() {
+  chartInstance?.resize()
+  moneyFlowChartInstance?.resize()
+}
+
 // ─── 生命周期 ────────────────────────────────────────────────────────────────
 
 onMounted(async () => {
-  marketStore.fetchOverview()
-  loadSectors()
-  loadKline()
-  connectWs()
+  // 先初始化图表实例，再加载数据
   await nextTick()
   if (klineChartRef.value) {
     chartInstance = echarts.init(klineChartRef.value)
   }
+  marketStore.fetchOverview()
+  loadSectors()
+  loadKline()
+  connectWs()
+  window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
@@ -614,6 +630,7 @@ onUnmounted(() => {
   fundamentalsAbortController?.abort()
   moneyFlowAbortController?.abort()
   ws?.close()
+  window.removeEventListener('resize', handleResize)
 })
 </script>
 
@@ -730,4 +747,9 @@ onUnmounted(() => {
 .data-table th { color: #8b949e; font-weight: 500; background: #161b22; }
 .data-table td { color: #e6edf3; }
 .empty { text-align: center; color: #484f58; padding: 24px; }
+.loading-text { color: #8b949e; font-size: 14px; padding: 16px 0; }
+.error-banner-inline {
+  display: flex; align-items: center; gap: 12px;
+  color: #f85149; font-size: 14px; padding: 16px 0;
+}
 </style>

@@ -33,6 +33,8 @@ class StrategyTemplate(PGBase):
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     config: Mapped[dict] = mapped_column(JSONB, nullable=False)             # StrategyConfig 序列化
     is_active: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default=sa_text("false"))
+    enabled_modules: Mapped[list] = mapped_column(JSONB, nullable=False, server_default=sa_text("'[]'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
     )

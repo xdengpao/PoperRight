@@ -13,18 +13,43 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.v1.screen import _strategies
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+from app.core.database import get_pg_session
 from app.core.schemas import FactorCondition, ScreenType, SignalCategory, StrategyConfig
 from app.main import app
 from app.services.screener.screen_executor import ScreenExecutor
 
 
-@pytest.fixture(autouse=True)
-def _clear_strategies():
-    """Reset in-memory store before each test."""
-    _strategies.clear()
-    yield
-    _strategies.clear()
+def _build_pg_session():
+    """Build a mock PG session with an in-memory strategy store."""
+    store: list = []
+
+    async def mock_execute(stmt):
+        m = MagicMock()
+        m.scalars.return_value.all.return_value = store
+        if store:
+            m.scalar_one_or_none.return_value = store[-1]
+        else:
+            m.scalar_one_or_none.return_value = None
+        return m
+
+    def mock_add(entry):
+        entry.id = entry.id or uuid4()
+        entry.created_at = entry.created_at or datetime.now()
+        entry.updated_at = entry.updated_at or datetime.now()
+        entry.enabled_modules = entry.enabled_modules or []
+        entry.is_builtin = getattr(entry, "is_builtin", False)
+        store.append(entry)
+
+    session = AsyncMock()
+    session.execute = mock_execute
+    session.add = mock_add
+    session.flush = AsyncMock()
+    session.delete = AsyncMock()
+    return session
 
 
 @pytest.fixture
@@ -42,47 +67,53 @@ async def client():
 @pytest.mark.anyio
 async def test_create_select_add_module_full_chain(client: AsyncClient):
     """Full chain: create with 2 modules → GET verify 2 → PUT add 1 → GET verify 3."""
+    pg = _build_pg_session()
 
-    # Step 1: POST create strategy with 2 enabled modules
-    create_payload = {
-        "name": "dual-module-strategy",
-        "config": {"factors": [], "logic": "AND"},
-        "enabled_modules": ["ma_trend", "breakout"],
-    }
-    resp = await client.post("/api/v1/strategies", json=create_payload)
-    assert resp.status_code == 201
-    created = resp.json()
-    strategy_id = created["id"]
-    assert created["enabled_modules"] == ["ma_trend", "breakout"]
+    async def pg_dep():
+        yield pg
 
-    # Step 2: GET the strategy by id — simulate "selecting" it
-    resp = await client.get(f"/api/v1/strategies/{strategy_id}")
-    assert resp.status_code == 200
-    selected = resp.json()
-    assert len(selected["enabled_modules"]) == 2
+    app.dependency_overrides[get_pg_session] = pg_dep
+    try:
+        # Step 1: POST create strategy with 2 enabled modules
+        create_payload = {
+            "name": "dual-module-strategy",
+            "config": {"factors": [], "logic": "AND"},
+            "enabled_modules": ["ma_trend", "breakout"],
+        }
+        resp = await client.post("/api/v1/strategies", json=create_payload)
+        assert resp.status_code == 201
+        created = resp.json()
+        strategy_id = created["id"]
+        assert created["enabled_modules"] == ["ma_trend", "breakout"]
 
-    # Step 3: Panel visibility check — only ma_trend and breakout panels visible
-    visible_panels = set(selected["enabled_modules"])
-    assert visible_panels == {"ma_trend", "breakout"}
-    assert "indicator_params" not in visible_panels
-    assert "factor_editor" not in visible_panels
-    assert "volume_price" not in visible_panels
+        # Step 2: GET the strategy by id — simulate "selecting" it
+        resp = await client.get(f"/api/v1/strategies/{strategy_id}")
+        assert resp.status_code == 200
+        selected = resp.json()
+        assert len(selected["enabled_modules"]) == 2
 
-    # Step 4: PUT — "manage modules" adds indicator_params
-    resp = await client.put(
-        f"/api/v1/strategies/{strategy_id}",
-        json={"enabled_modules": ["ma_trend", "breakout", "indicator_params"]},
-    )
-    assert resp.status_code == 200
-    updated = resp.json()
-    assert len(updated["enabled_modules"]) == 3
+        # Step 3: Panel visibility check — only ma_trend and breakout panels visible
+        visible_panels = set(selected["enabled_modules"])
+        assert visible_panels == {"ma_trend", "breakout"}
+        assert "indicator_params" not in visible_panels
 
-    # Step 5: GET again — verify 3 modules
-    resp = await client.get(f"/api/v1/strategies/{strategy_id}")
-    assert resp.status_code == 200
-    final = resp.json()
-    assert len(final["enabled_modules"]) == 3
-    assert final["enabled_modules"] == ["ma_trend", "breakout", "indicator_params"]
+        # Step 4: PUT — "manage modules" adds indicator_params
+        resp = await client.put(
+            f"/api/v1/strategies/{strategy_id}",
+            json={"enabled_modules": ["ma_trend", "breakout", "indicator_params"]},
+        )
+        assert resp.status_code == 200
+        updated = resp.json()
+        assert len(updated["enabled_modules"]) == 3
+
+        # Step 5: GET again — verify 3 modules
+        resp = await client.get(f"/api/v1/strategies/{strategy_id}")
+        assert resp.status_code == 200
+        final = resp.json()
+        assert len(final["enabled_modules"]) == 3
+        assert final["enabled_modules"] == ["ma_trend", "breakout", "indicator_params"]
+    finally:
+        app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -93,18 +124,25 @@ async def test_create_select_add_module_full_chain(client: AsyncClient):
 @pytest.mark.anyio
 async def test_empty_modules_strategy_returns_empty_screen_result(client: AsyncClient):
     """Strategy with enabled_modules=[] should produce empty screen results."""
+    pg = _build_pg_session()
 
-    # Create strategy with zero modules via API
-    resp = await client.post(
-        "/api/v1/strategies",
-        json={
-            "name": "empty-strategy",
-            "config": {"factors": [], "logic": "AND"},
-            "enabled_modules": [],
-        },
-    )
-    assert resp.status_code == 201
-    assert resp.json()["enabled_modules"] == []
+    async def pg_dep():
+        yield pg
+
+    app.dependency_overrides[get_pg_session] = pg_dep
+    try:
+        resp = await client.post(
+            "/api/v1/strategies",
+            json={
+                "name": "empty-strategy",
+                "config": {"factors": [], "logic": "AND"},
+                "enabled_modules": [],
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["enabled_modules"] == []
+    finally:
+        app.dependency_overrides.clear()
 
     # Verify via ScreenExecutor directly (no stock data dependency)
     config = StrategyConfig()

@@ -87,23 +87,30 @@ async def run_backtest(body: BacktestRunRequest) -> dict:
 
 @router.get("/{backtest_id}/result")
 async def get_backtest_result(backtest_id: UUID) -> dict:
-    """查询回测结果。"""
+    """查询回测结果（从 Redis Celery result backend 读取）。"""
+    from celery.result import AsyncResult
+    from app.core.celery_app import celery_app as _celery
+
+    # 尝试从 Redis 读取以 run_id 为键的回测结果
+    from app.core.redis_client import cache_get
+    import json
+
+    cache_key = f"backtest:result:{backtest_id}"
+    cached = await cache_get(cache_key)
+    if cached:
+        data = json.loads(cached)
+        return {
+            "id": str(backtest_id),
+            "status": data.get("status", "DONE"),
+            **data.get("result", {}),
+            "equity_curve": data.get("result", {}).get("equity_curve", []),
+            "trade_records": data.get("result", {}).get("trade_records", []),
+        }
+
+    # 回退：返回 PENDING 状态让前端继续轮询
     return {
         "id": str(backtest_id),
-        "status": "DONE",
-        "result": {
-            "annual_return": 0.0,
-            "total_return": 0.0,
-            "win_rate": 0.0,
-            "profit_loss_ratio": 0.0,
-            "max_drawdown": 0.0,
-            "sharpe_ratio": 0.0,
-            "calmar_ratio": 0.0,
-            "total_trades": 0,
-            "avg_holding_days": 0.0,
-            "equity_curve": [],
-            "trade_records": [],
-        },
+        "status": "PENDING",
     }
 
 

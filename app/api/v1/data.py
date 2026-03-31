@@ -174,7 +174,7 @@ async def get_sources_health() -> DataSourceHealthResponse:
     akshare = AkShareAdapter()
     now = datetime.now().isoformat()
 
-    async def _check_with_retry(name: str, adapter, retries: int = 1, timeout: float = 12.0) -> DataSourceStatus:
+    async def _check_with_retry(name: str, adapter, retries: int = 2, timeout: float = 20.0) -> DataSourceStatus:
         """对单个数据源做带超时和重试的健康检查。"""
         last_err: str = ""
         for attempt in range(retries):
@@ -191,7 +191,7 @@ async def get_sources_health() -> DataSourceHealthResponse:
                 logger.warning("%s health_check 第 %d 次失败: %s", name, attempt + 1, exc)
             # 重试前短暂等待
             if attempt < retries - 1:
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
 
         logger.error("%s 健康检查最终失败: %s", name, last_err)
         return DataSourceStatus(name=name, status="disconnected", checked_at=now)
@@ -346,8 +346,8 @@ async def get_stocks(
 async def get_market_overview() -> dict:
     """查询大盘概况（指数、涨跌家数、市场情绪等）。
 
-    优先从 Redis 缓存读取（TTL 60s），缓存未命中时通过 Tushare 获取实时指数数据，
-    涨跌家数通过 AkShare stock_zh_a_spot_em 统计。
+    优先从 Redis 缓存读取（TTL 60s），缓存未命中时尝试 AkShare（带超时），
+    AkShare 不可用时从 TimescaleDB 读取最新指数 K 线数据作为降级。
     """
     import asyncio
     import json as _json
@@ -363,13 +363,6 @@ async def get_market_overview() -> dict:
 
     today = date.today()
 
-    # 通过 AkShare sina 接口获取三大指数实时数据
-    index_map = {
-        "sh000001": ("sh_index", "sh_change_pct"),
-        "sz399001": ("sz_index", "sz_change_pct"),
-        "sz399006": ("cyb_index", "cyb_change_pct"),
-    }
-
     result: dict = {
         "date": today.isoformat(),
         "sh_index": 0, "sh_change_pct": 0,
@@ -380,11 +373,57 @@ async def get_market_overview() -> dict:
         "market_sentiment": "NORMAL",
     }
 
-    # 获取指数数据
+    # 尝试从 TimescaleDB 读取最新指数数据（快速降级路径）
+    async def _fetch_from_db() -> bool:
+        """从 TimescaleDB 读取指数最新 K 线，成功返回 True。"""
+        try:
+            from sqlalchemy import select as sa_select
+            from app.core.database import AsyncSessionTS
+            from app.models.kline import Kline
+
+            index_map_db = {
+                "000001.SH": ("sh_index", "sh_change_pct"),
+                "399001.SZ": ("sz_index", "sz_change_pct"),
+                "399006.SZ": ("cyb_index", "cyb_change_pct"),
+            }
+            async with AsyncSessionTS() as session:
+                for sym, (idx_field, pct_field) in index_map_db.items():
+                    stmt = (
+                        sa_select(Kline.close, Kline.open)
+                        .where(Kline.symbol == sym, Kline.freq == "1d")
+                        .order_by(Kline.time.desc())
+                        .limit(1)
+                    )
+                    row = (await session.execute(stmt)).first()
+                    if row and row[0]:
+                        close_val = float(row[0])
+                        open_val = float(row[1]) if row[1] else close_val
+                        result[idx_field] = close_val
+                        if open_val > 0:
+                            result[pct_field] = round((close_val - open_val) / open_val * 100, 2)
+            return result["sh_index"] > 0
+        except Exception as exc:
+            logger.warning("从 TimescaleDB 读取指数数据失败: %s", exc)
+            return False
+
+    # 先尝试快速的数据库路径
+    db_ok = await _fetch_from_db()
+
+    # 如果数据库有数据，异步尝试 AkShare 更新（不阻塞响应）
+    # 如果数据库没数据，同步等待 AkShare（带超时）
+    index_map = {
+        "sh000001": ("sh_index", "sh_change_pct"),
+        "sz399001": ("sz_index", "sz_change_pct"),
+        "sz399006": ("cyb_index", "cyb_change_pct"),
+    }
+
     async def _fetch_indices() -> None:
         try:
             import akshare as _ak
-            df = await asyncio.to_thread(_ak.stock_zh_index_spot_sina)
+            df = await asyncio.wait_for(
+                asyncio.to_thread(_ak.stock_zh_index_spot_sina),
+                timeout=8.0,
+            )
             if df is None or df.empty:
                 return
             for _, row in df.iterrows():
@@ -393,27 +432,37 @@ async def get_market_overview() -> dict:
                     idx_field, pct_field = index_map[code]
                     result[idx_field] = float(row.get("最新价", 0) or 0)
                     result[pct_field] = float(row.get("涨跌幅", 0) or 0)
-        except Exception as exc:
+        except (asyncio.TimeoutError, Exception) as exc:
             logger.warning("获取指数数据失败: %s", exc)
 
-    tasks = [_fetch_indices()]
-
-    # 涨跌家数统计（通过 AkShare，较慢所以也并发）
     async def _fetch_sentiment() -> None:
         try:
             import akshare as _ak
-            df = await asyncio.to_thread(_ak.stock_zh_a_spot_em)
+            df = await asyncio.wait_for(
+                asyncio.to_thread(_ak.stock_zh_a_spot_em),
+                timeout=12.0,
+            )
             if df is not None and not df.empty and "涨跌幅" in df.columns:
                 pct = df["涨跌幅"]
                 result["advance_count"] = int((pct > 0).sum())
                 result["decline_count"] = int((pct < 0).sum())
                 result["limit_up_count"] = int((pct >= 9.9).sum())
                 result["limit_down_count"] = int((pct <= -9.9).sum())
-        except Exception as exc:
+        except (asyncio.TimeoutError, Exception) as exc:
             logger.warning("获取涨跌家数失败: %s", exc)
 
-    tasks.append(_fetch_sentiment())
-    await asyncio.gather(*tasks)
+    if not db_ok:
+        # 数据库没数据，必须等 AkShare
+        await asyncio.gather(_fetch_indices(), _fetch_sentiment())
+    else:
+        # 数据库有数据，AkShare 作为增强（不阻塞）
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(_fetch_indices(), _fetch_sentiment()),
+                timeout=10.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("AkShare 增强数据超时，使用数据库数据")
 
     # 市场情绪判断
     if result["limit_down_count"] > 50 or result["decline_count"] > result["advance_count"] * 2:
@@ -447,7 +496,10 @@ async def get_market_sectors() -> list:
 
     try:
         import akshare as _ak
-        df = await asyncio.to_thread(_ak.stock_board_industry_name_em)
+        df = await asyncio.wait_for(
+            asyncio.to_thread(_ak.stock_board_industry_name_em),
+            timeout=15.0,
+        )
         if df is None or df.empty:
             return []
 

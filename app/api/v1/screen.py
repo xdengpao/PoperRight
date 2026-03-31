@@ -20,16 +20,22 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
+from sqlalchemy import select, func, update as sa_update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import AsyncSessionPG, AsyncSessionTS
+from app.core.database import AsyncSessionPG, AsyncSessionTS, get_pg_session
 from app.core.redis_client import cache_get, cache_set, get_redis
 from app.core.schemas import ScreenType, StrategyConfig
+from app.models.strategy import StrategyTemplate
 from app.services.screener.screen_data_provider import ScreenDataProvider
 from app.services.screener.screen_executor import ScreenExecutor
 
 router = APIRouter(tags=["选股"])
 
 logger = logging.getLogger(__name__)
+
+# Placeholder user_id (real auth would inject this)
+_DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 
 # ---------------------------------------------------------------------------
@@ -143,51 +149,7 @@ class StrategyTemplateUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 策略存储（Redis 持久化，重启不丢失）
-# ---------------------------------------------------------------------------
-
-_strategies: dict[str, dict] = {}  # id -> strategy dict
-_STRATEGIES_REDIS_KEY = "strategies:all"
-
-
-def _sync_strategies_to_redis() -> None:
-    """将内存策略同步写入 Redis（同步调用，供非 async 上下文使用）。"""
-    import asyncio
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                pool.submit(asyncio.run, cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30)).result()
-        else:
-            loop.run_until_complete(cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30))
-    except RuntimeError:
-        asyncio.run(cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30))
-
-
-async def _async_sync_strategies_to_redis() -> None:
-    """将内存策略异步写入 Redis。"""
-    await cache_set(_STRATEGIES_REDIS_KEY, json.dumps(_strategies), ex=86400 * 30)
-
-
-async def _load_strategies_from_redis() -> None:
-    """从 Redis 加载策略到内存，不存在则用内置模板初始化。"""
-    global _strategies
-    raw = await cache_get(_STRATEGIES_REDIS_KEY)
-    if raw:
-        try:
-            _strategies = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            _strategies = {}
-    # 确保内置模板存在
-    for tpl in _BUILTIN_TEMPLATES:
-        if tpl["id"] not in _strategies:
-            _strategies[tpl["id"]] = dict(tpl)
-    await _async_sync_strategies_to_redis()
-
-
-# ---------------------------------------------------------------------------
-# 内置策略模板（系统预置，可编辑）
+# 内置策略模板（系统预置，首次启动时 seed 到数据库）
 # ---------------------------------------------------------------------------
 
 _BUILTIN_TEMPLATES: list[dict] = [
@@ -198,21 +160,12 @@ _BUILTIN_TEMPLATES: list[dict] = [
         "is_builtin": True,
         "enabled_modules": ["ma_trend"],
         "config": {
-            "factors": [],
-            "logic": "AND",
-            "weights": {},
+            "factors": [], "logic": "AND", "weights": {},
             "ma_periods": [5, 10, 20, 60, 120, 250],
-            "ma_trend": {
-                "ma_periods": [5, 10, 20, 60, 120],
-                "slope_threshold": 0.0,
-                "trend_score_threshold": 80,
-                "support_ma_lines": [20, 60],
-            },
-            "indicator_params": {},
-            "breakout": {},
-            "volume_price": {},
+            "ma_trend": {"ma_periods": [5, 10, 20, 60, 120], "slope_threshold": 0.0,
+                         "trend_score_threshold": 80, "support_ma_lines": [20, 60]},
+            "indicator_params": {}, "breakout": {}, "volume_price": {},
         },
-        "created_at": "2026-01-01T00:00:00",
     },
     {
         "id": "00000000-0000-0000-0000-000000000002",
@@ -221,27 +174,15 @@ _BUILTIN_TEMPLATES: list[dict] = [
         "is_builtin": True,
         "enabled_modules": ["indicator_params"],
         "config": {
-            "factors": [],
-            "logic": "AND",
-            "weights": {},
+            "factors": [], "logic": "AND", "weights": {},
             "ma_periods": [5, 10, 20, 60, 120, 250],
             "ma_trend": {},
-            "indicator_params": {
-                "macd_fast": 12,
-                "macd_slow": 26,
-                "macd_signal": 9,
-                "rsi_period": 14,
-                "rsi_lower": 50,
-                "rsi_upper": 80,
-                "boll_period": 20,
-                "boll_std_dev": 2.0,
-                "dma_short": 10,
-                "dma_long": 50,
-            },
-            "breakout": {},
-            "volume_price": {},
+            "indicator_params": {"macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                                 "rsi_period": 14, "rsi_lower": 50, "rsi_upper": 80,
+                                 "boll_period": 20, "boll_std_dev": 2.0,
+                                 "dma_short": 10, "dma_long": 50},
+            "breakout": {}, "volume_price": {},
         },
-        "created_at": "2026-01-01T00:00:01",
     },
     {
         "id": "00000000-0000-0000-0000-000000000003",
@@ -250,22 +191,14 @@ _BUILTIN_TEMPLATES: list[dict] = [
         "is_builtin": True,
         "enabled_modules": ["breakout"],
         "config": {
-            "factors": [],
-            "logic": "AND",
-            "weights": {},
+            "factors": [], "logic": "AND", "weights": {},
             "ma_periods": [5, 10, 20, 60, 120, 250],
-            "ma_trend": {},
-            "indicator_params": {},
-            "breakout": {
-                "box_breakout": True,
-                "high_breakout": True,
-                "trendline_breakout": True,
-                "volume_ratio_threshold": 1.5,
-                "confirm_days": 1,
-            },
+            "ma_trend": {}, "indicator_params": {},
+            "breakout": {"box_breakout": True, "high_breakout": True,
+                         "trendline_breakout": True, "volume_ratio_threshold": 1.5,
+                         "confirm_days": 1},
             "volume_price": {},
         },
-        "created_at": "2026-01-01T00:00:02",
     },
     {
         "id": "00000000-0000-0000-0000-000000000004",
@@ -274,38 +207,19 @@ _BUILTIN_TEMPLATES: list[dict] = [
         "is_builtin": True,
         "enabled_modules": ["ma_trend", "indicator_params", "breakout"],
         "config": {
-            "factors": [],
-            "logic": "AND",
-            "weights": {},
+            "factors": [], "logic": "AND", "weights": {},
             "ma_periods": [5, 10, 20, 60, 120, 250],
-            "ma_trend": {
-                "ma_periods": [5, 10, 20, 60, 120],
-                "slope_threshold": 0.0,
-                "trend_score_threshold": 80,
-                "support_ma_lines": [20, 60],
-            },
-            "indicator_params": {
-                "macd_fast": 12,
-                "macd_slow": 26,
-                "macd_signal": 9,
-                "boll_period": 20,
-                "boll_std_dev": 2.0,
-                "rsi_period": 14,
-                "rsi_lower": 50,
-                "rsi_upper": 80,
-                "dma_short": 10,
-                "dma_long": 50,
-            },
-            "breakout": {
-                "box_breakout": True,
-                "high_breakout": True,
-                "trendline_breakout": True,
-                "volume_ratio_threshold": 1.5,
-                "confirm_days": 1,
-            },
+            "ma_trend": {"ma_periods": [5, 10, 20, 60, 120], "slope_threshold": 0.0,
+                         "trend_score_threshold": 80, "support_ma_lines": [20, 60]},
+            "indicator_params": {"macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                                 "boll_period": 20, "boll_std_dev": 2.0,
+                                 "rsi_period": 14, "rsi_lower": 50, "rsi_upper": 80,
+                                 "dma_short": 10, "dma_long": 50},
+            "breakout": {"box_breakout": True, "high_breakout": True,
+                         "trendline_breakout": True, "volume_ratio_threshold": 1.5,
+                         "confirm_days": 1},
             "volume_price": {},
         },
-        "created_at": "2026-01-01T00:00:03",
     },
     {
         "id": "00000000-0000-0000-0000-000000000005",
@@ -319,38 +233,58 @@ _BUILTIN_TEMPLATES: list[dict] = [
                 {"factor_name": "roe", "operator": ">=", "threshold": 0.08, "params": {}},
                 {"factor_name": "market_cap", "operator": ">=", "threshold": 5000000000.0, "params": {}},
             ],
-            "logic": "AND",
-            "weights": {},
+            "logic": "AND", "weights": {},
             "ma_periods": [5, 10, 20, 60, 120, 250],
-            "ma_trend": {
-                "ma_periods": [5, 10, 20, 60, 120],
-                "slope_threshold": 0.0,
-                "trend_score_threshold": 80,
-                "support_ma_lines": [20, 60],
-            },
-            "indicator_params": {},
-            "breakout": {},
-            "volume_price": {},
+            "ma_trend": {"ma_periods": [5, 10, 20, 60, 120], "slope_threshold": 0.0,
+                         "trend_score_threshold": 80, "support_ma_lines": [20, 60]},
+            "indicator_params": {}, "breakout": {}, "volume_price": {},
         },
-        "created_at": "2026-01-01T00:00:04",
     },
 ]
 
 
-def _seed_builtin_templates() -> None:
-    """将内置策略模板注入内存存储（仅在尚未存在时）。"""
+def _strategy_to_dict(s: StrategyTemplate) -> dict:
+    """将 ORM 对象转为 API 响应 dict。"""
+    return {
+        "id": str(s.id),
+        "name": s.name or "",
+        "config": s.config or {},
+        "is_active": s.is_active,
+        "is_builtin": s.is_builtin,
+        "enabled_modules": s.enabled_modules or [],
+        "created_at": s.created_at.isoformat() if s.created_at else "",
+    }
+
+
+async def _seed_builtin_templates(session: AsyncSession) -> None:
+    """将内置策略模板写入数据库（仅在尚未存在时）。"""
     for tpl in _BUILTIN_TEMPLATES:
-        if tpl["id"] not in _strategies:
-            _strategies[tpl["id"]] = dict(tpl)
-
-
-_seed_builtin_templates()
+        existing = await session.execute(
+            select(StrategyTemplate).where(StrategyTemplate.id == UUID(tpl["id"]))
+        )
+        if existing.scalar_one_or_none() is None:
+            entry = StrategyTemplate(
+                id=UUID(tpl["id"]),
+                user_id=_DEFAULT_USER_ID,
+                name=tpl["name"],
+                config=tpl["config"],
+                is_active=tpl["is_active"],
+                is_builtin=tpl["is_builtin"],
+                enabled_modules=tpl["enabled_modules"],
+            )
+            session.add(entry)
+    await session.flush()
 
 
 @router.on_event("startup")
-async def _startup_load_strategies():
-    """服务启动时从 Redis 加载策略模板。"""
-    await _load_strategies_from_redis()
+async def _startup_seed_strategies():
+    """服务启动时将内置策略模板 seed 到数据库。"""
+    try:
+        async with AsyncSessionPG() as session:
+            await _seed_builtin_templates(session)
+            await session.commit()
+    except Exception:
+        logger.warning("内置策略模板 seed 失败（数据库可能未就绪）", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -378,19 +312,15 @@ _REDIS_KEY = "screen:eod:last_run"
 
 def _next_weekday_1530(now: datetime) -> datetime:
     """计算下一个工作日（周一至周五）15:30 CST 时间。"""
-    # 确保 now 带时区
     if now.tzinfo is None:
         now = now.replace(tzinfo=_CST)
     else:
         now = now.astimezone(_CST)
-
     candidate = now.replace(hour=_EOD_HOUR, minute=_EOD_MINUTE, second=0, microsecond=0)
-    # 如果今天还没到 15:30 且是工作日，就是今天
     if now < candidate and candidate.weekday() < 5:
         return candidate
-    # 否则找下一个工作日
     candidate += timedelta(days=1)
-    while candidate.weekday() >= 5:  # 5=Saturday, 6=Sunday
+    while candidate.weekday() >= 5:
         candidate += timedelta(days=1)
     return candidate.replace(hour=_EOD_HOUR, minute=_EOD_MINUTE, second=0, microsecond=0)
 
@@ -402,38 +332,28 @@ def _next_weekday_1530(now: datetime) -> datetime:
 
 @router.post("/screen/run")
 async def run_screen(body: ScreenRunRequest) -> dict:
-    """
-    执行选股（盘后/实时）。
-
-    流程：
-    1. 加载策略配置（从 strategy_id 或 strategy_config）
-    2. 从本地数据库查询全市场股票数据
-    3. 实例化 ScreenExecutor 执行选股
-    4. 返回选股结果
-
-    错误处理：
-    - strategy_id 不存在 → HTTP 404
-    - 本地数据库无行情数据 → 返回空结果（items=[], is_complete=true）
-    """
-    # 1. 加载策略配置
+    """执行选股（盘后/实时）。"""
     strategy_id_str: str | None = None
     config_dict: dict | None = None
     enabled_modules: list[str] | None = None
 
     if body.strategy_id is not None:
-        sid = str(body.strategy_id)
-        if sid not in _strategies:
+        sid = body.strategy_id
+        async with AsyncSessionPG() as session:
+            result = await session.execute(
+                select(StrategyTemplate).where(StrategyTemplate.id == sid)
+            )
+            strategy = result.scalar_one_or_none()
+        if strategy is None:
             raise HTTPException(status_code=404, detail="策略不存在")
-        strategy = _strategies[sid]
-        strategy_id_str = sid
-        config_dict = strategy.get("config", {})
-        enabled_modules = strategy.get("enabled_modules", [])
+        strategy_id_str = str(sid)
+        config_dict = strategy.config or {}
+        enabled_modules = strategy.enabled_modules or []
     elif body.strategy_config is not None:
         strategy_id_str = str(uuid4())
         config_dict = body.strategy_config.model_dump()
-        enabled_modules = None  # 无 strategy_id 时视为全部启用
+        enabled_modules = None
     else:
-        # 既无 strategy_id 也无 strategy_config，返回空结果
         return {
             "strategy_id": str(uuid4()),
             "screen_type": body.screen_type,
@@ -442,7 +362,6 @@ async def run_screen(body: ScreenRunRequest) -> dict:
             "is_complete": True,
         }
 
-    # 解析策略配置
     strategy_config = StrategyConfig.from_dict(config_dict)
 
     logger.info(
@@ -450,30 +369,23 @@ async def run_screen(body: ScreenRunRequest) -> dict:
         strategy_id_str, enabled_modules, len(strategy_config.factors),
     )
 
-    # 2. 从本地数据库查询股票数据
     async with AsyncSessionPG() as pg_session, AsyncSessionTS() as ts_session:
         provider = ScreenDataProvider(
-            pg_session=pg_session,
-            ts_session=ts_session,
-            strategy_config=config_dict,
+            pg_session=pg_session, ts_session=ts_session, strategy_config=config_dict,
         )
         stocks_data = await provider.load_screen_data()
 
     logger.info("数据加载完成: stocks_data 共 %d 只股票", len(stocks_data))
 
-    # 抽样输出第一只股票的因子键，帮助诊断
     if stocks_data:
         sample_sym = next(iter(stocks_data))
         sample_data = stocks_data[sample_sym]
         derived_keys = ["ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout",
                         "turnover_check", "money_flow", "large_order"]
         sample_factors = {k: sample_data.get(k, "MISSING") for k in derived_keys}
-        logger.info(
-            "抽样股票 %s 派生因子: %s, bars数量(closes): %d",
-            sample_sym, sample_factors, len(sample_data.get("closes", [])),
-        )
+        logger.info("抽样股票 %s 派生因子: %s, bars数量(closes): %d",
+                     sample_sym, sample_factors, len(sample_data.get("closes", [])))
 
-    # 3. 无行情数据时返回空结果（需求 27.12）
     if not stocks_data:
         return {
             "strategy_id": strategy_id_str,
@@ -483,17 +395,9 @@ async def run_screen(body: ScreenRunRequest) -> dict:
             "is_complete": True,
         }
 
-    # 4. 执行选股
     executor = ScreenExecutor(
-        strategy_config=strategy_config,
-        strategy_id=strategy_id_str,
-        enabled_modules=enabled_modules,
-        raw_config=config_dict,
-    )
-
-    logger.info(
-        "ScreenExecutor 初始化: enabled_modules=%s, factor_editor启用=%s",
-        executor._enabled_modules, executor._is_module_enabled("factor_editor"),
+        strategy_config=strategy_config, strategy_id=strategy_id_str,
+        enabled_modules=enabled_modules, raw_config=config_dict,
     )
 
     screen_type = ScreenType(body.screen_type)
@@ -502,21 +406,8 @@ async def run_screen(body: ScreenRunRequest) -> dict:
     else:
         result = executor.run_realtime_screen(stocks_data)
 
-    logger.info(
-        "选股完成: 共 %d 只股票入选, screen_type=%s",
-        len(result.items), result.screen_type.value,
-    )
-    if result.items:
-        for item in result.items[:3]:
-            logger.info(
-                "  入选: %s, trend_score=%.1f, signals=%s",
-                item.symbol, item.trend_score,
-                [(s.category.value, s.label) for s in item.signals],
-            )
-    else:
-        logger.warning("选股结果为空 — 无股票满足筛选条件")
+    logger.info("选股完成: 共 %d 只股票入选", len(result.items))
 
-    # 5. 缓存结果到 Redis（供 GET /screen/results 查询）
     screen_time_str = result.screen_time.isoformat()
     response = {
         "strategy_id": str(result.strategy_id),
@@ -529,14 +420,8 @@ async def run_screen(body: ScreenRunRequest) -> dict:
                 "ref_buy_price": float(item.ref_buy_price),
                 "trend_score": item.trend_score,
                 "risk_level": item.risk_level.value,
-                "signals": [
-                    {
-                        "category": s.category.value,
-                        "label": s.label,
-                        "is_fake_breakout": s.is_fake_breakout,
-                    }
-                    for s in item.signals
-                ],
+                "signals": [{"category": s.category.value, "label": s.label,
+                             "is_fake_breakout": s.is_fake_breakout} for s in item.signals],
                 "has_fake_breakout": item.has_fake_breakout,
                 "screen_time": screen_time_str,
             }
@@ -545,10 +430,8 @@ async def run_screen(body: ScreenRunRequest) -> dict:
         "is_complete": result.is_complete,
     }
 
-    # 缓存到 Redis，24 小时过期
     cache_key = f"screen:results:{strategy_id_str}"
     await cache_set(cache_key, json.dumps(response), ex=86400)
-    # 同时缓存最新一次结果的 key，方便无参查询
     await cache_set("screen:results:latest", json.dumps(response), ex=86400)
 
     return response
@@ -558,18 +441,13 @@ async def run_screen(body: ScreenRunRequest) -> dict:
 async def get_screen_results(
     strategy_id: UUID | None = Query(None),
     screen_type: str | None = Query(None),
-    sort_by: str = Query("trend_score", description="排序字段: trend_score, ref_buy_price, symbol, risk_level"),
-    sort_dir: str = Query("desc", description="排序方向: asc, desc"),
+    sort_by: str = Query("trend_score"),
+    sort_dir: str = Query("desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=10000),
 ) -> dict:
-    """查询选股结果（从 Redis 缓存读取最近一次执行结果）。"""
-    # 优先按 strategy_id 查询，否则取最新结果
-    if strategy_id:
-        cache_key = f"screen:results:{strategy_id}"
-    else:
-        cache_key = "screen:results:latest"
-
+    """查询选股结果（从 Redis 缓存读取）。"""
+    cache_key = f"screen:results:{strategy_id}" if strategy_id else "screen:results:latest"
     raw = await cache_get(cache_key)
     if not raw:
         return {"total": 0, "page": page, "page_size": page_size, "items": []}
@@ -577,11 +455,9 @@ async def get_screen_results(
     data = json.loads(raw)
     all_items = data.get("items", [])
 
-    # 按 screen_type 过滤
     if screen_type and data.get("screen_type") != screen_type:
         return {"total": 0, "page": page, "page_size": page_size, "items": []}
 
-    # 全局排序（分页前）
     _RISK_ORDER = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
     reverse = sort_dir.lower() != "asc"
     if sort_by == "risk_level":
@@ -591,19 +467,13 @@ async def get_screen_results(
     elif sort_by == "symbol":
         all_items.sort(key=lambda x: x.get("symbol", ""), reverse=reverse)
 
-    # 分页
     total = len(all_items)
     start = (page - 1) * page_size
-    end = start + page_size
-    paged_items = all_items[start:end]
+    paged_items = all_items[start:start + page_size]
 
     return {
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": paged_items,
-        "strategy_id": data.get("strategy_id"),
-        "screen_type": data.get("screen_type"),
+        "total": total, "page": page, "page_size": page_size, "items": paged_items,
+        "strategy_id": data.get("strategy_id"), "screen_type": data.get("screen_type"),
         "screen_time": data.get("screen_time"),
     }
 
@@ -611,28 +481,18 @@ async def get_screen_results(
 @router.get("/screen/export")
 async def export_screen_results(
     strategy_id: UUID | None = Query(None),
-    format: str = Query("xlsx", description="导出格式: xlsx/csv"),
+    format: str = Query("xlsx"),
 ) -> dict:
-    """导出选股结果为 Excel/CSV（stub：返回下载链接占位）。"""
+    """导出选股结果（stub）。"""
     return {"download_url": f"/api/v1/screen/export/file?format={format}", "status": "pending"}
 
 
 @router.get("/screen/schedule", response_model=EodScheduleStatus)
-async def get_eod_schedule_status(
-    redis: Redis = Depends(get_redis),
-) -> EodScheduleStatus:
-    """查询盘后选股调度状态（需求 21.14）。
-
-    - next_run_at：下一个工作日 15:30 CST
-    - last_run_at / last_run_duration_ms / last_run_result_count：从 Redis key
-      `screen:eod:last_run` 读取，不存在时返回 null
-    """
+async def get_eod_schedule_status(redis: Redis = Depends(get_redis)) -> EodScheduleStatus:
+    """查询盘后选股调度状态。"""
     now = datetime.now(tz=_CST)
     next_run_at = _next_weekday_1530(now)
-
-    last_run_at: datetime | None = None
-    last_run_duration_ms: int | None = None
-    last_run_result_count: int | None = None
+    last_run_at = last_run_duration_ms = last_run_result_count = None
 
     raw = await redis.get(_REDIS_KEY)
     if raw:
@@ -643,18 +503,16 @@ async def get_eod_schedule_status(
             last_run_duration_ms = data.get("duration_ms")
             last_run_result_count = data.get("result_count")
         except (json.JSONDecodeError, ValueError):
-            pass  # 数据损坏时忽略，返回 null
+            pass
 
     return EodScheduleStatus(
-        next_run_at=next_run_at,
-        last_run_at=last_run_at,
-        last_run_duration_ms=last_run_duration_ms,
-        last_run_result_count=last_run_result_count,
+        next_run_at=next_run_at, last_run_at=last_run_at,
+        last_run_duration_ms=last_run_duration_ms, last_run_result_count=last_run_result_count,
     )
 
 
 # ---------------------------------------------------------------------------
-# 策略模板 CRUD
+# 策略模板 CRUD（PostgreSQL 持久化）
 # ---------------------------------------------------------------------------
 
 
@@ -662,79 +520,134 @@ async def get_eod_schedule_status(
 async def list_strategies(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    pg_session: AsyncSession = Depends(get_pg_session),
 ) -> list:
     """查询当前用户的策略模板列表。"""
-    items = sorted(_strategies.values(), key=lambda s: s.get("created_at", ""), reverse=True)
-    for item in items:
-        item.setdefault("enabled_modules", [])
-    return items
+    try:
+        stmt = (
+            select(StrategyTemplate)
+            .where(StrategyTemplate.user_id == _DEFAULT_USER_ID)
+            .order_by(StrategyTemplate.created_at.desc())
+        )
+        result = await pg_session.execute(stmt)
+        rows = result.scalars().all()
+        return [_strategy_to_dict(s) for s in rows]
+    except Exception:
+        logger.warning("数据库查询策略列表失败，返回内置模板", exc_info=True)
+        return [
+            {
+                "id": tpl["id"],
+                "name": tpl["name"],
+                "config": tpl["config"],
+                "is_active": tpl["is_active"],
+                "is_builtin": tpl["is_builtin"],
+                "enabled_modules": tpl["enabled_modules"],
+                "created_at": "2026-01-01T00:00:00",
+            }
+            for tpl in _BUILTIN_TEMPLATES
+        ]
 
 
 @router.post("/strategies", status_code=201)
-async def create_strategy(body: StrategyTemplateIn) -> dict:
+async def create_strategy(
+    body: StrategyTemplateIn,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
     """创建策略模板。"""
-    sid = str(uuid4())
-    strategy = {
-        "id": sid,
-        "name": body.name,
-        "config": body.config.model_dump(),
-        "is_active": body.is_active,
-        "enabled_modules": body.enabled_modules,
-        "created_at": datetime.now().isoformat(),
-    }
-    _strategies[sid] = strategy
-    await _async_sync_strategies_to_redis()
-    return strategy
+    try:
+        entry = StrategyTemplate(
+            user_id=_DEFAULT_USER_ID,
+            name=body.name,
+            config=body.config.model_dump(),
+            is_active=body.is_active,
+            is_builtin=False,
+            enabled_modules=body.enabled_modules,
+        )
+        pg_session.add(entry)
+        await pg_session.flush()
+        return _strategy_to_dict(entry)
+    except Exception:
+        logger.warning("数据库创建策略失败", exc_info=True)
+        raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试")
 
 
 @router.get("/strategies/{strategy_id}")
-async def get_strategy(strategy_id: UUID) -> dict:
+async def get_strategy(
+    strategy_id: UUID,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
     """查询单个策略模板详情。"""
-    sid = str(strategy_id)
-    if sid not in _strategies:
+    result = await pg_session.execute(
+        select(StrategyTemplate).where(StrategyTemplate.id == strategy_id)
+    )
+    s = result.scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="策略不存在")
-    s = _strategies[sid]
-    s.setdefault("enabled_modules", [])
-    return s
+    return _strategy_to_dict(s)
 
 
 @router.put("/strategies/{strategy_id}")
-async def update_strategy(strategy_id: UUID, body: StrategyTemplateUpdate) -> dict:
+async def update_strategy(
+    strategy_id: UUID,
+    body: StrategyTemplateUpdate,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
     """更新策略模板。"""
-    sid = str(strategy_id)
-    if sid not in _strategies:
+    result = await pg_session.execute(
+        select(StrategyTemplate).where(StrategyTemplate.id == strategy_id)
+    )
+    s = result.scalar_one_or_none()
+    if s is None:
         raise HTTPException(status_code=404, detail="策略不存在")
-    s = _strategies[sid]
     if body.name is not None:
-        s["name"] = body.name
+        s.name = body.name
     if body.config is not None:
-        s["config"] = body.config.model_dump()
+        s.config = body.config.model_dump()
     if body.is_active is not None:
-        s["is_active"] = body.is_active
+        s.is_active = body.is_active
     if body.enabled_modules is not None:
-        s["enabled_modules"] = body.enabled_modules
-    s.setdefault("enabled_modules", [])
-    await _async_sync_strategies_to_redis()
-    return s
+        s.enabled_modules = body.enabled_modules
+    s.updated_at = datetime.now()
+    await pg_session.flush()
+    return _strategy_to_dict(s)
 
 
 @router.delete("/strategies/{strategy_id}")
-async def delete_strategy(strategy_id: UUID) -> dict:
+async def delete_strategy(
+    strategy_id: UUID,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
     """删除策略模板（内置模板不可删除）。"""
-    sid = str(strategy_id)
-    if sid in _strategies:
-        if _strategies[sid].get("is_builtin"):
+    result = await pg_session.execute(
+        select(StrategyTemplate).where(StrategyTemplate.id == strategy_id)
+    )
+    s = result.scalar_one_or_none()
+    if s is not None:
+        if s.is_builtin:
             raise HTTPException(status_code=400, detail="内置策略模板不可删除")
-        del _strategies[sid]
-    await _async_sync_strategies_to_redis()
-    return {"id": sid, "deleted": True}
+        await pg_session.delete(s)
+        await pg_session.flush()
+    return {"id": str(strategy_id), "deleted": True}
 
 
 @router.post("/strategies/{strategy_id}/activate")
-async def activate_strategy(strategy_id: UUID) -> dict:
+async def activate_strategy(
+    strategy_id: UUID,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
     """激活指定策略模板（将其他策略设为非激活）。"""
-    sid = str(strategy_id)
-    for s in _strategies.values():
-        s["is_active"] = (s["id"] == sid)
-    await _async_sync_strategies_to_redis()
-    return {"id": sid, "is_active": True}
+    # 先将所有策略设为非激活
+    await pg_session.execute(
+        sa_update(StrategyTemplate)
+        .where(StrategyTemplate.user_id == _DEFAULT_USER_ID)
+        .values(is_active=False)
+    )
+    # 激活目标策略
+    result = await pg_session.execute(
+        select(StrategyTemplate).where(StrategyTemplate.id == strategy_id)
+    )
+    s = result.scalar_one_or_none()
+    if s is not None:
+        s.is_active = True
+        await pg_session.flush()
+    return {"id": str(strategy_id), "is_active": True}

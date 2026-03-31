@@ -297,7 +297,13 @@ async function runBacktest() {
       renderEquityChart()
     } else {
       // 异步任务模式：轮询结果
-      const taskId = (res.data as { task_id: string }).task_id
+      const data = res.data as Record<string, unknown>
+      const taskId = (data.task_id ?? data.id) as string | undefined
+      if (!taskId) {
+        runStatus.value = 'failed'
+        runError.value = '回测任务提交成功但未返回任务ID'
+        return
+      }
       runStatus.value = 'running'
       runProgress.value = 20
       await pollResult(taskId)
@@ -311,17 +317,11 @@ async function runBacktest() {
 }
 
 async function pollResult(taskId: string) {
-  const maxAttempts = 60
+  const maxAttempts = 120
   let attempts = 0
 
-  const poll = async (): Promise<void> => {
-    if (attempts >= maxAttempts) {
-      runStatus.value = 'failed'
-      runError.value = '回测超时，请检查策略配置后重试'
-      return
-    }
+  while (attempts < maxAttempts) {
     attempts++
-    // 进度从 20% 到 90% 线性增长
     runProgress.value = Math.min(20 + Math.floor((attempts / maxAttempts) * 70), 90)
 
     try {
@@ -329,8 +329,8 @@ async function pollResult(taskId: string) {
       const data = res.data
 
       if (data.status === 'PENDING' || data.status === 'RUNNING') {
-        pollTimer = setTimeout(poll, 2000)
-        return
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        continue
       }
 
       if (data.status === 'FAILED') {
@@ -339,19 +339,25 @@ async function pollResult(taskId: string) {
         return
       }
 
-      // 成功
+      // 成功 — 赋值结果
       result.value = data
       runStatus.value = 'success'
       runProgress.value = 100
+
+      // 等待 DOM 更新（v-if="result" 变为 true，图表容器出现）
       await nextTick()
+      // 再等一帧确保 DOM 完全渲染
+      await new Promise(resolve => setTimeout(resolve, 50))
       renderEquityChart()
+      return
     } catch {
-      // 结果尚未就绪，继续轮询
-      pollTimer = setTimeout(poll, 2000)
+      // 请求失败，等待后重试
+      await new Promise(resolve => setTimeout(resolve, 2000))
     }
   }
 
-  await poll()
+  runStatus.value = 'failed'
+  runError.value = '回测超时，请检查策略配置后重试'
 }
 
 // ─── 参数优化 ─────────────────────────────────────────────────────────────────
@@ -382,6 +388,10 @@ function calcDrawdownSeries(equityCurve: [string, number][]): number[] {
 }
 
 function renderEquityChart() {
+  // 确保图表实例已初始化（v-if 切换后 DOM 可能刚创建）
+  if (!chartInstance && equityChartRef.value) {
+    initChart(equityChartRef.value)
+  }
   if (!chartInstance || !result.value) return
   const eq = result.value.equity_curve
   if (!eq || eq.length === 0) return
@@ -496,6 +506,20 @@ onMounted(async () => {
 
 watch(equityChartRef, (el) => {
   if (el && !chartInstance) initChart(el)
+  if (el && result.value && result.value.equity_curve?.length) {
+    if (!chartInstance) initChart(el)
+    renderEquityChart()
+  }
+})
+
+// 当 result 变化时也尝试渲染图表（确保 v-if 切换后图表能渲染）
+watch(result, async (newResult) => {
+  if (newResult && newResult.equity_curve?.length) {
+    await nextTick()
+    // 等待 DOM 完全渲染
+    await new Promise(resolve => setTimeout(resolve, 100))
+    renderEquityChart()
+  }
 })
 
 onUnmounted(() => {

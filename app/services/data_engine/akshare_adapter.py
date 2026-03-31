@@ -360,7 +360,7 @@ class AkShareAdapter(BaseDataSourceAdapter):
     # ------------------------------------------------------------------
 
     async def health_check(self) -> bool:
-        """检查 AkShare 数据源连通性（stock_zh_index_spot_em 轻量接口）。
+        """检查 AkShare 数据源连通性（使用轻量级交易日历接口）。
 
         Returns:
             True 表示连通，False 表示不可用
@@ -370,10 +370,25 @@ class AkShareAdapter(BaseDataSourceAdapter):
             return False
 
         try:
-            # 使用指数实时行情接口，数据量远小于全市场个股行情
-            await asyncio.to_thread(ak.stock_zh_index_spot_em)
+            # 使用交易日历接口，数据量极小，比 stock_zh_index_spot_em 更快
+            await asyncio.wait_for(
+                asyncio.to_thread(ak.tool_trade_date_hist_sina),
+                timeout=self._timeout,
+            )
             logger.debug("AkShare health_check 通过")
             return True
-        except Exception as exc:
-            logger.warning("AkShare health_check 失败: %s", exc)
+        except asyncio.TimeoutError:
+            logger.warning("AkShare health_check 超时 (%ss)", self._timeout)
             return False
+        except Exception as exc:
+            # 如果 tool_trade_date_hist_sina 不可用，回退到 stock_zh_index_spot_em
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(ak.stock_zh_index_spot_em),
+                    timeout=self._timeout,
+                )
+                logger.debug("AkShare health_check 通过（回退接口）")
+                return True
+            except Exception as exc2:
+                logger.warning("AkShare health_check 失败: %s / %s", exc, exc2)
+                return False

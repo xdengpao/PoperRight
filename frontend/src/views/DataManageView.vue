@@ -22,6 +22,9 @@
       <div class="section-header">
         <h2 class="section-title">数据源同步状态</h2>
         <div class="sync-controls">
+          <button class="btn-icon" @click="fetchSyncStatus" :disabled="syncStatusState.loading" aria-label="刷新同步状态" title="刷新">
+            <span :class="['refresh-icon', syncStatusState.loading && 'spinning']">↻</span>
+          </button>
           <select v-model="syncType" class="sync-select" aria-label="选择同步类型">
             <option value="all">全部同步</option>
             <option value="kline">行情数据</option>
@@ -47,36 +50,39 @@
         :message="syncStatusState.error"
         :retryFn="fetchSyncStatus"
       />
-      <table v-else class="data-table" aria-label="数据源同步状态列表">
-        <thead>
-          <tr>
-            <th scope="col">数据源</th>
-            <th scope="col">使用数据源</th>
-            <th scope="col">最后同步时间</th>
-            <th scope="col">状态</th>
-            <th scope="col">已同步记录数</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="item in syncStatusState.data?.items ?? []" :key="item.source">
-            <td>{{ item.source }}</td>
-            <td>
-              {{ item.data_source }}
-              <span v-if="item.is_fallback" class="fallback-badge">（故障转移）</span>
-            </td>
-            <td>{{ formatTime(item.last_sync_at) }}</td>
-            <td>
-              <span class="status-badge" :class="statusClass(item.status)">
-                {{ statusLabel(item.status) }}
+      <div v-else class="sync-cards">
+        <div
+          v-for="item in syncStatusState.data?.items ?? []"
+          :key="item.source"
+          class="sync-card"
+          :class="syncCardClass(item.status)"
+        >
+          <div class="sync-card-header">
+            <span class="sync-card-title">{{ item.source }}</span>
+            <span class="status-badge" :class="statusClass(item.status)">
+              {{ statusLabel(item.status) }}
+            </span>
+          </div>
+          <div class="sync-card-body">
+            <div class="sync-detail-row">
+              <span class="sync-detail-label">数据源</span>
+              <span class="sync-detail-value">
+                {{ item.data_source }}
+                <span v-if="item.is_fallback" class="fallback-badge">（故障转移）</span>
               </span>
-            </td>
-            <td>{{ item.record_count.toLocaleString() }}</td>
-          </tr>
-          <tr v-if="!syncStatusState.data?.items?.length">
-            <td colspan="5" class="empty">暂无同步状态数据</td>
-          </tr>
-        </tbody>
-      </table>
+            </div>
+            <div class="sync-detail-row">
+              <span class="sync-detail-label">最后同步</span>
+              <span class="sync-detail-value">{{ formatSyncTime(item.last_sync_at) }}</span>
+            </div>
+            <div class="sync-detail-row">
+              <span class="sync-detail-label">同步记录</span>
+              <span class="sync-detail-value">{{ item.record_count > 0 ? item.record_count.toLocaleString() + ' 条' : '—' }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-if="!syncStatusState.data?.items?.length" class="empty">暂无同步状态数据</div>
+      </div>
     </section>
 
     <!-- ── 数据清洗统计 ── -->
@@ -388,9 +394,12 @@ async function triggerSync() {
   syncMsg.value = ''
   try {
     await apiClient.post('/data/sync', { sync_type: syncType.value })
-    syncMsg.value = '数据同步任务已触发，请稍后刷新查看状态'
+    syncMsg.value = '数据同步任务已触发'
     syncMsgType.value = 'success'
+    // 自动刷新同步状态（2s、5s、10s 后各刷新一次）
     setTimeout(fetchSyncStatus, 2000)
+    setTimeout(fetchSyncStatus, 5000)
+    setTimeout(fetchSyncStatus, 10000)
   } catch (e: unknown) {
     syncMsg.value = e instanceof Error ? e.message : '触发同步失败，请重试'
     syncMsgType.value = 'error'
@@ -583,13 +592,31 @@ function formatTime(iso: string): string {
 }
 
 function statusLabel(status: string): string {
-  const map: Record<string, string> = { OK: '正常', ERROR: '异常', SYNCING: '同步中' }
+  const map: Record<string, string> = { OK: '正常', ERROR: '异常', SYNCING: '同步中', UNKNOWN: '未同步' }
   return map[status] ?? status
 }
 
 function statusClass(status: string): string {
-  const map: Record<string, string> = { OK: 'ok', ERROR: 'error', SYNCING: 'syncing' }
+  const map: Record<string, string> = { OK: 'ok', ERROR: 'error', SYNCING: 'syncing', UNKNOWN: 'unknown' }
   return map[status] ?? ''
+}
+
+function syncCardClass(status: string): string {
+  const map: Record<string, string> = { OK: 'sync-card-ok', ERROR: 'sync-card-err', SYNCING: 'sync-card-syncing', UNKNOWN: 'sync-card-unknown' }
+  return map[status] ?? 'sync-card-unknown'
+}
+
+function formatSyncTime(iso: string | null): string {
+  if (!iso) return '从未同步'
+  const d = new Date(iso)
+  const now = new Date()
+  const diffMs = now.getTime() - d.getTime()
+  const diffMin = Math.floor(diffMs / 60000)
+  if (diffMin < 1) return '刚刚'
+  if (diffMin < 60) return `${diffMin} 分钟前`
+  const diffHour = Math.floor(diffMin / 60)
+  if (diffHour < 24) return `${diffHour} 小时前`
+  return iso.replace('T', ' ').slice(0, 16)
 }
 
 function reasonLabel(reason: string): string {
@@ -798,6 +825,66 @@ onUnmounted(() => {
   border-color: #58a6ff;
   outline: none;
 }
+
+/* 刷新按钮 */
+.btn-icon {
+  background: transparent; border: 1px solid #30363d; color: #8b949e;
+  width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; font-size: 16px;
+}
+.btn-icon:hover { color: #e6edf3; border-color: #58a6ff; }
+.btn-icon:disabled { opacity: 0.5; cursor: not-allowed; }
+.refresh-icon { display: inline-block; }
+.refresh-icon.spinning { animation: spin 1s linear infinite; }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* 同步状态卡片 */
+.sync-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+.sync-card {
+  border-radius: 8px;
+  padding: 16px;
+  border: 1px solid #21262d;
+  background: #0d1117;
+  transition: border-color 0.2s;
+}
+.sync-card-ok { border-left: 3px solid #3fb950; }
+.sync-card-err { border-left: 3px solid #f85149; }
+.sync-card-syncing { border-left: 3px solid #58a6ff; }
+.sync-card-unknown { border-left: 3px solid #484f58; }
+.sync-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.sync-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6edf3;
+}
+.sync-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sync-detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.sync-detail-label {
+  font-size: 13px;
+  color: #8b949e;
+}
+.sync-detail-value {
+  font-size: 13px;
+  color: #e6edf3;
+}
+.status-badge.unknown { background: #21262d; color: #8b949e; }
 
 /* 故障转移标注 */
 .fallback-badge {
