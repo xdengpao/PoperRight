@@ -15,6 +15,7 @@ import csv
 import io
 import logging
 import math
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -85,6 +86,363 @@ class _BacktestState:
     trade_records: list[_TradeRecord] = field(default_factory=list)
     equity_snapshots: dict[date, Decimal] = field(default_factory=dict)
     trade_day_index: int = 0
+
+
+# ---------------------------------------------------------------------------
+# 因子按需计算（需求 2：因子按需计算）
+# ---------------------------------------------------------------------------
+
+FACTOR_TO_COMPUTE: dict[str, set[str]] = {
+    "ma_trend": {"ma_trend"},
+    "ma_support": {"ma_trend", "ma_support"},
+    "macd": {"macd"},
+    "boll": {"boll"},
+    "rsi": {"rsi"},
+    "dma": {"dma"},
+    "breakout": {"breakout"},
+}
+
+ALL_FACTORS: set[str] = {"ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout"}
+
+
+def _extract_required_factors(config: BacktestConfig) -> set[str]:
+    """
+    从 BacktestConfig.strategy_config.factors 中提取需要计算的因子名称集合。
+
+    - 若 factors 为空列表，返回全部 7 个因子（向后兼容）。
+    - 若 factors 非空，返回 factors 中出现的因子名称对应的计算模块集合。
+    - 未知因子名称记录 WARNING 日志并忽略。
+    """
+    factors = config.strategy_config.factors
+    if not factors:
+        return set(ALL_FACTORS)
+
+    required: set[str] = set()
+    for fc in factors:
+        compute_set = FACTOR_TO_COMPUTE.get(fc.factor_name)
+        if compute_set:
+            required.update(compute_set)
+        else:
+            logger.warning("Unknown factor: %s, ignoring", fc.factor_name)
+
+    return required
+
+
+# ---------------------------------------------------------------------------
+# 预计算指标缓存（需求 3：预计算指标缓存）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IndicatorCache:
+    """单只股票的预计算指标缓存。
+
+    所有列表与该股票的 KlineBar 列表等长，索引一一对应。
+    None 表示该指标未被策略要求，不需要计算。
+    """
+    closes: list[float]
+    highs: list[float]
+    lows: list[float]
+    volumes: list[int]
+    amounts: list[Decimal]
+    turnovers: list[Decimal]
+
+    # 以下字段仅在对应因子被激活时填充
+    ma_trend_scores: list[float] | None = None
+    ma_support_flags: list[bool] | None = None
+    macd_signals: list[bool] | None = None
+    boll_signals: list[bool] | None = None
+    rsi_signals: list[bool] | None = None
+    dma_values: list[tuple[float, float] | None] | None = None
+    breakout_results: list[dict | None] | None = None
+
+
+def _precompute_indicators(
+    kline_data: dict[str, list[KlineBar]],
+    config: BacktestConfig,
+    required_factors: set[str],
+) -> dict[str, IndicatorCache]:
+    """
+    一次性预计算所有股票的指标时间序列。
+
+    对每只股票，使用完整K线序列（含预热期）计算各项指标，
+    结果存储为与K线等长的时间序列，回测时按索引直接查表。
+    仅计算 required_factors 中包含的指标。
+
+    Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 6.1
+    """
+    from app.services.screener.ma_trend import score_ma_trend, detect_ma_support
+    from app.services.screener.indicators import (
+        detect_macd_signal, detect_boll_signal, detect_rsi_signal, calculate_dma,
+    )
+    from app.services.screener.breakout import (
+        detect_box_breakout, detect_previous_high_breakout,
+        detect_descending_trendline_breakout,
+    )
+
+    ma_periods = config.strategy_config.ma_periods or [5, 10, 20, 60, 120]
+    ind = config.strategy_config.indicator_params
+
+    # Extract indicator params (support both IndicatorParamsConfig and dict)
+    if hasattr(ind, "macd_fast"):
+        macd_fast = ind.macd_fast
+        macd_slow = ind.macd_slow
+        macd_signal = ind.macd_signal
+        boll_period = ind.boll_period
+        boll_std_dev = ind.boll_std_dev
+        rsi_period = ind.rsi_period
+        dma_short = ind.dma_short
+        dma_long = ind.dma_long
+    elif isinstance(ind, dict):
+        macd_fast = ind.get("macd_fast", 12)
+        macd_slow = ind.get("macd_slow", 26)
+        macd_signal = ind.get("macd_signal", 9)
+        boll_period = ind.get("boll_period", 20)
+        boll_std_dev = ind.get("boll_std_dev", 2.0)
+        rsi_period = ind.get("rsi_period", 14)
+        dma_short = ind.get("dma_short", 10)
+        dma_long = ind.get("dma_long", 50)
+    else:
+        macd_fast, macd_slow, macd_signal = 12, 26, 9
+        boll_period, boll_std_dev = 20, 2.0
+        rsi_period = 14
+        dma_short, dma_long = 10, 50
+
+    cache: dict[str, IndicatorCache] = {}
+
+    for symbol, bars in kline_data.items():
+        n = len(bars)
+        closes = [float(b.close) for b in bars]
+        highs = [float(b.high) for b in bars]
+        lows = [float(b.low) for b in bars]
+        volumes = [b.volume for b in bars]
+        amounts = [b.amount for b in bars]
+        turnovers = [b.turnover for b in bars]
+
+        ic = IndicatorCache(
+            closes=closes,
+            highs=highs,
+            lows=lows,
+            volumes=volumes,
+            amounts=amounts,
+            turnovers=turnovers,
+        )
+
+        # ----------------------------------------------------------
+        # Single-pass indicator computation (O(N) per indicator)
+        # Instead of sliding window closes[:i+1] for each i (O(N²)),
+        # compute the full series once and extract per-bar values.
+        # ----------------------------------------------------------
+
+        # MA trend scores — SMA-based, compute full series once
+        if "ma_trend" in required_factors:
+            scores: list[float] = []
+            for i in range(n):
+                result = score_ma_trend(closes[: i + 1], ma_periods)
+                scores.append(result.score)
+            ic.ma_trend_scores = scores
+
+        # MA support flags — SMA-based, compute full series once
+        if "ma_support" in required_factors:
+            flags: list[bool] = []
+            for i in range(n):
+                sig = detect_ma_support(closes[: i + 1], ma_periods)
+                flags.append(sig.detected)
+            ic.ma_support_flags = flags
+
+        # MACD signals — compute full series once, derive per-bar signals
+        if "macd" in required_factors:
+            from app.services.screener.indicators import calculate_macd
+            full_macd = calculate_macd(closes, macd_fast, macd_slow, macd_signal)
+            macd_sigs: list[bool] = []
+            for i in range(n):
+                if i < 1:
+                    macd_sigs.append(False)
+                    continue
+                dif_i = full_macd.dif[i]
+                dea_i = full_macd.dea[i]
+                dif_prev = full_macd.dif[i - 1]
+                dea_prev = full_macd.dea[i - 1]
+                bar_i = full_macd.macd[i]
+                bar_prev = full_macd.macd[i - 1]
+                if any(math.isnan(v) for v in [dif_i, dea_i, dif_prev, dea_prev, bar_i, bar_prev]):
+                    macd_sigs.append(False)
+                    continue
+                sig = (
+                    dif_i > 0 and dea_i > 0  # above zero
+                    and dif_prev <= dea_prev and dif_i > dea_i  # golden cross
+                    and bar_i > bar_prev and bar_i > 0  # bar expanding
+                    and dea_i > dea_prev  # DEA rising
+                )
+                macd_sigs.append(sig)
+            ic.macd_signals = macd_sigs
+
+        # BOLL signals — compute full series once, derive per-bar signals
+        if "boll" in required_factors:
+            from app.services.screener.indicators import calculate_boll
+            full_boll = calculate_boll(closes, boll_period, boll_std_dev)
+            boll_sigs: list[bool] = []
+            for i in range(n):
+                if i < 1:
+                    boll_sigs.append(False)
+                    continue
+                up_i = full_boll.upper[i]
+                mid_i = full_boll.middle[i]
+                low_i = full_boll.lower[i]
+                up_prev = full_boll.upper[i - 1]
+                low_prev = full_boll.lower[i - 1]
+                if any(math.isnan(v) for v in [up_i, mid_i, low_i, up_prev, low_prev]):
+                    boll_sigs.append(False)
+                    continue
+                bw_i = up_i - low_i
+                bw_prev = up_prev - low_prev
+                sig = (
+                    closes[i] > mid_i  # above middle
+                    and closes[i] >= up_i * 0.98  # touch upper
+                    and bw_i > bw_prev  # opening up
+                )
+                boll_sigs.append(sig)
+            ic.boll_signals = boll_sigs
+
+        # RSI signals — compute full series once, derive per-bar signals
+        if "rsi" in required_factors:
+            from app.services.screener.indicators import calculate_rsi
+            full_rsi = calculate_rsi(closes, rsi_period)
+            rsi_sigs: list[bool] = []
+            for i in range(n):
+                if i < rsi_period:
+                    rsi_sigs.append(False)
+                    continue
+                rsi_val = full_rsi.values[i]
+                if math.isnan(rsi_val):
+                    rsi_sigs.append(False)
+                    continue
+                cond_range = 50.0 <= rsi_val <= 80.0
+                # Divergence check (same logic as detect_rsi_signal)
+                lookback = min(rsi_period, i)
+                cond_no_div = True
+                if lookback >= 2:
+                    ws = i - lookback
+                    pmax_idx = ws
+                    for j in range(ws, i):
+                        if not math.isnan(full_rsi.values[j]) and closes[j] >= closes[pmax_idx]:
+                            pmax_idx = j
+                    if (closes[i] >= closes[pmax_idx]
+                            and pmax_idx != i
+                            and not math.isnan(full_rsi.values[pmax_idx])
+                            and rsi_val < full_rsi.values[pmax_idx]):
+                        cond_no_div = False
+                rsi_sigs.append(cond_range and cond_no_div)
+            ic.rsi_signals = rsi_sigs
+
+        # DMA values — compute full series once, extract per-bar values
+        if "dma" in required_factors:
+            full_dma = calculate_dma(closes, dma_short, dma_long)
+            dma_vals: list[tuple[float, float] | None] = []
+            for i in range(n):
+                if i < len(full_dma.dma) and i < len(full_dma.ama):
+                    d_val = full_dma.dma[i]
+                    a_val = full_dma.ama[i]
+                    if not math.isnan(d_val) and not math.isnan(a_val):
+                        dma_vals.append((d_val, a_val))
+                    else:
+                        dma_vals.append(None)
+                else:
+                    dma_vals.append(None)
+            ic.dma_values = dma_vals
+
+        # Breakout results (trailing window — O(N) instead of O(N²))
+        # Breakout detectors only need the last ~80 bars (max lookback=60
+        # + volume_avg=20). We use a 120-bar trailing window for safety.
+        if "breakout" in required_factors:
+            _BRK_WINDOW = 120
+            brk_results: list[dict | None] = []
+            for i in range(n):
+                brk_dict: dict | None = None
+                if i + 1 >= 21:
+                    start = max(0, i + 1 - _BRK_WINDOW)
+                    sub_closes = closes[start: i + 1]
+                    sub_highs = highs[start: i + 1]
+                    sub_lows = lows[start: i + 1]
+                    sub_volumes = volumes[start: i + 1]
+                    for detect_fn in (
+                        lambda c=sub_closes, h=sub_highs, lo=sub_lows, v=sub_volumes: detect_box_breakout(c, h, lo, v),
+                        lambda c=sub_closes, v=sub_volumes: detect_previous_high_breakout(c, v),
+                        lambda c=sub_closes, h=sub_highs, v=sub_volumes: detect_descending_trendline_breakout(c, h, v),
+                    ):
+                        sig = detect_fn()
+                        if sig and sig.is_valid:
+                            brk_dict = {
+                                "is_valid": sig.is_valid,
+                                "is_false_breakout": sig.is_false_breakout,
+                                "volume_ratio": sig.volume_ratio,
+                            }
+                            break
+                brk_results.append(brk_dict)
+            ic.breakout_results = brk_results
+
+        cache[symbol] = ic
+
+    return cache
+
+
+# ---------------------------------------------------------------------------
+# K线数据预索引（需求 4：K线数据预索引）
+# ---------------------------------------------------------------------------
+
+@dataclass
+class KlineDateIndex:
+    """单只股票的日期→K线索引映射"""
+    date_to_idx: dict[date, int]   # 日期 → bars列表中的索引
+    sorted_dates: list[date]       # 排序后的日期列表（用于二分查找）
+
+
+def _build_date_index(
+    kline_data: dict[str, list[KlineBar]],
+) -> dict[str, KlineDateIndex]:
+    """
+    为所有股票构建日期→索引映射。
+
+    bars[date_to_idx[d]] 即为日期 d 的K线数据。
+    对于重复日期，后出现的记录覆盖先出现的（dict 赋值语义）。
+    sorted_dates 保证严格递增（去重后排序）。
+    """
+    result: dict[str, KlineDateIndex] = {}
+
+    for symbol, bars in kline_data.items():
+        date_to_idx: dict[date, int] = {}
+
+        for i, bar in enumerate(bars):
+            d = bar.time.date()
+            date_to_idx[d] = i  # 重复日期：后出现的覆盖先出现的
+
+        # sorted_dates 从 date_to_idx 的键构建，保证唯一且严格递增
+        sorted_dates = sorted(date_to_idx.keys())
+
+        result[symbol] = KlineDateIndex(
+            date_to_idx=date_to_idx,
+            sorted_dates=sorted_dates,
+        )
+
+    return result
+
+
+def _get_bars_up_to(
+    index: KlineDateIndex,
+    trade_date: date,
+) -> int:
+    """
+    返回 <= trade_date 的最后一个K线索引（bars 列表中的位置），无匹配返回 -1。
+
+    使用 bisect_right 在 sorted_dates 上做 O(log N) 二分查找，
+    找到最后一个 <= trade_date 的日期，再通过 date_to_idx 映射到 bars 索引。
+
+    Requirements: 4.5, 4.6, 4.7
+    """
+    pos = bisect_right(index.sorted_dates, trade_date)
+    if pos == 0:
+        return -1
+    last_date = index.sorted_dates[pos - 1]
+    return index.date_to_idx[last_date]
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +795,7 @@ class BacktestEngine:
         self,
         trade_date: date,
         index_data: dict[str, list[KlineBar]] | None,
+        index_date_index: dict[str, KlineDateIndex] | None = None,
     ) -> str:
         """
         评估大盘风控状态。
@@ -444,6 +803,8 @@ class BacktestEngine:
         - 指数跌破 20 日均线 → "CAUTION"
         - 指数跌破 60 日均线 → "DANGER"
         - 其他 → "NORMAL"
+
+        Requirements: 4.5, 4.7
         """
         if not index_data:
             return "NORMAL"
@@ -452,10 +813,17 @@ class BacktestEngine:
             bars = index_data.get(index_symbol)
             if not bars:
                 continue
-            # 截取 trade_date 及之前的 bars
-            filtered = [b for b in bars if b.time.date() <= trade_date]
-            if not filtered:
-                continue
+            # 截取 trade_date 及之前的 bars（使用日期索引替代线性扫描）
+            idx_info = index_date_index.get(index_symbol) if index_date_index else None
+            if idx_info is not None:
+                end_idx = _get_bars_up_to(idx_info, trade_date)
+                if end_idx < 0:
+                    continue
+                filtered = bars[:end_idx + 1]
+            else:
+                filtered = [b for b in bars if b.time.date() <= trade_date]
+                if not filtered:
+                    continue
             closes = [float(b.close) for b in filtered]
             latest_close = closes[-1]
 
@@ -488,9 +856,34 @@ class BacktestEngine:
         生成买入候选信号。
 
         使用 ScreenExecutor 执行盘后选股，根据大盘风控状态过滤。
+        从 K 线数据实时计算各项技术指标，确保不同策略产生差异化筛选结果。
         """
         if market_risk_state == "DANGER":
             return []
+
+        from app.services.screener.ma_trend import score_ma_trend, detect_ma_support
+        from app.services.screener.indicators import (
+            detect_macd_signal, detect_boll_signal, detect_rsi_signal, calculate_dma,
+        )
+        from app.services.screener.breakout import (
+            detect_box_breakout, detect_previous_high_breakout,
+            detect_descending_trendline_breakout,
+        )
+
+        ma_periods = config.strategy_config.ma_periods or [5, 10, 20, 60, 120]
+        raw_ind = config.strategy_config.indicator_params
+        if hasattr(raw_ind, 'macd_fast'):
+            # IndicatorParamsConfig dataclass
+            ind_params = {
+                "macd_fast": raw_ind.macd_fast, "macd_slow": raw_ind.macd_slow,
+                "macd_signal": raw_ind.macd_signal, "boll_period": raw_ind.boll_period,
+                "boll_std_dev": raw_ind.boll_std_dev, "rsi_period": raw_ind.rsi_period,
+                "dma_short": raw_ind.dma_short, "dma_long": raw_ind.dma_long,
+            }
+        elif isinstance(raw_ind, dict):
+            ind_params = raw_ind
+        else:
+            ind_params = {}
 
         # 构建因子字典
         stocks_data: dict[str, dict[str, Any]] = {}
@@ -500,12 +893,79 @@ class BacktestEngine:
                 continue
 
             latest = filtered[-1]
-            closes = [b.close for b in filtered]
-            highs = [b.high for b in filtered]
-            lows = [b.low for b in filtered]
+            closes_dec = [b.close for b in filtered]
+            highs_dec = [b.high for b in filtered]
+            lows_dec = [b.low for b in filtered]
             volumes = [b.volume for b in filtered]
             amounts = [b.amount for b in filtered]
             turnovers = [b.turnover for b in filtered]
+
+            closes_f = [float(c) for c in closes_dec]
+            highs_f = [float(h) for h in highs_dec]
+            lows_f = [float(l) for l in lows_dec]
+
+            # ── 均线趋势评分 ──
+            ma_result = score_ma_trend(closes_f, ma_periods)
+            ma_trend_score = ma_result.score
+
+            # ── 均线支撑 ──
+            ma_support_signal = detect_ma_support(closes_f, ma_periods)
+            ma_support = ma_support_signal.detected
+
+            # ── MACD 信号 ──
+            macd_res = detect_macd_signal(
+                closes_f,
+                fast_period=ind_params.get("macd_fast", 12),
+                slow_period=ind_params.get("macd_slow", 26),
+                signal_period=ind_params.get("macd_signal", 9),
+            )
+            macd_signal = macd_res.signal
+
+            # ── BOLL 信号 ──
+            boll_res = detect_boll_signal(
+                closes_f,
+                period=ind_params.get("boll_period", 20),
+                std_dev=ind_params.get("boll_std_dev", 2.0),
+            )
+            boll_signal = boll_res.signal
+
+            # ── RSI 信号 ──
+            rsi_res = detect_rsi_signal(
+                closes_f,
+                period=ind_params.get("rsi_period", 14),
+            )
+            rsi_signal = rsi_res.signal
+
+            # ── DMA 指标 ──
+            dma_res = calculate_dma(
+                closes_f,
+                short_period=ind_params.get("dma_short", 10),
+                long_period=ind_params.get("dma_long", 50),
+            )
+            dma_dict: dict | None = None
+            if dma_res.dma and dma_res.ama:
+                import math as _math
+                last_dma = dma_res.dma[-1] if not _math.isnan(dma_res.dma[-1]) else None
+                last_ama = dma_res.ama[-1] if not _math.isnan(dma_res.ama[-1]) else None
+                if last_dma is not None and last_ama is not None:
+                    dma_dict = {"dma": last_dma, "ama": last_ama}
+
+            # ── 形态突破 ──
+            breakout_dict: dict | None = None
+            if len(closes_f) >= 21:
+                for detect_fn in (
+                    lambda: detect_box_breakout(closes_f, highs_f, lows_f, volumes),
+                    lambda: detect_previous_high_breakout(closes_f, volumes),
+                    lambda: detect_descending_trendline_breakout(closes_f, highs_f, volumes),
+                ):
+                    sig = detect_fn()
+                    if sig and sig.is_valid:
+                        breakout_dict = {
+                            "is_valid": sig.is_valid,
+                            "is_false_breakout": sig.is_false_breakout,
+                            "volume_ratio": sig.volume_ratio,
+                        }
+                        break
 
             stocks_data[symbol] = {
                 "name": symbol,
@@ -517,9 +977,9 @@ class BacktestEngine:
                 "amount": latest.amount,
                 "turnover": latest.turnover,
                 "vol_ratio": latest.vol_ratio,
-                "closes": closes,
-                "highs": highs,
-                "lows": lows,
+                "closes": closes_dec,
+                "highs": highs_dec,
+                "lows": lows_dec,
                 "volumes": volumes,
                 "amounts": amounts,
                 "turnovers": turnovers,
@@ -527,13 +987,13 @@ class BacktestEngine:
                 "pb": None,
                 "roe": None,
                 "market_cap": None,
-                "ma_trend": 0.0,
-                "ma_support": False,
-                "macd": False,
-                "boll": False,
-                "rsi": False,
-                "dma": None,
-                "breakout": None,
+                "ma_trend": ma_trend_score,
+                "ma_support": ma_support,
+                "macd": macd_signal,
+                "boll": boll_signal,
+                "rsi": rsi_signal,
+                "dma": dma_dict,
+                "breakout": breakout_dict,
                 "turnover_check": True,
                 "money_flow": False,
                 "large_order": False,
@@ -584,6 +1044,172 @@ class BacktestEngine:
         return filtered_items
 
     # ------------------------------------------------------------------
+    # 优化后的信号生成（需求 2.1, 3.3, 4.5, 5.1）
+    # ------------------------------------------------------------------
+
+    def _generate_buy_signals_optimized(
+        self,
+        trade_date: date,
+        kline_data: dict[str, list[KlineBar]],
+        config: BacktestConfig,
+        market_risk_state: str,
+        indicator_cache: dict[str, IndicatorCache],
+        date_index: dict[str, KlineDateIndex],
+        required_factors: set[str],
+    ) -> list[ScreenItem]:
+        """
+        优化后的买入信号生成：从缓存查表，不再逐日重算。
+
+        使用 _get_bars_up_to 替代线性扫描，从 IndicatorCache 按索引直接
+        读取预计算指标值。仅填充 required_factors 中激活的指标字段。
+        保持 ScreenExecutor 调用逻辑不变。
+
+        Requirements: 2.1, 3.3, 4.5, 5.1
+        """
+        if market_risk_state == "DANGER":
+            return []
+
+        ma_periods = config.strategy_config.ma_periods or [5, 10, 20, 60, 120]
+        raw_ind = config.strategy_config.indicator_params
+        if hasattr(raw_ind, 'macd_fast'):
+            ind_params = {
+                "macd_fast": raw_ind.macd_fast, "macd_slow": raw_ind.macd_slow,
+                "macd_signal": raw_ind.macd_signal, "boll_period": raw_ind.boll_period,
+                "boll_std_dev": raw_ind.boll_std_dev, "rsi_period": raw_ind.rsi_period,
+                "dma_short": raw_ind.dma_short, "dma_long": raw_ind.dma_long,
+            }
+        elif isinstance(raw_ind, dict):
+            ind_params = raw_ind
+        else:
+            ind_params = {}
+
+        stocks_data: dict[str, dict[str, Any]] = {}
+        for symbol, bars in kline_data.items():
+            idx_info = date_index.get(symbol)
+            if not idx_info:
+                continue
+
+            # O(log N) 查找截止索引
+            end_idx = _get_bars_up_to(idx_info, trade_date)
+            if end_idx < 0:
+                continue
+
+            latest = bars[end_idx]
+            ic = indicator_cache.get(symbol)
+            if not ic:
+                continue
+
+            # 从缓存读取基础数据（截至 end_idx 的切片）
+            closes_dec = [b.close for b in bars[: end_idx + 1]]
+            highs_dec = [b.high for b in bars[: end_idx + 1]]
+            lows_dec = [b.low for b in bars[: end_idx + 1]]
+            volumes = ic.volumes[: end_idx + 1]
+            amounts = ic.amounts[: end_idx + 1]
+            turnovers = ic.turnovers[: end_idx + 1]
+
+            # 从缓存直接读取预计算指标值
+            ma_trend_score = ic.ma_trend_scores[end_idx] if ic.ma_trend_scores is not None else 0.0
+            ma_support = ic.ma_support_flags[end_idx] if ic.ma_support_flags is not None else False
+            macd_signal = ic.macd_signals[end_idx] if ic.macd_signals is not None else False
+            boll_signal = ic.boll_signals[end_idx] if ic.boll_signals is not None else False
+            rsi_signal = ic.rsi_signals[end_idx] if ic.rsi_signals is not None else False
+
+            # DMA
+            dma_dict: dict | None = None
+            if ic.dma_values is not None:
+                dma_val = ic.dma_values[end_idx]
+                if dma_val is not None:
+                    dma_dict = {"dma": dma_val[0], "ama": dma_val[1]}
+
+            # Breakout
+            breakout_dict: dict | None = None
+            if ic.breakout_results is not None:
+                breakout_dict = ic.breakout_results[end_idx]
+
+            stocks_data[symbol] = {
+                "name": symbol,
+                "close": latest.close,
+                "open": latest.open,
+                "high": latest.high,
+                "low": latest.low,
+                "volume": latest.volume,
+                "amount": latest.amount,
+                "turnover": latest.turnover,
+                "vol_ratio": latest.vol_ratio,
+                "closes": closes_dec,
+                "highs": highs_dec,
+                "lows": lows_dec,
+                "volumes": volumes,
+                "amounts": amounts,
+                "turnovers": turnovers,
+                "pe_ttm": None,
+                "pb": None,
+                "roe": None,
+                "market_cap": None,
+                "ma_trend": ma_trend_score,
+                "ma_support": ma_support,
+                "macd": macd_signal,
+                "boll": boll_signal,
+                "rsi": rsi_signal,
+                "dma": dma_dict,
+                "breakout": breakout_dict,
+                "turnover_check": True,
+                "money_flow": False,
+                "large_order": False,
+            }
+
+        if not stocks_data:
+            return []
+
+        # 执行选股（ScreenExecutor 调用逻辑不变）
+        try:
+            executor = ScreenExecutor(config.strategy_config)
+            result: ScreenResult = executor.run_eod_screen(stocks_data)
+            items = list(result.items)
+        except Exception:
+            logger.warning("ScreenExecutor 执行失败", exc_info=True)
+            return []
+
+        # CAUTION 状态下过滤 trend_score < 90
+        if market_risk_state == "CAUTION":
+            items = [it for it in items if it.trend_score >= 90]
+
+        # 过滤当日涨幅 > 9% 和连续3日累计涨幅 > 20%
+        filtered_items: list[ScreenItem] = []
+        for item in items:
+            idx_info = date_index.get(item.symbol)
+            if not idx_info:
+                continue
+
+            end_idx = _get_bars_up_to(idx_info, trade_date)
+            if end_idx < 0:
+                continue
+
+            sym_bars = kline_data[item.symbol]
+            day_bars_len = end_idx + 1
+
+            if day_bars_len < 2:
+                filtered_items.append(item)
+                continue
+
+            latest_close = float(sym_bars[end_idx].close)
+            prev_close = float(sym_bars[end_idx - 1].close)
+            daily_gain = (latest_close - prev_close) / prev_close if prev_close > 0 else 0.0
+            if daily_gain > 0.09:
+                continue
+
+            # 3日累计涨幅
+            if day_bars_len >= 4:
+                close_3d_ago = float(sym_bars[end_idx - 3].close)
+                cum_gain_3d = (latest_close - close_3d_ago) / close_3d_ago if close_3d_ago > 0 else 0.0
+                if cum_gain_3d > 0.20:
+                    continue
+
+            filtered_items.append(item)
+
+        return filtered_items
+
+    # ------------------------------------------------------------------
     # 卖出条件检测（需求 12.17–12.23）
     # ------------------------------------------------------------------
 
@@ -593,6 +1219,7 @@ class BacktestEngine:
         trade_date: date,
         kline_data: dict[str, list[KlineBar]],
         config: BacktestConfig,
+        date_index: dict[str, KlineDateIndex] | None = None,
     ) -> _SellSignal | None:
         """
         检查单只持仓标的的卖出条件。
@@ -604,9 +1231,17 @@ class BacktestEngine:
         if not bars:
             return None
 
-        day_bars = [b for b in bars if b.time.date() <= trade_date]
-        if not day_bars:
-            return None
+        # 使用日期索引替代线性扫描（Requirements 4.5, 4.7）
+        idx_info = date_index.get(position.symbol) if date_index else None
+        if idx_info is not None:
+            end_idx = _get_bars_up_to(idx_info, trade_date)
+            if end_idx < 0:
+                return None
+            day_bars = bars[: end_idx + 1]
+        else:
+            day_bars = [b for b in bars if b.time.date() <= trade_date]
+            if not day_bars:
+                return None
 
         # 检查当日是否有数据（停牌检测）
         latest_bar = day_bars[-1]
@@ -767,6 +1402,7 @@ class BacktestEngine:
         kline_data: dict[str, list[KlineBar]],
         state: _BacktestState,
         config: BacktestConfig,
+        date_index: dict[str, KlineDateIndex] | None = None,
     ) -> list[_TradeRecord]:
         """
         执行买入委托。
@@ -798,19 +1434,34 @@ class BacktestEngine:
             if not bars:
                 continue
 
-            # 找 trade_date 之后的第一个交易日 bar（T+1 执行）
-            next_day_bars = [b for b in bars if b.time.date() > trade_date]
-            if not next_day_bars:
-                continue  # 停牌或无后续数据
+            # 使用日期索引替代线性扫描（Requirements 4.5, 4.7）
+            idx_info = date_index.get(symbol) if date_index else None
+            if idx_info is not None:
+                end_idx = _get_bars_up_to(idx_info, trade_date)
 
-            next_day_bar = next_day_bars[0]
+                # 找 trade_date 之后的第一个交易日 bar（T+1 执行）
+                if end_idx + 1 >= len(bars):
+                    continue  # 无后续数据
+                next_day_bar = bars[end_idx + 1]
+
+                # 获取 trade_date 当日收盘价计算涨跌停
+                if end_idx < 0:
+                    continue
+                prev_close = bars[end_idx].close
+            else:
+                # 找 trade_date 之后的第一个交易日 bar（T+1 执行）
+                next_day_bars = [b for b in bars if b.time.date() > trade_date]
+                if not next_day_bars:
+                    continue  # 停牌或无后续数据
+                next_day_bar = next_day_bars[0]
+
+                # 获取 trade_date 当日收盘价计算涨跌停
+                day_bars = [b for b in bars if b.time.date() <= trade_date]
+                if not day_bars:
+                    continue
+                prev_close = day_bars[-1].close
+
             open_price = next_day_bar.open
-
-            # 获取 trade_date 当日收盘价计算涨跌停
-            day_bars = [b for b in bars if b.time.date() <= trade_date]
-            if not day_bars:
-                continue
-            prev_close = day_bars[-1].close
             limit_up, _ = self._calc_limit_prices(prev_close)
 
             # 涨停无法买入
@@ -881,6 +1532,7 @@ class BacktestEngine:
         kline_data: dict[str, list[KlineBar]],
         state: _BacktestState,
         config: BacktestConfig,
+        date_index: dict[str, KlineDateIndex] | None = None,
     ) -> list[_TradeRecord]:
         """
         执行卖出委托。
@@ -901,21 +1553,38 @@ class BacktestEngine:
                 position.pending_sell = signal
                 continue
 
-            # 找 trade_date 之后的第一个交易日 bar
-            next_day_bars = [b for b in bars if b.time.date() > trade_date]
-            if not next_day_bars:
-                position.pending_sell = signal
-                continue
+            # 使用日期索引替代线性扫描（Requirements 4.5, 4.7）
+            idx_info = date_index.get(symbol) if date_index else None
+            if idx_info is not None:
+                end_idx = _get_bars_up_to(idx_info, trade_date)
 
-            next_day_bar = next_day_bars[0]
+                # 找 trade_date 之后的第一个交易日 bar
+                if end_idx + 1 >= len(bars):
+                    position.pending_sell = signal
+                    continue
+                next_day_bar = bars[end_idx + 1]
+
+                # 获取 trade_date 当日收盘价计算跌停价
+                if end_idx < 0:
+                    position.pending_sell = signal
+                    continue
+                prev_close = bars[end_idx].close
+            else:
+                # 找 trade_date 之后的第一个交易日 bar
+                next_day_bars = [b for b in bars if b.time.date() > trade_date]
+                if not next_day_bars:
+                    position.pending_sell = signal
+                    continue
+                next_day_bar = next_day_bars[0]
+
+                # 获取 trade_date 当日收盘价计算跌停价
+                day_bars = [b for b in bars if b.time.date() <= trade_date]
+                if not day_bars:
+                    position.pending_sell = signal
+                    continue
+                prev_close = day_bars[-1].close
+
             open_price = next_day_bar.open
-
-            # 获取 trade_date 当日收盘价计算跌停价
-            day_bars = [b for b in bars if b.time.date() <= trade_date]
-            if not day_bars:
-                position.pending_sell = signal
-                continue
-            prev_close = day_bars[-1].close
             _, limit_down = self._calc_limit_prices(prev_close)
 
             # 跌停无法卖出，延迟
@@ -990,6 +1659,28 @@ class BacktestEngine:
                 trade_records=[],
             )
 
+        # ----------------------------------------------------------
+        # 预计算阶段（Requirements 2.1, 3.1, 4.1）
+        # ----------------------------------------------------------
+        import time as _time
+
+        _t0 = _time.monotonic()
+        required_factors = _extract_required_factors(config)
+        logger.info("预计算阶段：激活因子集合 = %s", required_factors)
+
+        date_index = _build_date_index(kline_data)
+        logger.info("预计算阶段：日期索引构建完成，股票数 = %d", len(date_index))
+
+        index_date_index = _build_date_index(index_data) if index_data else {}
+
+        indicator_cache = _precompute_indicators(kline_data, config, required_factors)
+        _t1 = _time.monotonic()
+        logger.info(
+            "预计算阶段：指标缓存构建完成，股票数 = %d，耗时 %.2f 秒",
+            len(indicator_cache),
+            _t1 - _t0,
+        )
+
         for idx, trade_date in enumerate(trade_dates):
             state.trade_day_index = idx
             self._current_trade_day_index = idx  # for _check_sell_conditions
@@ -1010,13 +1701,13 @@ class BacktestEngine:
                     if pos.pending_sell is not None:
                         pending_signals.append(pos.pending_sell)
                         pos.pending_sell = None
-                self._execute_sells(pending_signals, trade_date, kline_data, state, config)
+                self._execute_sells(pending_signals, trade_date, kline_data, state, config, date_index)
 
             # 检查卖出条件
             sell_signals: list[_SellSignal] = []
             for symbol, position in list(state.positions.items()):
                 signal = self._check_sell_conditions(
-                    position, trade_date, kline_data, config,
+                    position, trade_date, kline_data, config, date_index,
                 )
                 if signal is not None:
                     sell_signals.append(signal)
@@ -1026,36 +1717,45 @@ class BacktestEngine:
 
             # 执行卖出
             if sell_signals:
-                self._execute_sells(sell_signals, trade_date, kline_data, state, config)
+                self._execute_sells(sell_signals, trade_date, kline_data, state, config, date_index)
 
             # 评估大盘风控
             market_risk = "NORMAL"
             if config.enable_market_risk:
-                market_risk = self._evaluate_market_risk(trade_date, index_data)
+                market_risk = self._evaluate_market_risk(trade_date, index_data, index_date_index)
 
             # 生成买入信号
             buy_candidates: list[ScreenItem] = []
             if market_risk != "DANGER":
-                buy_candidates = self._generate_buy_signals(
+                buy_candidates = self._generate_buy_signals_optimized(
                     trade_date, kline_data, config, market_risk,
+                    indicator_cache, date_index, required_factors,
                 )
 
             # 执行买入
             if buy_candidates:
                 self._execute_buys(
-                    buy_candidates, trade_date, kline_data, state, config,
+                    buy_candidates, trade_date, kline_data, state, config, date_index,
                 )
 
-            # 记录净值快照
+            # 记录净值快照（使用日期索引替代线性扫描，Requirements 4.5, 4.7）
             position_value = Decimal("0")
             for pos in state.positions.values():
                 pos_bars = kline_data.get(pos.symbol)
                 if pos_bars:
-                    day_bars = [b for b in pos_bars if b.time.date() <= trade_date]
-                    if day_bars:
-                        position_value += day_bars[-1].close * pos.quantity
+                    pos_idx_info = date_index.get(pos.symbol)
+                    if pos_idx_info is not None:
+                        pos_end_idx = _get_bars_up_to(pos_idx_info, trade_date)
+                        if pos_end_idx >= 0:
+                            position_value += pos_bars[pos_end_idx].close * pos.quantity
+                        else:
+                            position_value += pos.cost_price * pos.quantity
                     else:
-                        position_value += pos.cost_price * pos.quantity
+                        day_bars = [b for b in pos_bars if b.time.date() <= trade_date]
+                        if day_bars:
+                            position_value += day_bars[-1].close * pos.quantity
+                        else:
+                            position_value += pos.cost_price * pos.quantity
                 else:
                     position_value += pos.cost_price * pos.quantity
 

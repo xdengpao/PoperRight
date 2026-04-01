@@ -89,7 +89,10 @@
     <section v-if="result && tradeRecords.length" class="card" aria-label="交易流水明细">
       <div class="section-header">
         <h2 class="section-title">交易流水明细</h2>
-        <span class="record-count">共 {{ tradeRecords.length }} 笔</span>
+        <div class="section-header-right">
+          <span class="record-count">共 {{ tradeRecords.length }} 笔</span>
+          <button class="btn btn-outline btn-sm" @click="exportTradeCSV" aria-label="导出全部交易流水">导出 CSV</button>
+        </div>
       </div>
       <div class="table-wrap">
         <table class="data-table" aria-label="交易流水明细表">
@@ -106,7 +109,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(t, i) in tradeRecords" :key="i">
+            <tr v-for="(t, i) in pagedTradeRecords" :key="i">
               <td>{{ t.created_at?.slice(0, 16) ?? '—' }}</td>
               <td class="mono">{{ t.symbol }}</td>
               <td>
@@ -125,6 +128,22 @@
           </tbody>
         </table>
       </div>
+      <!-- 分页 -->
+      <nav v-if="tradeTotalPages > 1" class="pagination" aria-label="交易流水分页">
+        <button class="page-btn" :disabled="tradePage === 1" @click="tradePage = 1" aria-label="首页">«</button>
+        <button class="page-btn" :disabled="tradePage === 1" @click="tradePage--" aria-label="上一页">‹</button>
+        <template v-for="p in tradeVisiblePages" :key="p">
+          <span v-if="p === -1" class="page-ellipsis">…</span>
+          <button v-else class="page-btn" :class="{ active: p === tradePage }" @click="tradePage = p">{{ p }}</button>
+        </template>
+        <button class="page-btn" :disabled="tradePage === tradeTotalPages" @click="tradePage++" aria-label="下一页">›</button>
+        <button class="page-btn" :disabled="tradePage === tradeTotalPages" @click="tradePage = tradeTotalPages" aria-label="末页">»</button>
+        <select v-model.number="tradePageSize" class="page-size-select" aria-label="每页条数">
+          <option :value="20">20 条/页</option>
+          <option :value="50">50 条/页</option>
+          <option :value="100">100 条/页</option>
+        </select>
+      </nav>
     </section>
 
     <!-- 参数优化结果 -->
@@ -221,10 +240,21 @@ let chartInstance: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 
+function formatDate(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+const today = new Date()
+const halfYearAgo = new Date(today)
+halfYearAgo.setMonth(halfYearAgo.getMonth() - 6)
+
 const form = reactive({
   strategyId: '',
-  startDate: '2022-01-01',
-  endDate: '2024-01-01',
+  startDate: formatDate(halfYearAgo),
+  endDate: formatDate(today),
   initialCapital: 1_000_000,
   commissionBuy: 0.0003,
   commissionSell: 0.0013,
@@ -234,6 +264,67 @@ const form = reactive({
 // ─── 计算属性 ─────────────────────────────────────────────────────────────────
 
 const tradeRecords = computed<TradeOrder[]>(() => result.value?.trade_records ?? [])
+
+// ─── 交易流水分页 ─────────────────────────────────────────────────────────────
+
+const tradePage = ref(1)
+const tradePageSize = ref(20)
+
+const tradeTotalPages = computed(() => Math.max(1, Math.ceil(tradeRecords.value.length / tradePageSize.value)))
+
+const pagedTradeRecords = computed(() => {
+  const start = (tradePage.value - 1) * tradePageSize.value
+  return tradeRecords.value.slice(start, start + tradePageSize.value)
+})
+
+const tradeVisiblePages = computed(() => {
+  const total = tradeTotalPages.value
+  const cur = tradePage.value
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
+  const pages: number[] = [1]
+  const left = Math.max(2, cur - 1)
+  const right = Math.min(total - 1, cur + 1)
+  if (left > 2) pages.push(-1)
+  for (let i = left; i <= right; i++) pages.push(i)
+  if (right < total - 1) pages.push(-1)
+  pages.push(total)
+  return pages
+})
+
+// 换页或换 pageSize 时重置页码
+watch(tradePageSize, () => { tradePage.value = 1 })
+watch(tradeRecords, () => { tradePage.value = 1 })
+
+// ─── 导出 CSV ─────────────────────────────────────────────────────────────────
+
+function exportTradeCSV() {
+  const rows = tradeRecords.value
+  if (!rows.length) return
+  const header = '时间,股票代码,方向,数量(股),价格(元),金额(元),手续费(元),状态'
+  const lines = rows.map(t =>
+    [
+      t.created_at?.slice(0, 16) ?? '',
+      t.symbol,
+      t.direction === 'BUY' ? '买入' : '卖出',
+      t.quantity ?? '',
+      t.price?.toFixed(2) ?? '',
+      t.amount?.toFixed(2) ?? '',
+      t.commission?.toFixed(2) ?? '',
+      t.status ?? '',
+    ].join(',')
+  )
+  const bom = '\uFEFF'
+  const blob = new Blob([bom + header + '\n' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  const strategyName = strategies.value.find(s => s.id === form.strategyId)?.name ?? '未选策略'
+  const now = new Date()
+  const ts = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`
+  a.download = `${strategyName}_backtest_${ts}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const runStatusText = computed(() => {
   switch (runStatus.value) {
@@ -275,6 +366,14 @@ async function runBacktest() {
   runStatus.value = 'pending'
   runProgress.value = 5
   runError.value = ''
+
+  // 销毁旧图表实例，避免 v-if 移除 DOM 后实例悬空
+  if (chartInstance) {
+    resizeObserver?.disconnect()
+    resizeObserver = null
+    chartInstance.dispose()
+    chartInstance = null
+  }
   result.value = null
 
   try {
@@ -629,4 +728,22 @@ onUnmounted(() => {
 /* ─── 参数优化 ──────────────────────────────────────────────────────────────── */
 .overfit-warn { color: #d29922; }
 .overfit-ok { color: #3fb950; }
+
+/* ─── 分页 ─────────────────────────────────────────────────────────────────── */
+.section-header-right { display: flex; align-items: center; gap: 10px; }
+.btn-sm { padding: 4px 12px; font-size: 12px; }
+.pagination { display: flex; align-items: center; gap: 4px; margin-top: 14px; flex-wrap: wrap; }
+.page-btn {
+  background: #0d1117; border: 1px solid #30363d; color: #8b949e;
+  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; min-width: 32px; text-align: center;
+}
+.page-btn:hover:not(:disabled):not(.active) { color: #e6edf3; border-color: #58a6ff; }
+.page-btn.active { background: #58a6ff; color: #fff; border-color: #58a6ff; }
+.page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.page-ellipsis { color: #484f58; padding: 0 4px; font-size: 13px; }
+.page-size-select {
+  background: #0d1117; border: 1px solid #30363d; color: #8b949e;
+  padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px; cursor: pointer;
+}
+.page-size-select:focus { outline: none; border-color: #58a6ff; }
 </style>

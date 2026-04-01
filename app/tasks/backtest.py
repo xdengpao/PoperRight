@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import redis
@@ -13,9 +13,50 @@ from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
+from app.core.schemas import StrategyConfig
 from app.tasks.base import BaseTask
 
 logger = logging.getLogger(__name__)
+
+
+def calculate_warmup_start_date(
+    start_date: date,
+    strategy_config: StrategyConfig,
+    buffer_days: int = 250,
+) -> date:
+    """根据策略配置中的指标参数，计算所需的预热起始日期。
+
+    取 max(ma_periods) 和各指标预热需求中的最大值，
+    再乘以 1.5 倍安全系数（考虑非交易日），至少 buffer_days 个自然日。
+    """
+    # Step 1: 收集所有指标的最大回看窗口
+    max_lookback = max(strategy_config.ma_periods) if strategy_config.ma_periods else 0
+
+    ind = strategy_config.indicator_params
+    if hasattr(ind, "macd_slow"):
+        # MACD: EMA(slow) 需要 slow_period 天, 再加 signal_period
+        macd_warmup = ind.macd_slow + ind.macd_signal
+        max_lookback = max(max_lookback, macd_warmup)
+
+        # BOLL: 需要 boll_period 天
+        max_lookback = max(max_lookback, ind.boll_period)
+
+        # RSI: 需要 rsi_period + 1 天
+        max_lookback = max(max_lookback, ind.rsi_period + 1)
+
+        # DMA: 需要 max(dma_short, dma_long) 天
+        max_lookback = max(max_lookback, ind.dma_long)
+
+    # Step 2: 取 buffer_days 和 max_lookback 的较大值
+    required_days = max(buffer_days, max_lookback)
+
+    # Step 3: 乘以 1.5 安全系数（覆盖节假日、停牌）
+    calendar_days = int(required_days * 1.5)
+
+    # Step 4: 计算预热起始日期
+    warmup_date = start_date - timedelta(days=calendar_days)
+
+    return warmup_date
 
 
 def _get_sync_pg_url() -> str:
@@ -111,6 +152,9 @@ def run_backtest_task(
         kline_data: dict[str, list[KlineBar]] = {}
         index_data: dict[str, list[KlineBar]] = {}
 
+        warmup_date = calculate_warmup_start_date(sd, strategy_config)
+        logger.info("预热起始日期: %s (回测起始: %s)", warmup_date.isoformat(), sd.isoformat())
+
         try:
             ts_engine = create_engine(_get_sync_ts_url())
             with Session(ts_engine) as session:
@@ -118,10 +162,10 @@ def run_backtest_task(
                     text("""
                         SELECT symbol, time, open, high, low, close, volume, amount, turnover, vol_ratio
                         FROM kline
-                        WHERE freq = '1d' AND time >= :start AND time <= :end
+                        WHERE freq = '1d' AND time >= :warmup_start AND time <= :end
                         ORDER BY symbol, time
                     """),
-                    {"start": sd.isoformat(), "end": ed.isoformat()},
+                    {"warmup_start": warmup_date.isoformat(), "end": ed.isoformat()},
                 ).fetchall()
 
                 for row in rows:
