@@ -233,20 +233,123 @@ def _precompute_indicators(
         # compute the full series once and extract per-bar values.
         # ----------------------------------------------------------
 
-        # MA trend scores — SMA-based, compute full series once
+        # Pre-compute full MA series once (shared by ma_trend and ma_support)
+        _need_ma = ("ma_trend" in required_factors or "ma_support" in required_factors)
+        if _need_ma:
+            from app.services.screener.ma_trend import (
+                calculate_multi_ma, _calc_slope, _SLOPE_LOOKBACK,
+                _WEIGHT_ALIGNMENT, _WEIGHT_SLOPE, _WEIGHT_DISTANCE,
+            )
+            full_ma_dict = calculate_multi_ma(closes, ma_periods)
+            sorted_ma_periods = sorted(ma_periods)
+
+        # MA trend scores — single-pass using pre-computed MA series
         if "ma_trend" in required_factors:
             scores: list[float] = []
             for i in range(n):
-                result = score_ma_trend(closes[: i + 1], ma_periods)
-                scores.append(result.score)
+                # --- alignment score ---
+                latest_ma: dict[int, float] = {}
+                for p in sorted_ma_periods:
+                    vals = full_ma_dict.get(p, [])
+                    if i < len(vals) and not math.isnan(vals[i]):
+                        latest_ma[p] = vals[i]
+
+                avail_p = [p for p in sorted_ma_periods if p in latest_ma]
+                total_pairs = max(len(avail_p) - 1, 0)
+                aligned_pairs = 0
+                for j in range(len(avail_p) - 1):
+                    if latest_ma[avail_p[j]] > latest_ma[avail_p[j + 1]]:
+                        aligned_pairs += 1
+                alignment_score = (aligned_pairs / total_pairs * 100.0) if total_pairs > 0 else 0.0
+
+                # --- slope score ---
+                # Compute slopes for ALL periods (matching original behavior)
+                slope_values = []
+                for p in sorted_ma_periods:
+                    vals = full_ma_dict.get(p, [])
+                    # Compute slope from vals up to index i (last _SLOPE_LOOKBACK values)
+                    valid = []
+                    for k in range(i, -1, -1):
+                        if k >= len(vals) or math.isnan(vals[k]):
+                            break
+                        valid.append(vals[k])
+                        if len(valid) >= _SLOPE_LOOKBACK:
+                            break
+                    valid.reverse()
+                    if len(valid) >= 2:
+                        vn = len(valid)
+                        x_mean = (vn - 1) / 2.0
+                        y_mean = sum(valid) / vn
+                        num = sum((xi - x_mean) * (y - y_mean) for xi, y in enumerate(valid))
+                        den = sum((xi - x_mean) ** 2 for xi in range(vn))
+                        s = (num / den / y_mean * 100.0) if den > 0 and y_mean > 0 else 0.0
+                    else:
+                        s = 0.0
+                    slope_values.append(s)
+
+                if slope_values:
+                    filtered = [max(sv, 0.0) for sv in slope_values]
+                    avg_slope = sum(filtered) / len(filtered)
+                    slope_score = min(avg_slope * 100.0, 100.0)
+                else:
+                    slope_score = 0.0
+
+                # --- distance score ---
+                dist_scores = []
+                current_price = closes[i]
+                for p in sorted_ma_periods:
+                    vals = full_ma_dict.get(p, [])
+                    if i < len(vals) and not math.isnan(vals[i]) and vals[i] > 0:
+                        pct_above = ((current_price - vals[i]) / vals[i]) * 100.0
+                        ds = max(0.0, min(100.0, 50.0 + pct_above * 10.0))
+                        dist_scores.append(ds)
+                distance_score = (sum(dist_scores) / len(dist_scores)) if dist_scores else 0.0
+
+                raw = (alignment_score * _WEIGHT_ALIGNMENT
+                       + slope_score * _WEIGHT_SLOPE
+                       + distance_score * _WEIGHT_DISTANCE)
+                scores.append(max(0.0, min(100.0, raw)))
             ic.ma_trend_scores = scores
 
-        # MA support flags — SMA-based, compute full series once
+        # MA support flags — single-pass using pre-computed MA series
         if "ma_support" in required_factors:
+            from app.services.screener.ma_trend import _SUPPORT_TOUCH_PCT, _SUPPORT_REBOUND_DAYS
+            support_periods = [p for p in [20, 60] if p in ma_periods] or [20, 60]
             flags: list[bool] = []
             for i in range(n):
-                sig = detect_ma_support(closes[: i + 1], ma_periods)
-                flags.append(sig.detected)
+                detected = False
+                min_req = max(support_periods) + _SUPPORT_REBOUND_DAYS + 1
+                if i + 1 >= min_req:
+                    for sp in support_periods:
+                        ma_vals = full_ma_dict.get(sp, [])
+                        if not ma_vals:
+                            continue
+                        search_end = i - _SUPPORT_REBOUND_DAYS
+                        search_start = max(sp - 1, 0)
+                        for t in range(search_end, search_start - 1, -1):
+                            if t >= len(ma_vals) or math.isnan(ma_vals[t]):
+                                continue
+                            ma_val = ma_vals[t]
+                            if ma_val <= 0:
+                                continue
+                            distance_pct = abs(closes[t] - ma_val) / ma_val
+                            if distance_pct > _SUPPORT_TOUCH_PCT:
+                                continue
+                            rebound_ok = True
+                            for d in range(1, _SUPPORT_REBOUND_DAYS + 1):
+                                fi = t + d
+                                if fi > i or fi >= len(ma_vals) or math.isnan(ma_vals[fi]):
+                                    rebound_ok = False
+                                    break
+                                if closes[fi] <= ma_vals[fi]:
+                                    rebound_ok = False
+                                    break
+                            if rebound_ok:
+                                detected = True
+                                break
+                        if detected:
+                            break
+                flags.append(detected)
             ic.ma_support_flags = flags
 
         # MACD signals — compute full series once, derive per-bar signals
