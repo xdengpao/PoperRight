@@ -88,3 +88,4 @@ alembic/versions/__pycache__/
 *.temp
 celerybeat-schedule-shm
 celerybeat-schedule-wal
+celerybeat-schedule-wal
