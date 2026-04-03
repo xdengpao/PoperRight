@@ -112,18 +112,22 @@ def run_backtest_task(
         strategy_config = StrategyConfig(
             factors=[], logic="AND", weights={}, ma_periods=[5, 10, 20, 60, 120],
         )
+        enabled_modules: list[str] | None = None
+        raw_config_dict: dict = {}
 
         if strategy_id:
             try:
                 pg_engine = create_engine(_get_sync_pg_url())
                 with Session(pg_engine) as session:
                     row = session.execute(
-                        text("SELECT config FROM strategy_template WHERE id = :sid"),
+                        text("SELECT config, enabled_modules FROM strategy_template WHERE id = :sid"),
                         {"sid": strategy_id},
                     ).first()
                     if row and row[0]:
-                        strategy_config = StrategyConfig.from_dict(row[0])
-                        logger.info("已加载策略配置 strategy_id=%s", strategy_id)
+                        raw_config_dict = row[0]
+                        strategy_config = StrategyConfig.from_dict(raw_config_dict)
+                        enabled_modules = row[1] if row[1] else None
+                        logger.info("已加载策略配置 strategy_id=%s, enabled_modules=%s", strategy_id, enabled_modules)
                 pg_engine.dispose()
             except Exception as exc:
                 logger.warning("加载策略配置失败: %s", exc)
@@ -146,6 +150,8 @@ def run_backtest_task(
             allocation_mode=allocation_mode,
             enable_market_risk=enable_market_risk,
             trend_stop_ma=trend_stop_ma,
+            enabled_modules=enabled_modules,
+            raw_config=raw_config_dict,
         )
 
         # ── 2. 从 TimescaleDB 加载 K 线数据（同步） ──

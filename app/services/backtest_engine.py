@@ -1107,7 +1107,11 @@ class BacktestEngine:
 
         # 执行选股
         try:
-            executor = ScreenExecutor(config.strategy_config)
+            executor = ScreenExecutor(
+                config.strategy_config,
+                enabled_modules=config.enabled_modules,
+                raw_config=config.raw_config,
+            )
             result: ScreenResult = executor.run_eod_screen(stocks_data)
             items = list(result.items)
         except Exception:
@@ -1266,7 +1270,11 @@ class BacktestEngine:
 
         # 执行选股（ScreenExecutor 调用逻辑不变）
         try:
-            executor = ScreenExecutor(config.strategy_config)
+            executor = ScreenExecutor(
+                config.strategy_config,
+                enabled_modules=config.enabled_modules,
+                raw_config=config.raw_config,
+            )
             result: ScreenResult = executor.run_eod_screen(stocks_data)
             items = list(result.items)
         except Exception:
