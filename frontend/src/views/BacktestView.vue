@@ -178,9 +178,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
+import { useBacktestStore } from '@/stores/backtest'
+import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus } from '@/stores/backtest'
+
+// ─── Store ────────────────────────────────────────────────────────────────────
+
+const store = useBacktestStore()
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -189,56 +195,20 @@ interface StrategyItem {
   name: string
 }
 
-interface TradeOrder {
-  symbol: string
-  direction: 'BUY' | 'SELL'
-  quantity: number
-  price: number
-  amount: number
-  commission: number
-  status: string
-  created_at: string
-}
-
-interface BacktestResult {
-  annual_return: number
-  total_return: number
-  win_rate: number
-  profit_loss_ratio: number
-  max_drawdown: number
-  sharpe_ratio: number
-  calmar_ratio: number
-  total_trades: number
-  avg_holding_days: number
-  equity_curve: [string, number][]
-  trade_records: TradeOrder[]
-}
-
-interface OptimizeResult {
-  params: Record<string, number>
-  annual_return: number
-  sharpe_ratio: number
-  max_drawdown: number
-  overfit: boolean
-}
-
-type RunStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed'
-
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
 
 const strategies = ref<StrategyItem[]>([])
-const running = ref(false)
+const running = computed(() => store.running)
 const optimizing = ref(false)
-const result = ref<BacktestResult | null>(null)
-const optimizeResults = ref<OptimizeResult[]>([])
+const result = computed(() => store.result)
+const optimizeResults = computed(() => store.optimizeResults)
 const equityChartRef = ref<HTMLElement | null>(null)
-const runStatus = ref<RunStatus>('idle')
-const runProgress = ref(0)
-const runError = ref('')
+const runStatus = computed(() => store.runStatus)
+const runProgress = computed(() => store.runProgress)
+const runError = computed(() => store.runError)
 
 let chartInstance: echarts.ECharts | null = null
 let resizeObserver: ResizeObserver | null = null
-let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 function formatDate(d: Date): string {
   const y = d.getFullYear()
@@ -247,19 +217,16 @@ function formatDate(d: Date): string {
   return `${y}-${m}-${day}`
 }
 
-const today = new Date()
-const halfYearAgo = new Date(today)
-halfYearAgo.setMonth(halfYearAgo.getMonth() - 6)
+// 初始化默认日期（仅在 store 中尚未设置时）
+if (!store.form.startDate) {
+  const today = new Date()
+  const halfYearAgo = new Date(today)
+  halfYearAgo.setMonth(halfYearAgo.getMonth() - 6)
+  store.form.startDate = formatDate(halfYearAgo)
+  store.form.endDate = formatDate(today)
+}
 
-const form = reactive({
-  strategyId: '',
-  startDate: formatDate(halfYearAgo),
-  endDate: formatDate(today),
-  initialCapital: 1_000_000,
-  commissionBuy: 0.0003,
-  commissionSell: 0.0013,
-  slippage: 0.001,
-})
+const form = store.form
 
 // ─── 计算属性 ─────────────────────────────────────────────────────────────────
 
@@ -361,11 +328,7 @@ const metricsCards = computed(() => {
 // ─── 回测执行（支持异步任务轮询）────────────────────────────────────────────
 
 async function runBacktest() {
-  if (running.value) return
-  running.value = true
-  runStatus.value = 'pending'
-  runProgress.value = 5
-  runError.value = ''
+  if (store.running) return
 
   // 销毁旧图表实例，避免 v-if 移除 DOM 后实例悬空
   if (chartInstance) {
@@ -374,89 +337,22 @@ async function runBacktest() {
     chartInstance.dispose()
     chartInstance = null
   }
-  result.value = null
 
-  try {
-    const res = await apiClient.post<BacktestResult | { task_id: string }>('/backtest/run', {
-      strategy_id: form.strategyId || undefined,
-      start_date: form.startDate,
-      end_date: form.endDate,
-      initial_capital: form.initialCapital,
-      commission_buy: form.commissionBuy,
-      commission_sell: form.commissionSell,
-      slippage: form.slippage,
-    })
+  await store.startBacktest({
+    strategyId: form.strategyId,
+    startDate: form.startDate,
+    endDate: form.endDate,
+    initialCapital: form.initialCapital,
+    commissionBuy: form.commissionBuy,
+    commissionSell: form.commissionSell,
+    slippage: form.slippage,
+  })
 
-    // 如果直接返回结果（同步模式）
-    if ('equity_curve' in res.data) {
-      result.value = res.data as BacktestResult
-      runStatus.value = 'success'
-      runProgress.value = 100
-      await nextTick()
-      renderEquityChart()
-    } else {
-      // 异步任务模式：轮询结果
-      const data = res.data as Record<string, unknown>
-      const taskId = (data.task_id ?? data.id) as string | undefined
-      if (!taskId) {
-        runStatus.value = 'failed'
-        runError.value = '回测任务提交成功但未返回任务ID'
-        return
-      }
-      runStatus.value = 'running'
-      runProgress.value = 20
-      await pollResult(taskId)
-    }
-  } catch (e: unknown) {
-    runStatus.value = 'failed'
-    runError.value = e instanceof Error ? e.message : '回测启动失败，请重试'
-  } finally {
-    running.value = false
+  if (store.result?.equity_curve?.length) {
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 50))
+    renderEquityChart()
   }
-}
-
-async function pollResult(taskId: string) {
-  const maxAttempts = 120
-  let attempts = 0
-
-  while (attempts < maxAttempts) {
-    attempts++
-    runProgress.value = Math.min(20 + Math.floor((attempts / maxAttempts) * 70), 90)
-
-    try {
-      const res = await apiClient.get<BacktestResult & { status?: string }>(`/backtest/${taskId}/result`)
-      const data = res.data
-
-      if (data.status === 'PENDING' || data.status === 'RUNNING') {
-        await new Promise(resolve => setTimeout(resolve, 2000))
-        continue
-      }
-
-      if (data.status === 'FAILED') {
-        runStatus.value = 'failed'
-        runError.value = '回测任务执行失败'
-        return
-      }
-
-      // 成功 — 赋值结果
-      result.value = data
-      runStatus.value = 'success'
-      runProgress.value = 100
-
-      // 等待 DOM 更新（v-if="result" 变为 true，图表容器出现）
-      await nextTick()
-      // 再等一帧确保 DOM 完全渲染
-      await new Promise(resolve => setTimeout(resolve, 50))
-      renderEquityChart()
-      return
-    } catch {
-      // 请求失败，等待后重试
-      await new Promise(resolve => setTimeout(resolve, 2000))
-    }
-  }
-
-  runStatus.value = 'failed'
-  runError.value = '回测超时，请检查策略配置后重试'
 }
 
 // ─── 参数优化 ─────────────────────────────────────────────────────────────────
@@ -470,7 +366,7 @@ async function runOptimize() {
       end_date: form.endDate,
       initial_capital: form.initialCapital,
     })
-    optimizeResults.value = res.data.slice(0, 10)
+    store.optimizeResults = res.data.slice(0, 10)
   } catch { /* handle error */ }
   optimizing.value = false
 }
@@ -601,6 +497,16 @@ onMounted(async () => {
   loadStrategies()
   await nextTick()
   if (equityChartRef.value) initChart(equityChartRef.value)
+
+  // 恢复：如果有正在运行的回测任务，继续轮询
+  await store.resumePolling()
+
+  // 恢复：如果已有结果，渲染图表
+  if (store.result?.equity_curve?.length) {
+    await nextTick()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    renderEquityChart()
+  }
 })
 
 watch(equityChartRef, (el) => {
@@ -622,9 +528,10 @@ watch(result, async (newResult) => {
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearTimeout(pollTimer)
+  // 不中断轮询 — store 会在后台继续
   resizeObserver?.disconnect()
   chartInstance?.dispose()
+  chartInstance = null
 })
 </script>
 

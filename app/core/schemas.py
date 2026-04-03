@@ -463,6 +463,8 @@ class BacktestConfig:
     allocation_mode: str = "equal"                  # 资金分配模式："equal" | "score_weighted"
     enable_market_risk: bool = True                 # 是否启用大盘风控模拟
     trend_stop_ma: int = 20                         # 趋势破位均线周期
+    enabled_modules: list[str] | None = None        # 启用的选股模块列表
+    raw_config: dict = field(default_factory=dict)  # 原始策略配置字典（含模块参数）
 
 
 @dataclass
