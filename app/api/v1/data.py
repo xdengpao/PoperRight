@@ -840,3 +840,97 @@ async def get_stock_money_flow(
         days=len(records),
         records=records,
     )
+
+
+# ---------------------------------------------------------------------------
+# 本地K线导入请求/响应模型
+# ---------------------------------------------------------------------------
+
+
+class LocalKlineImportRequest(BaseModel):
+    freqs: list[str] | None = None       # 频率过滤列表
+    sub_dir: str | None = None           # 子目录路径
+    force: bool = False                  # 强制全量导入
+
+
+class LocalKlineImportResponse(BaseModel):
+    task_id: str
+    message: str
+
+
+class LocalKlineImportStatusResponse(BaseModel):
+    status: str = "idle"                 # idle/running/completed/failed
+    total_files: int = 0
+    processed_files: int = 0
+    success_files: int = 0
+    failed_files: int = 0
+    total_parsed: int = 0
+    total_inserted: int = 0
+    total_skipped: int = 0
+    elapsed_seconds: float = 0
+    failed_details: list[dict] = []      # [{path, error}]
+
+
+# ---------------------------------------------------------------------------
+# 本地K线导入端点
+# ---------------------------------------------------------------------------
+
+
+@router.post("/import/local-kline", status_code=202)
+async def start_local_kline_import(
+    body: LocalKlineImportRequest,
+) -> LocalKlineImportResponse:
+    """触发本地K线导入任务。
+
+    - 已有导入任务运行中时返回 HTTP 409
+    - 成功时分发 Celery 任务并返回 202 + task_id
+    """
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+    from app.tasks.data_sync import import_local_kline
+
+    svc = LocalKlineImportService()
+    if await svc.is_running():
+        raise HTTPException(status_code=409, detail="已有导入任务正在运行")
+
+    result = import_local_kline.delay(
+        freqs=body.freqs, sub_dir=body.sub_dir, force=body.force,
+    )
+
+    return LocalKlineImportResponse(
+        task_id=result.id,
+        message="本地K线导入任务已触发",
+    )
+
+
+@router.get("/import/local-kline/status")
+async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
+    """查询导入进度和最近结果，无数据时返回 idle 默认值。"""
+    import json
+
+    from app.core.redis_client import get_redis_client
+
+    client = get_redis_client()
+    try:
+        raw_progress = await client.get("import:local_kline:progress")
+        raw_result = await client.get("import:local_kline:result")
+    finally:
+        await client.aclose()
+
+    # 优先使用进度数据（任务运行中），否则使用结果数据（任务已完成）
+    raw = raw_progress or raw_result
+    if not raw:
+        return LocalKlineImportStatusResponse()
+
+    data = json.loads(raw)
+    return LocalKlineImportStatusResponse(
+        status=data.get("status", "idle"),
+        total_files=data.get("total_files", 0),
+        processed_files=data.get("processed_files", 0),
+        success_files=data.get("success_files", 0),
+        failed_files=data.get("failed_files", 0),
+        total_parsed=data.get("total_parsed", 0),
+        total_inserted=data.get("total_inserted", 0),
+        total_skipped=data.get("total_skipped", 0),
+        elapsed_seconds=data.get("elapsed_seconds", 0),
+        failed_details=data.get("failed_details", []),
+    )

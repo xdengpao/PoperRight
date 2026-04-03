@@ -67,6 +67,9 @@ class Settings(BaseSettings):
     kline_history_years: int = 10
     audit_log_retention_days: int = 365
 
+    # 本地K线数据目录
+    local_kline_data_dir: str = "/Users/poper/AData"
+
     # API 频率限制（每次调用间隔秒数，留 20% 余量避免触发限制）
     # Tushare: kline 500次/min→0.18s, fundamentals 200次/min→0.40s, moneyflow 300次/min→0.30s
     rate_limit_kline: float = 0.18

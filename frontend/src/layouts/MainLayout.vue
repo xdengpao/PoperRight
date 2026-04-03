@@ -14,7 +14,33 @@
           <div class="nav-group-label">{{ groupName }}</div>
           <ul class="nav-list">
             <li v-for="item in items" :key="item.path">
+              <!-- 有子菜单的项 -->
+              <template v-if="item.children && item.children.length">
+                <button
+                  class="nav-link nav-parent"
+                  :class="{ active: isChildActive(item) }"
+                  @click="toggleExpand(item.path)"
+                >
+                  <span class="nav-icon">{{ item.icon }}</span>
+                  <span class="nav-label">{{ item.label }}</span>
+                  <span class="nav-arrow" :class="{ expanded: expandedMenus.has(item.path) }">▸</span>
+                </button>
+                <ul v-if="expandedMenus.has(item.path)" class="nav-sub-list">
+                  <li v-for="child in item.children" :key="child.path">
+                    <router-link
+                      :to="child.path"
+                      class="nav-link nav-child"
+                      :class="{ active: isActiveRoute(child.path) }"
+                    >
+                      <span class="nav-icon">{{ child.icon }}</span>
+                      <span class="nav-label">{{ child.label }}</span>
+                    </router-link>
+                  </li>
+                </ul>
+              </template>
+              <!-- 无子菜单的项 -->
               <router-link
+                v-else
                 :to="item.path"
                 class="nav-link"
                 :class="{ active: isActiveRoute(item.path) }"
@@ -136,12 +162,19 @@ interface NavItem {
   label: string
   icon: string
   roles?: UserRole[]
+  children?: NavItem[]
 }
 
 const menuGroups: Record<string, NavItem[]> = {
   '数据': [
     { path: '/dashboard', label: '大盘概况', icon: '📊' },
-    { path: '/data', label: '数据管理', icon: '💾' },
+    {
+      path: '/data', label: '数据管理', icon: '💾',
+      children: [
+        { path: '/data/online', label: '在线数据', icon: '🌐' },
+        { path: '/data/local', label: '本地数据', icon: '📁' },
+      ],
+    },
   ],
   '选股': [
     { path: '/screener', label: '智能选股', icon: '🔍' },
@@ -167,9 +200,19 @@ const filteredMenuGroups = computed(() => {
   const result: Record<string, NavItem[]> = {}
   const userRole = authStore.role
   for (const [group, items] of Object.entries(menuGroups)) {
-    const filtered = items.filter(
-      (item) => !item.roles || item.roles.includes(userRole),
-    )
+    const filtered = items
+      .filter((item) => !item.roles || item.roles.includes(userRole))
+      .map((item) => {
+        if (item.children) {
+          return {
+            ...item,
+            children: item.children.filter(
+              (c) => !c.roles || c.roles.includes(userRole),
+            ),
+          }
+        }
+        return item
+      })
     if (filtered.length > 0) {
       result[group] = filtered
     }
@@ -179,6 +222,22 @@ const filteredMenuGroups = computed(() => {
 
 function isActiveRoute(path: string): boolean {
   return route.path === path
+}
+
+// --- Expandable sub-menus ---
+
+const expandedMenus = ref<Set<string>>(new Set(['/data']))
+
+function toggleExpand(path: string) {
+  if (expandedMenus.value.has(path)) {
+    expandedMenus.value.delete(path)
+  } else {
+    expandedMenus.value.add(path)
+  }
+}
+
+function isChildActive(item: NavItem): boolean {
+  return !!item.children?.some((c) => route.path === c.path)
 }
 
 // --- Notification ---
@@ -313,6 +372,34 @@ function handleLogout() {
 }
 .nav-icon {
   font-size: 16px;
+}
+
+/* Sub-menu styles */
+.nav-parent {
+  width: 100%;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  justify-content: flex-start;
+}
+.nav-arrow {
+  margin-left: auto;
+  font-size: 12px;
+  color: #484f58;
+  transition: transform 0.2s;
+}
+.nav-arrow.expanded {
+  transform: rotate(90deg);
+}
+.nav-sub-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.nav-child {
+  padding-left: 36px;
+  font-size: 13px;
 }
 
 /* Main area */

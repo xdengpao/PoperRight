@@ -1009,3 +1009,40 @@ async def _sync_historical_money_flow(
         "failed": failed,
         "upserted": total_upserted,
     }
+
+
+# ---------------------------------------------------------------------------
+# 本地K线数据导入任务
+# ---------------------------------------------------------------------------
+
+@celery_app.task(
+    name="app.tasks.data_sync.import_local_kline",
+    queue="data_sync",
+    soft_time_limit=86400,   # 24h 软限制
+    time_limit=None,         # 无硬限制
+)
+def import_local_kline(
+    freqs: list[str] | None = None,
+    sub_dir: str | None = None,
+    force: bool = False,
+) -> dict:
+    """
+    本地K线数据导入 Celery 任务。
+
+    通过 LocalKlineImportService 扫描本地数据目录、解压 ZIP、解析 CSV、
+    校验数据质量并批量写入 TimescaleDB。支持频率过滤、子目录指定和强制全量导入。
+
+    Args:
+        freqs:   可选频率过滤列表，如 ["1m", "5m"]
+        sub_dir: 可选子目录路径，限定扫描范围
+        force:   强制全量导入，忽略增量缓存
+
+    Returns:
+        导入结果摘要字典
+
+    需求：6.1, 6.2
+    """
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    service = LocalKlineImportService()
+    return _run_async(service.execute(freqs=freqs, sub_dir=sub_dir, force=force))

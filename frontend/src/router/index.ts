@@ -30,12 +30,24 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/DashboardView.vue'),
         meta: { title: '大盘概况' },
       },
-      // 数据管理
+      // 数据管理（父路由，重定向到在线数据）
       {
         path: 'data',
-        name: 'DataManage',
+        redirect: '/data/online',
+      },
+      // 在线数据（原数据管理）
+      {
+        path: 'data/online',
+        name: 'DataOnline',
         component: () => import('@/views/DataManageView.vue'),
-        meta: { title: '数据管理' },
+        meta: { title: '在线数据' },
+      },
+      // 本地数据（原本地数据导入）
+      {
+        path: 'data/local',
+        name: 'DataLocal',
+        component: () => import('@/views/LocalImportView.vue'),
+        meta: { title: '本地数据' },
       },
       // 选股功能（需求 3-7）
       {
