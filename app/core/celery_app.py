@@ -59,8 +59,8 @@ celery_app.conf.update(
     worker_max_tasks_per_child=1000,
 
     # 任务软/硬超时（秒）
-    task_soft_time_limit=300,
-    task_time_limit=600,
+    task_soft_time_limit=1800,
+    task_time_limit=3600,
 )
 
 # Celery Beat 定时任务调度计划

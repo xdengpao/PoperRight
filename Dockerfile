@@ -1,5 +1,5 @@
 # A股右侧量化选股系统 - FastAPI 应用镜像
-FROM python:3.11-slim AS base
+FROM docker.m.daocloud.io/library/python:3.11-slim AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

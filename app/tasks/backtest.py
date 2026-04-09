@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
 from app.core.config import settings
-from app.core.schemas import StrategyConfig
-from app.tasks.base import BaseTask
+from app.core.schemas import ExitConditionConfig, StrategyConfig
+from app.tasks.base import BaseTask, BacktestTask
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def _redis_set(key: str, value: str, ex: int = 86400) -> None:
         logger.warning("Redis 写入失败: %s", exc)
 
 
-@celery_app.task(base=BaseTask, bind=True, queue="backtest", name="backtest.run")
+@celery_app.task(base=BacktestTask, bind=True, queue="backtest", name="backtest.run")
 def run_backtest_task(
     self,
     run_id: str,
@@ -97,6 +97,7 @@ def run_backtest_task(
     allocation_mode: str = "equal",
     enable_market_risk: bool = True,
     trend_stop_ma: int = 20,
+    exit_conditions: dict | None = None,
 ) -> dict:
     """执行回测 Celery 任务（同步数据库访问）。"""
     logger.info("回测任务启动 run_id=%s strategy_id=%s", run_id, strategy_id)
@@ -135,6 +136,13 @@ def run_backtest_task(
         sd = date.fromisoformat(start_date) if start_date else date(2024, 1, 1)
         ed = date.fromisoformat(end_date) if end_date else date(2024, 12, 31)
 
+        # 反序列化自定义平仓条件
+        exit_config = (
+            ExitConditionConfig.from_dict(exit_conditions)
+            if exit_conditions is not None
+            else None
+        )
+
         config = BacktestConfig(
             strategy_config=strategy_config,
             start_date=sd,
@@ -152,6 +160,7 @@ def run_backtest_task(
             trend_stop_ma=trend_stop_ma,
             enabled_modules=enabled_modules,
             raw_config=raw_config_dict,
+            exit_conditions=exit_config,
         )
 
         # ── 2. 从 TimescaleDB 加载 K 线数据（同步） ──

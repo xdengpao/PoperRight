@@ -129,15 +129,25 @@
                       </span>
                     </div>
                   </div>
-                  <div class="detail-chart">
-                    <div v-if="klineLoading[row.symbol]" class="chart-loading">加载K线中...</div>
-                    <div v-else-if="klineError[row.symbol]" class="chart-error">{{ klineError[row.symbol] }}</div>
-                    <v-chart
-                      v-else-if="klineOptions[row.symbol]"
-                      :option="klineOptions[row.symbol]"
-                      :autoresize="true"
-                      class="kline-chart"
-                    />
+                  <div class="detail-charts-container">
+                    <div class="detail-chart">
+                      <div v-if="klineLoading[row.symbol]" class="chart-loading">加载K线中...</div>
+                      <div v-else-if="klineError[row.symbol]" class="chart-error">{{ klineError[row.symbol] }}</div>
+                      <v-chart
+                        v-else-if="klineOptions[row.symbol]"
+                        :option="klineOptions[row.symbol]"
+                        :autoresize="true"
+                        class="kline-chart"
+                        @click="(params: any) => onDailyKlineClick(row.symbol, params)"
+                      />
+                    </div>
+                    <div class="detail-chart">
+                      <MinuteKlineChart
+                        :symbol="row.symbol"
+                        :selected-date="selectedDates[row.symbol] ?? null"
+                        :latest-trade-date="latestTradeDates[row.symbol] ?? ''"
+                      />
+                    </div>
                   </div>
                 </div>
               </td>
@@ -163,13 +173,15 @@ import { apiClient } from '@/api'
 import { usePageState } from '@/composables/usePageState'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
+import MinuteKlineChart from '@/components/MinuteKlineChart.vue'
+import { extractDateFromClick } from '@/components/minuteKlineUtils'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent, DataZoomComponent } from 'echarts/components'
+import { GridComponent, TooltipComponent, DataZoomComponent, MarkLineComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 
-use([CandlestickChart, BarChart, GridComponent, TooltipComponent, DataZoomComponent, CanvasRenderer])
+use([CandlestickChart, BarChart, GridComponent, TooltipComponent, DataZoomComponent, MarkLineComponent, CanvasRenderer])
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -301,6 +313,9 @@ function formatTime(iso: string): string {
 const klineLoading = reactive<Record<string, boolean>>({})
 const klineError = reactive<Record<string, string>>({})
 const klineOptions = reactive<Record<string, any>>({})
+const latestTradeDates = reactive<Record<string, string>>({})
+const selectedDates = reactive<Record<string, string>>({})
+const klineDateArrays = reactive<Record<string, string[]>>({})
 
 async function fetchKline(symbol: string) {
   if (klineOptions[symbol] || klineLoading[symbol]) return
@@ -319,7 +334,11 @@ async function fetchKline(symbol: string) {
       klineError[symbol] = '暂无K线数据'
       return
     }
+    // 记录最近交易日（日K线最后一根bar的日期）
+    const lastBar = bars[bars.length - 1]
+    latestTradeDates[symbol] = lastBar.time.slice(0, 10)
     const dates = bars.map((b: any) => b.time.slice(0, 10))
+    klineDateArrays[symbol] = dates
     const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
     const vols = bars.map((b: any) => b.volume)
     klineOptions[symbol] = {
@@ -375,6 +394,31 @@ async function fetchKline(symbol: string) {
 }
 
 // ─── 交互 ─────────────────────────────────────────────────────────────────────
+
+function onDailyKlineClick(symbol: string, params: any) {
+  const dates = klineDateArrays[symbol]
+  if (!dates) return
+  const date = extractDateFromClick(dates, params.dataIndex)
+  if (date) {
+    selectedDates[symbol] = date
+    // 更新日K线图 markLine 高亮线
+    const opt = klineOptions[symbol]
+    if (opt?.series?.[0]) {
+      opt.series[0] = {
+        ...opt.series[0],
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          lineStyle: { color: '#58a6ff88', width: 1.5, type: 'solid' },
+          data: [{ xAxis: date }],
+          label: { show: false },
+        },
+      }
+      // 触发 Vue 响应式更新
+      klineOptions[symbol] = { ...opt }
+    }
+  }
+}
 
 function toggleExpand(symbol: string) {
   if (expandedSymbols.value.has(symbol)) {
@@ -566,6 +610,12 @@ onMounted(() => {
 }
 .detail-signals { flex: 0 0 280px; min-width: 200px; }
 .detail-chart { flex: 1; min-width: 0; }
+.detail-charts-container {
+  display: flex; gap: 16px; flex: 1; min-width: 0;
+}
+.detail-charts-container > .detail-chart {
+  flex: 1; min-width: 0;
+}
 .kline-chart { width: 100%; height: 280px; }
 .chart-loading, .chart-error {
   display: flex; align-items: center; justify-content: center;
@@ -650,4 +700,14 @@ onMounted(() => {
 .btn-page:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
 .btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
 .page-info { font-size: 13px; color: #8b949e; }
+
+/* ─── 响应式：小屏幕上下堆叠 ───────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .detail-charts-container {
+    flex-direction: column;
+  }
+  .detail-charts-container > .detail-chart {
+    width: 100%;
+  }
+}
 </style>

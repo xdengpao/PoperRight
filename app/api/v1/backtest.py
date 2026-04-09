@@ -13,7 +13,9 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.core.schemas import VALID_INDICATORS, VALID_OPERATORS
 
 router = APIRouter(prefix="/backtest", tags=["回测"])
 
@@ -21,6 +23,32 @@ router = APIRouter(prefix="/backtest", tags=["回测"])
 # ---------------------------------------------------------------------------
 # Pydantic 请求模型
 # ---------------------------------------------------------------------------
+
+
+class ExitConditionSchema(BaseModel):
+    freq: str = "daily"
+    indicator: str
+    operator: str
+    threshold: float | None = None
+    cross_target: str | None = None
+    params: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_condition(self) -> "ExitConditionSchema":
+        if self.indicator not in VALID_INDICATORS:
+            raise ValueError(f"无效的指标名称: {self.indicator}")
+        if self.operator not in VALID_OPERATORS:
+            raise ValueError(f"无效的比较运算符: {self.operator}")
+        if self.operator in ("cross_up", "cross_down") and not self.cross_target:
+            raise ValueError("交叉运算符需要指定 cross_target")
+        if self.operator not in ("cross_up", "cross_down") and self.threshold is None:
+            raise ValueError("数值比较运算符需要指定 threshold")
+        return self
+
+
+class ExitConditionsSchema(BaseModel):
+    conditions: list[ExitConditionSchema] = Field(default_factory=list)
+    logic: str = "AND"
 
 
 class BacktestRunRequest(BaseModel):
@@ -38,6 +66,7 @@ class BacktestRunRequest(BaseModel):
     allocation_mode: str = "equal"  # "equal" | "score_weighted"
     enable_market_risk: bool = True
     trend_stop_ma: int = 20
+    exit_conditions: ExitConditionsSchema | None = None
 
 
 class OptimizeRequest(BaseModel):
@@ -76,6 +105,7 @@ async def run_backtest(body: BacktestRunRequest) -> dict:
         allocation_mode=body.allocation_mode,
         enable_market_risk=body.enable_market_risk,
         trend_stop_ma=body.trend_stop_ma,
+        exit_conditions=body.exit_conditions.model_dump() if body.exit_conditions else None,
     )
     return {
         "id": run_id,

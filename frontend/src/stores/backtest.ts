@@ -19,6 +19,7 @@ export interface TradeOrder {
   commission: number
   status: string
   created_at: string
+  sell_reason?: string
 }
 
 export interface BacktestResult {
@@ -43,6 +44,15 @@ export interface OptimizeResult {
   overfit: boolean
 }
 
+export interface ExitConditionForm {
+  freq: 'daily' | 'minute'
+  indicator: string
+  operator: string
+  threshold: number | null
+  crossTarget: string | null
+  params: Record<string, number>
+}
+
 export type RunStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed'
 
 export const useBacktestStore = defineStore('backtest', () => {
@@ -63,6 +73,10 @@ export const useBacktestStore = defineStore('backtest', () => {
     commissionBuy: 0.0003,
     commissionSell: 0.0013,
     slippage: 0.001,
+    exitConditions: {
+      conditions: [] as ExitConditionForm[],
+      logic: 'AND' as 'AND' | 'OR',
+    },
   })
 
   let pollAborted = false
@@ -113,6 +127,23 @@ export const useBacktestStore = defineStore('backtest', () => {
         // 风控配置不可用时使用默认值
       }
 
+      // 序列化自定义平仓条件（camelCase → snake_case）
+      const exitConds = form.value.exitConditions
+      const exitConditionsPayload =
+        exitConds.conditions.length > 0
+          ? {
+              conditions: exitConds.conditions.map((c) => ({
+                freq: c.freq,
+                indicator: c.indicator,
+                operator: c.operator,
+                threshold: c.threshold,
+                cross_target: c.crossTarget,
+                params: c.params,
+              })),
+              logic: exitConds.logic,
+            }
+          : null
+
       const res = await apiClient.post<BacktestResult | { task_id: string }>('/backtest/run', {
         strategy_id: params.strategyId || undefined,
         start_date: params.startDate,
@@ -124,6 +155,7 @@ export const useBacktestStore = defineStore('backtest', () => {
         stop_loss_pct: stopLossPct,
         trailing_stop_pct: trailingStopPct,
         trend_stop_ma: trendStopMa,
+        exit_conditions: exitConditionsPayload,
       })
 
       if ('equity_curve' in res.data) {
@@ -152,7 +184,7 @@ export const useBacktestStore = defineStore('backtest', () => {
   }
 
   async function pollResult(taskId: string) {
-    const maxAttempts = 120
+    const maxAttempts = 600
     let attempts = 0
 
     while (attempts < maxAttempts && !pollAborted) {

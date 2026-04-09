@@ -11,8 +11,11 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      LOCAL_KLINE_DATA_DIR: /data/kline
     ports:
       - "8000:8000"
+    volumes:
+      - ${LOCAL_KLINE_DATA_DIR:-/tmp/kline_data}:/data/kline:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -40,6 +43,9 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      LOCAL_KLINE_DATA_DIR: /data/kline
+    volumes:
+      - ${LOCAL_KLINE_DATA_DIR:-/tmp/kline_data}:/data/kline:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,7 +80,7 @@ services:
 
   # ===== TimescaleDB（行情时序数据）=====
   timescaledb:
-    image: timescale/timescaledb:latest-pg16
+    image: docker.m.daocloud.io/timescale/timescaledb:latest-pg16
     container_name: quant-timescaledb
     environment:
       POSTGRES_USER: postgres
@@ -94,7 +100,7 @@ services:
 
   # ===== PostgreSQL（业务数据）=====
   postgres:
-    image: postgres:16
+    image: docker.m.daocloud.io/library/postgres:16
     container_name: quant-postgres
     environment:
       POSTGRES_USER: postgres
@@ -114,7 +120,7 @@ services:
 
   # ===== Redis =====
   redis:
-    image: redis:7
+    image: docker.m.daocloud.io/library/redis:7
     container_name: quant-redis
     ports:
       - "6379:6379"
@@ -129,7 +135,7 @@ services:
 
   # ===== Nginx 反向代理 =====
   nginx:
-    image: nginx:alpine
+    image: docker.m.daocloud.io/library/nginx:alpine
     container_name: quant-nginx
     ports:
       - "80:80"

@@ -257,8 +257,9 @@ async def get_kline(
     except Exception as exc:
         logger.warning("本地 DB 查询 K 线失败 symbol=%s: %s", clean_symbol, exc)
 
-    # 2. 本地无数据，回退到第三方 API
-    if not bars:
+    # 2. 本地无数据，回退到第三方 API（分钟级频率仅查本地，不回退）
+    MINUTE_FREQS = {"1m", "5m", "15m", "30m", "60m"}
+    if not bars and freq not in MINUTE_FREQS:
         router_svc = DataSourceRouter()
         try:
             bars = await router_svc.fetch_kline(ts_symbol, freq, start_date, end_date)

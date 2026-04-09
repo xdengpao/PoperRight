@@ -465,6 +465,7 @@ class BacktestConfig:
     trend_stop_ma: int = 20                         # 趋势破位均线周期
     enabled_modules: list[str] | None = None        # 启用的选股模块列表
     raw_config: dict = field(default_factory=dict)  # 原始策略配置字典（含模块参数）
+    exit_conditions: ExitConditionConfig | None = None  # 自定义平仓条件配置
 
 
 @dataclass
@@ -604,3 +605,72 @@ class Alert:
     symbol: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
     extra: dict = field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# 自定义平仓条件数据类
+# ---------------------------------------------------------------------------
+
+VALID_INDICATORS = {
+    "ma", "macd_dif", "macd_dea", "macd_histogram",
+    "boll_upper", "boll_middle", "boll_lower",
+    "rsi", "dma", "ama", "close", "volume", "turnover",
+}
+
+VALID_OPERATORS = {">", "<", ">=", "<=", "cross_up", "cross_down"}
+
+
+@dataclass
+class ExitCondition:
+    """单条自定义平仓条件"""
+    freq: str                          # 数据源频率："daily" | "minute"
+    indicator: str                     # 指标名称
+    operator: str                      # 比较运算符
+    threshold: float | None = None     # 数值阈值（数值比较时使用）
+    cross_target: str | None = None    # 交叉目标指标（cross_up/cross_down 时使用）
+    params: dict = field(default_factory=dict)  # 指标参数（如 {"period": 10}）
+
+    def to_dict(self) -> dict:
+        return {
+            "freq": self.freq,
+            "indicator": self.indicator,
+            "operator": self.operator,
+            "threshold": self.threshold,
+            "cross_target": self.cross_target,
+            "params": self.params,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ExitCondition":
+        return cls(
+            freq=data["freq"],
+            indicator=data["indicator"],
+            operator=data["operator"],
+            threshold=data.get("threshold"),
+            cross_target=data.get("cross_target"),
+            params=data.get("params", {}),
+        )
+
+
+@dataclass
+class ExitConditionConfig:
+    """自定义平仓条件配置"""
+    conditions: list[ExitCondition] = field(default_factory=list)
+    logic: str = "AND"  # "AND" | "OR"
+
+    def to_dict(self) -> dict:
+        return {
+            "conditions": [c.to_dict() for c in self.conditions],
+            "logic": self.logic,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ExitConditionConfig":
+        conditions = [
+            ExitCondition.from_dict(c)
+            for c in data.get("conditions", [])
+        ]
+        return cls(
+            conditions=conditions,
+            logic=data.get("logic", "AND"),
+        )

@@ -23,7 +23,7 @@ from typing import Any
 
 from app.core.schemas import (
     BacktestConfig, BacktestResult, KlineBar, ScreenItem,
-    ScreenResult, StrategyConfig, RiskLevel,
+    ScreenResult, StrategyConfig, RiskLevel, ExitConditionConfig,
 )
 from app.services.screener.screen_executor import ScreenExecutor
 
@@ -53,15 +53,16 @@ class _TradeRecord:
     quantity: int
     cost: Decimal  # 手续费 + 滑点
     amount: Decimal  # 成交金额（不含费用）
+    sell_reason: str = ""  # 卖出原因标识
 
 
 @dataclass
 class _SellSignal:
     """卖出信号"""
     symbol: str
-    reason: str   # "STOP_LOSS" | "TREND_BREAK" | "TRAILING_STOP" | "MAX_HOLDING_DAYS"
+    reason: str   # "STOP_LOSS" | "TREND_BREAK" | "TRAILING_STOP" | "MAX_HOLDING_DAYS" | "EXIT_CONDITION"
     trigger_date: date
-    priority: int  # 1=止损, 2=趋势破位, 3=移动止盈, 4=持仓超期
+    priority: int  # 1=止损, 2=趋势破位, 3=移动止盈, 4=持仓超期, 5=自定义平仓条件
 
 
 @dataclass
@@ -486,6 +487,204 @@ def _precompute_indicators(
         cache[symbol] = ic
 
     return cache
+
+
+# ---------------------------------------------------------------------------
+# 自定义平仓条件指标预计算（需求 4：指标计算与缓存扩展）
+# ---------------------------------------------------------------------------
+
+def _precompute_exit_indicators(
+    kline_data: dict[str, list[KlineBar]],
+    exit_config: ExitConditionConfig | None,
+    existing_cache: dict[str, IndicatorCache],
+) -> dict[str, dict[str, list[float]]]:
+    """
+    为自定义平仓条件补充计算非默认参数的指标。
+
+    检查 ExitConditionConfig 中引用的指标参数组合，对每种组合计算完整时间序列
+    并缓存。同时为所有引用的指标类型补充默认参数版本，确保评估器能通过
+    cache_key 直接查表。
+
+    返回 {symbol: {cache_key: values}} 格式的补充缓存。
+    cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5", "boll_upper_20_2.0" 等。
+
+    Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
+    """
+    from app.services.screener.indicators import (
+        DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL,
+        DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV,
+        DEFAULT_RSI_PERIOD,
+        DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG,
+        calculate_macd, calculate_boll, calculate_rsi, calculate_dma,
+    )
+    from app.services.screener.ma_trend import calculate_ma
+
+    if not exit_config or not exit_config.conditions:
+        return {}
+
+    # ------------------------------------------------------------------
+    # Step 1: Collect all indicator+params combos referenced by conditions
+    # ------------------------------------------------------------------
+    # Each entry: (indicator_name, frozen_params_dict)
+    ma_periods: set[int] = set()
+    macd_param_sets: set[tuple[int, int, int]] = set()  # (fast, slow, signal)
+    boll_param_sets: set[tuple[int, float]] = set()     # (period, std_dev)
+    rsi_periods: set[int] = set()
+    dma_param_sets: set[tuple[int, int]] = set()        # (short, long)
+
+    # Collect referenced indicator names (for default-param fallback)
+    referenced_indicators: set[str] = set()
+
+    for cond in exit_config.conditions:
+        # Only process daily-freq conditions (minute data handled separately)
+        indicator = cond.indicator
+        params = cond.params or {}
+        referenced_indicators.add(indicator)
+
+        # Also collect cross_target indicators
+        if cond.cross_target:
+            referenced_indicators.add(cond.cross_target)
+
+        _collect_indicator_params(
+            indicator, params,
+            ma_periods, macd_param_sets, boll_param_sets,
+            rsi_periods, dma_param_sets,
+        )
+        if cond.cross_target:
+            _collect_indicator_params(
+                cond.cross_target, params,
+                ma_periods, macd_param_sets, boll_param_sets,
+                rsi_periods, dma_param_sets,
+            )
+
+    # Ensure default params are included for all referenced indicator types
+    for ind_name in referenced_indicators:
+        if ind_name == "ma":
+            # MA always needs explicit period from params; no global default to add
+            pass
+        elif ind_name in ("macd_dif", "macd_dea", "macd_histogram"):
+            macd_param_sets.add((DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL))
+        elif ind_name in ("boll_upper", "boll_middle", "boll_lower"):
+            boll_param_sets.add((DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV))
+        elif ind_name == "rsi":
+            rsi_periods.add(DEFAULT_RSI_PERIOD)
+        elif ind_name in ("dma", "ama"):
+            dma_param_sets.add((DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG))
+
+    # If nothing to compute, return empty
+    if not (ma_periods or macd_param_sets or boll_param_sets
+            or rsi_periods or dma_param_sets):
+        return {}
+
+    # ------------------------------------------------------------------
+    # Step 2: Compute indicators per symbol
+    # ------------------------------------------------------------------
+    result: dict[str, dict[str, list[float]]] = {}
+
+    for symbol, ic in existing_cache.items():
+        closes = ic.closes
+        if not closes:
+            continue
+
+        sym_cache: dict[str, list[float]] = {}
+
+        # MA indicators
+        for period in ma_periods:
+            cache_key = f"ma_{period}"
+            sym_cache[cache_key] = calculate_ma(closes, period)
+
+        # MACD indicators
+        for fast, slow, signal in macd_param_sets:
+            macd_result = calculate_macd(closes, fast, slow, signal)
+            suffix = f"_{fast}_{slow}_{signal}"
+            sym_cache[f"macd_dif{suffix}"] = macd_result.dif
+            sym_cache[f"macd_dea{suffix}"] = macd_result.dea
+            sym_cache[f"macd_histogram{suffix}"] = macd_result.macd
+            # Also store without suffix for default params lookup
+            if (fast, slow, signal) == (DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL):
+                sym_cache["macd_dif"] = macd_result.dif
+                sym_cache["macd_dea"] = macd_result.dea
+                sym_cache["macd_histogram"] = macd_result.macd
+
+        # BOLL indicators
+        for period, std_dev in boll_param_sets:
+            boll_result = calculate_boll(closes, period, std_dev)
+            suffix = f"_{period}_{std_dev}"
+            sym_cache[f"boll_upper{suffix}"] = boll_result.upper
+            sym_cache[f"boll_middle{suffix}"] = boll_result.middle
+            sym_cache[f"boll_lower{suffix}"] = boll_result.lower
+            # Also store without suffix for default params lookup
+            if (period, std_dev) == (DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV):
+                sym_cache["boll_upper"] = boll_result.upper
+                sym_cache["boll_middle"] = boll_result.middle
+                sym_cache["boll_lower"] = boll_result.lower
+
+        # RSI indicators
+        for period in rsi_periods:
+            rsi_result = calculate_rsi(closes, period)
+            sym_cache[f"rsi_{period}"] = rsi_result.values
+            # Also store without suffix for default params lookup
+            if period == DEFAULT_RSI_PERIOD:
+                sym_cache["rsi"] = rsi_result.values
+
+        # DMA / AMA indicators
+        for short_p, long_p in dma_param_sets:
+            dma_result = calculate_dma(closes, short_p, long_p)
+            suffix = f"_{short_p}_{long_p}"
+            sym_cache[f"dma{suffix}"] = dma_result.dma
+            sym_cache[f"ama{suffix}"] = dma_result.ama
+            # Also store without suffix for default params lookup
+            if (short_p, long_p) == (DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG):
+                sym_cache["dma"] = dma_result.dma
+                sym_cache["ama"] = dma_result.ama
+
+        if sym_cache:
+            result[symbol] = sym_cache
+
+    return result
+
+
+def _collect_indicator_params(
+    indicator: str,
+    params: dict,
+    ma_periods: set[int],
+    macd_param_sets: set[tuple[int, int, int]],
+    boll_param_sets: set[tuple[int, float]],
+    rsi_periods: set[int],
+    dma_param_sets: set[tuple[int, int]],
+) -> None:
+    """从单个条件的 indicator + params 中提取指标参数组合。"""
+    from app.services.screener.indicators import (
+        DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL,
+        DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV,
+        DEFAULT_RSI_PERIOD,
+        DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG,
+    )
+
+    if indicator == "ma":
+        period = params.get("period")
+        if period is not None:
+            ma_periods.add(int(period))
+
+    elif indicator in ("macd_dif", "macd_dea", "macd_histogram"):
+        fast = params.get("macd_fast", DEFAULT_MACD_FAST)
+        slow = params.get("macd_slow", DEFAULT_MACD_SLOW)
+        signal = params.get("macd_signal", DEFAULT_MACD_SIGNAL)
+        macd_param_sets.add((int(fast), int(slow), int(signal)))
+
+    elif indicator in ("boll_upper", "boll_middle", "boll_lower"):
+        period = params.get("boll_period", DEFAULT_BOLL_PERIOD)
+        std_dev = params.get("boll_std_dev", DEFAULT_BOLL_STD_DEV)
+        boll_param_sets.add((int(period), float(std_dev)))
+
+    elif indicator == "rsi":
+        period = params.get("rsi_period", DEFAULT_RSI_PERIOD)
+        rsi_periods.add(int(period))
+
+    elif indicator in ("dma", "ama"):
+        short_p = params.get("dma_short", DEFAULT_DMA_SHORT)
+        long_p = params.get("dma_long", DEFAULT_DMA_LONG)
+        dma_param_sets.add((int(short_p), int(long_p)))
 
 
 # ---------------------------------------------------------------------------
@@ -1331,11 +1530,13 @@ class BacktestEngine:
         kline_data: dict[str, list[KlineBar]],
         config: BacktestConfig,
         date_index: dict[str, KlineDateIndex] | None = None,
+        indicator_cache: dict[str, IndicatorCache] | None = None,
+        exit_indicator_cache: dict[str, dict[str, list[float]]] | None = None,
     ) -> _SellSignal | None:
         """
         检查单只持仓标的的卖出条件。
 
-        优先级：1=止损, 2=趋势破位, 3=移动止盈, 4=持仓超期。
+        优先级：1=止损, 2=趋势破位, 3=移动止盈, 4=持仓超期, 5=自定义平仓条件。
         停牌（无K线数据）时暂停检测，返回 None。
         """
         bars = kline_data.get(position.symbol)
@@ -1418,6 +1619,58 @@ class BacktestEngine:
                 trigger_date=trade_date,
                 priority=4,
             )
+
+        # 5. 自定义平仓条件（优先级 5，最低）
+        if config.exit_conditions is not None and indicator_cache is not None:
+            sym_ic = indicator_cache.get(position.symbol)
+            sym_exit_cache = (
+                exit_indicator_cache.get(position.symbol)
+                if exit_indicator_cache
+                else None
+            )
+            if sym_ic is not None:
+                try:
+                    from app.services.exit_condition_evaluator import ExitConditionEvaluator
+
+                    evaluator = ExitConditionEvaluator()
+                    # Resolve bar_index for trade_date
+                    idx_info = date_index.get(position.symbol) if date_index else None
+                    if idx_info is not None:
+                        bar_index = _get_bars_up_to(idx_info, trade_date)
+                    else:
+                        bars = kline_data.get(position.symbol)
+                        if bars:
+                            bar_index = -1
+                            for i, b in enumerate(bars):
+                                if b.time.date() <= trade_date:
+                                    bar_index = i
+                            # bar_index is the last bar <= trade_date
+                        else:
+                            bar_index = -1
+
+                    if bar_index >= 0:
+                        triggered, reason = evaluator.evaluate(
+                            config.exit_conditions,
+                            position.symbol,
+                            bar_index,
+                            sym_ic,
+                            sym_exit_cache,
+                        )
+                        if triggered:
+                            sell_reason = "EXIT_CONDITION"
+                            if reason:
+                                sell_reason = f"EXIT_CONDITION: {reason}"
+                            return _SellSignal(
+                                symbol=position.symbol,
+                                reason=sell_reason,
+                                trigger_date=trade_date,
+                                priority=5,
+                            )
+                except Exception:
+                    logger.exception(
+                        "Error evaluating custom exit conditions for %s",
+                        position.symbol,
+                    )
 
         return None
 
@@ -1718,6 +1971,7 @@ class BacktestEngine:
                 quantity=position.quantity,
                 cost=sell_cost,
                 amount=open_price * position.quantity,
+                sell_reason=signal.reason,
             )
             trade_records.append(record)
             state.trade_records.append(record)
@@ -1792,6 +2046,16 @@ class BacktestEngine:
             _t1 - _t0,
         )
 
+        # 自定义平仓条件指标预计算（Requirements 4.1, 4.2）
+        exit_indicator_cache = _precompute_exit_indicators(
+            kline_data, config.exit_conditions, indicator_cache,
+        )
+        if exit_indicator_cache:
+            logger.info(
+                "预计算阶段：自定义平仓条件指标缓存构建完成，股票数 = %d",
+                len(exit_indicator_cache),
+            )
+
         for idx, trade_date in enumerate(trade_dates):
             state.trade_day_index = idx
             self._current_trade_day_index = idx  # for _check_sell_conditions
@@ -1819,6 +2083,8 @@ class BacktestEngine:
             for symbol, position in list(state.positions.items()):
                 signal = self._check_sell_conditions(
                     position, trade_date, kline_data, config, date_index,
+                    indicator_cache=indicator_cache,
+                    exit_indicator_cache=exit_indicator_cache,
                 )
                 if signal is not None:
                     sell_signals.append(signal)
@@ -1911,6 +2177,7 @@ class BacktestEngine:
                 "quantity": tr.quantity,
                 "cost": float(tr.cost),
                 "amount": float(tr.amount),
+                "sell_reason": tr.sell_reason,
             }
             for tr in state.trade_records
         ]
@@ -2115,7 +2382,7 @@ class BacktestEngine:
 
         # 交易流水
         writer.writerow(["=== 交易流水 ==="])
-        writer.writerow(["日期", "股票代码", "方向", "价格", "数量", "手续费", "成交金额"])
+        writer.writerow(["日期", "股票代码", "方向", "价格", "数量", "手续费", "成交金额", "平仓原因"])
         for tr in result.trade_records:
             writer.writerow([
                 tr.get("date", ""),
@@ -2125,6 +2392,7 @@ class BacktestEngine:
                 tr.get("quantity", ""),
                 tr.get("cost", ""),
                 tr.get("amount", ""),
+                tr.get("sell_reason", ""),
             ])
 
         return buf.getvalue().encode("utf-8-sig")

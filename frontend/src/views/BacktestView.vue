@@ -41,6 +41,80 @@
           <span class="hint">默认 0.1%</span>
         </div>
       </div>
+      <!-- 自定义平仓条件面板 -->
+      <div class="exit-conditions-panel">
+        <button
+          class="panel-toggle"
+          @click="exitPanelOpen = !exitPanelOpen"
+          :aria-expanded="exitPanelOpen"
+          aria-controls="exit-conditions-content"
+        >
+          <span>自定义平仓条件</span>
+          <span class="toggle-icon">{{ exitPanelOpen ? '▲' : '▼' }}</span>
+        </button>
+        <div v-if="exitPanelOpen" id="exit-conditions-content" class="panel-content">
+          <div class="logic-selector">
+            <label for="exit-logic">条件逻辑:</label>
+            <select id="exit-logic" v-model="form.exitConditions.logic" class="input input-sm">
+              <option value="AND">AND</option>
+              <option value="OR">OR</option>
+            </select>
+          </div>
+
+          <div v-if="form.exitConditions.conditions.length" class="conditions-list">
+            <div
+              v-for="(cond, idx) in form.exitConditions.conditions"
+              :key="idx"
+              class="condition-row"
+            >
+              <div class="condition-fields">
+                <select v-model="cond.freq" class="input input-sm" :aria-label="'条件' + (idx + 1) + '数据源频率'">
+                  <option v-for="f in freqOptions" :key="f.value" :value="f.value">{{ f.label }}</option>
+                </select>
+                <select v-model="cond.indicator" class="input input-sm" :aria-label="'条件' + (idx + 1) + '指标'" @change="onIndicatorChange(idx)">
+                  <option v-for="ind in indicatorOptions" :key="ind.value" :value="ind.value">{{ ind.label }}</option>
+                </select>
+                <select v-model="cond.operator" class="input input-sm" :aria-label="'条件' + (idx + 1) + '运算符'" @change="onOperatorChange(idx)">
+                  <option v-for="op in operatorOptions" :key="op.value" :value="op.value">{{ op.label }}</option>
+                </select>
+                <select
+                  v-if="isCrossOperator(cond.operator)"
+                  v-model="cond.crossTarget"
+                  class="input input-sm"
+                  :aria-label="'条件' + (idx + 1) + '交叉目标'"
+                >
+                  <option v-for="ind in indicatorOptions" :key="ind.value" :value="ind.value">{{ ind.label }}</option>
+                </select>
+                <input
+                  v-else
+                  v-model.number="cond.threshold"
+                  type="number"
+                  step="any"
+                  class="input input-sm"
+                  placeholder="阈值"
+                  :aria-label="'条件' + (idx + 1) + '阈值'"
+                />
+                <button class="btn btn-icon btn-danger-ghost" @click="removeCondition(idx)" :aria-label="'删除条件' + (idx + 1)">✕</button>
+              </div>
+              <div v-if="cond.indicator === 'ma'" class="condition-params">
+                <label :for="'ma-period-' + idx">周期:</label>
+                <input
+                  :id="'ma-period-' + idx"
+                  v-model.number="cond.params.period"
+                  type="number"
+                  min="1"
+                  step="1"
+                  class="input input-sm input-narrow"
+                  placeholder="20"
+                />
+              </div>
+            </div>
+          </div>
+
+          <button class="btn btn-outline btn-sm" @click="addCondition" aria-label="添加平仓条件">+ 添加条件</button>
+        </div>
+      </div>
+
       <div class="form-actions">
         <button class="btn btn-primary" @click="runBacktest" :disabled="running" aria-label="开始回测">
           <span v-if="running" class="spinner" aria-hidden="true"></span>
@@ -105,6 +179,7 @@
               <th scope="col">价格（元）</th>
               <th scope="col">金额（元）</th>
               <th scope="col">手续费（元）</th>
+              <th scope="col">平仓原因</th>
               <th scope="col">状态</th>
             </tr>
           </thead>
@@ -121,6 +196,7 @@
               <td>{{ t.price?.toFixed(2) ?? '—' }}</td>
               <td>{{ t.amount != null ? t.amount.toLocaleString('zh-CN', { minimumFractionDigits: 2 }) : '—' }}</td>
               <td>{{ t.commission?.toFixed(2) ?? '—' }}</td>
+              <td>{{ t.direction === 'SELL' ? formatSellReason(t.sell_reason) : '—' }}</td>
               <td>
                 <span class="status-badge" :class="t.status?.toLowerCase()">{{ t.status ?? '—' }}</span>
               </td>
@@ -228,6 +304,97 @@ if (!store.form.startDate) {
 
 const form = store.form
 
+// ─── 自定义平仓条件 ───────────────────────────────────────────────────────────
+
+const exitPanelOpen = ref(false)
+
+const freqOptions = [
+  { value: 'daily', label: 'daily' },
+  { value: 'minute', label: 'minute' },
+]
+
+const indicatorOptions = [
+  { value: 'ma', label: 'MA' },
+  { value: 'macd_dif', label: 'MACD_DIF' },
+  { value: 'macd_dea', label: 'MACD_DEA' },
+  { value: 'macd_histogram', label: 'MACD_HIST' },
+  { value: 'boll_upper', label: 'BOLL_UP' },
+  { value: 'boll_middle', label: 'BOLL_MID' },
+  { value: 'boll_lower', label: 'BOLL_LOW' },
+  { value: 'rsi', label: 'RSI' },
+  { value: 'dma', label: 'DMA' },
+  { value: 'ama', label: 'AMA' },
+  { value: 'close', label: 'CLOSE' },
+  { value: 'volume', label: 'VOLUME' },
+  { value: 'turnover', label: 'TURNOVER' },
+]
+
+const operatorOptions = [
+  { value: '>', label: '>' },
+  { value: '<', label: '<' },
+  { value: '>=', label: '>=' },
+  { value: '<=', label: '<=' },
+  { value: 'cross_up', label: 'cross_up' },
+  { value: 'cross_down', label: 'cross_down' },
+]
+
+function isCrossOperator(op: string): boolean {
+  return op === 'cross_up' || op === 'cross_down'
+}
+
+function addCondition() {
+  form.exitConditions.conditions.push({
+    freq: 'daily',
+    indicator: 'rsi',
+    operator: '>',
+    threshold: null,
+    crossTarget: null,
+    params: {},
+  })
+}
+
+function removeCondition(index: number) {
+  form.exitConditions.conditions.splice(index, 1)
+}
+
+function onOperatorChange(index: number) {
+  const cond = form.exitConditions.conditions[index]
+  if (isCrossOperator(cond.operator)) {
+    cond.threshold = null
+    if (!cond.crossTarget) cond.crossTarget = 'close'
+  } else {
+    cond.crossTarget = null
+  }
+}
+
+function onIndicatorChange(index: number) {
+  const cond = form.exitConditions.conditions[index]
+  if (cond.indicator === 'ma') {
+    if (!cond.params.period) cond.params.period = 20
+  } else {
+    delete cond.params.period
+  }
+}
+
+// ─── 平仓原因格式化 ───────────────────────────────────────────────────────────
+
+const SELL_REASON_MAP: Record<string, string> = {
+  STOP_LOSS: '固定止损',
+  TREND_BREAK: '趋势破位',
+  TRAILING_STOP: '移动止盈',
+  MAX_HOLDING_DAYS: '持仓超期',
+}
+
+function formatSellReason(reason?: string): string {
+  if (!reason) return '—'
+  if (SELL_REASON_MAP[reason]) return SELL_REASON_MAP[reason]
+  if (reason.startsWith('EXIT_CONDITION')) {
+    const desc = reason.replace(/^EXIT_CONDITION[:\s]*/, '').trim()
+    return desc ? `自定义条件: ${desc}` : '自定义条件'
+  }
+  return reason
+}
+
 // ─── 计算属性 ─────────────────────────────────────────────────────────────────
 
 const tradeRecords = computed<TradeOrder[]>(() => result.value?.trade_records ?? [])
@@ -267,7 +434,7 @@ watch(tradeRecords, () => { tradePage.value = 1 })
 function exportTradeCSV() {
   const rows = tradeRecords.value
   if (!rows.length) return
-  const header = '时间,股票代码,方向,数量(股),价格(元),金额(元),手续费(元),状态'
+  const header = '时间,股票代码,方向,数量(股),价格(元),金额(元),手续费(元),平仓原因,状态'
   const lines = rows.map(t =>
     [
       t.created_at?.slice(0, 16) ?? '',
@@ -277,6 +444,7 @@ function exportTradeCSV() {
       t.price?.toFixed(2) ?? '',
       t.amount?.toFixed(2) ?? '',
       t.commission?.toFixed(2) ?? '',
+      t.direction === 'SELL' ? formatSellReason(t.sell_reason) : '',
       t.status ?? '',
     ].join(',')
   )
@@ -611,7 +779,7 @@ onUnmounted(() => {
 
 /* ─── 交易流水表格 ──────────────────────────────────────────────────────────── */
 .table-wrap { overflow-x: auto; }
-.data-table { width: 100%; border-collapse: collapse; min-width: 700px; }
+.data-table { width: 100%; border-collapse: collapse; min-width: 800px; }
 .data-table th,
 .data-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; font-size: 13px; white-space: nowrap; }
 .data-table th { color: #8b949e; font-weight: 500; }
@@ -653,4 +821,25 @@ onUnmounted(() => {
   padding: 4px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px; cursor: pointer;
 }
 .page-size-select:focus { outline: none; border-color: #58a6ff; }
+
+/* ─── 自定义平仓条件面板 ────────────────────────────────────────────────────── */
+.exit-conditions-panel { margin-top: 16px; border: 1px solid #30363d; border-radius: 6px; overflow: hidden; }
+.panel-toggle {
+  width: 100%; display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; background: #0d1117; border: none; color: #e6edf3;
+  font-size: 14px; cursor: pointer;
+}
+.panel-toggle:hover { background: #161b22; }
+.toggle-icon { font-size: 12px; color: #8b949e; }
+.panel-content { padding: 14px; background: #0d1117; border-top: 1px solid #30363d; }
+.logic-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: #8b949e; }
+.conditions-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.condition-row { display: flex; flex-direction: column; gap: 6px; }
+.condition-fields { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.condition-params { display: flex; align-items: center; gap: 6px; margin-left: 4px; font-size: 13px; color: #8b949e; }
+.input-sm { padding: 4px 8px; font-size: 13px; }
+.input-narrow { width: 70px; }
+.btn-icon { padding: 4px 8px; font-size: 13px; line-height: 1; border-radius: 4px; }
+.btn-danger-ghost { background: transparent; border: 1px solid #30363d; color: #f85149; cursor: pointer; }
+.btn-danger-ghost:hover { background: rgba(248,81,73,0.1); border-color: #f85149; }
 </style>
