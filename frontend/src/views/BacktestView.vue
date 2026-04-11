@@ -53,6 +53,69 @@
           <span class="toggle-icon">{{ exitPanelOpen ? '▲' : '▼' }}</span>
         </button>
         <div v-if="exitPanelOpen" id="exit-conditions-content" class="panel-content">
+          <div class="template-selector">
+            <label for="exit-template">模版:</label>
+            <select
+              id="exit-template"
+              :value="selectedTemplateId ?? ''"
+              class="input input-sm"
+              :disabled="templateLoading"
+              @change="onTemplateSelect"
+            >
+              <option value="">无</option>
+              <option v-for="tpl in exitTemplates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
+            </select>
+            <span v-if="templateLoading" class="template-loading">加载中...</span>
+            <button
+              class="btn btn-outline btn-sm"
+              :disabled="exitTemplates.length === 0"
+              @click="showManagePanel = !showManagePanel"
+              aria-label="管理模版"
+            >⚙ 管理</button>
+            <button
+              class="btn btn-outline btn-sm"
+              :disabled="form.exitConditions.conditions.length === 0"
+              @click="showSaveDialog = true"
+              aria-label="保存为模版"
+            >💾 保存为模版</button>
+          </div>
+
+          <!-- 模版管理面板 -->
+          <div v-if="showManagePanel" class="manage-panel">
+            <div class="manage-panel-header">
+              <span class="manage-panel-title">模版管理</span>
+              <button class="btn btn-icon btn-danger-ghost" @click="showManagePanel = false" aria-label="关闭管理面板">✕</button>
+            </div>
+            <div v-if="exitTemplates.length === 0" class="manage-empty">暂无模版</div>
+            <div v-else class="manage-list">
+              <div v-for="tpl in exitTemplates" :key="tpl.id" class="manage-item">
+                <div v-if="renamingTemplateId === tpl.id" class="manage-item-edit">
+                  <input
+                    v-model.trim="renameValue"
+                    type="text"
+                    class="input input-sm"
+                    maxlength="100"
+                    placeholder="模版名称"
+                    @keyup.enter="confirmRename(tpl.id)"
+                    @keyup.escape="cancelRename"
+                  />
+                  <button class="btn btn-primary btn-sm" :disabled="!renameValue || renaming" @click="confirmRename(tpl.id)">
+                    {{ renaming ? '...' : '确认' }}
+                  </button>
+                  <button class="btn btn-outline btn-sm" :disabled="renaming" @click="cancelRename">取消</button>
+                </div>
+                <template v-else>
+                  <span class="manage-item-name" :title="tpl.description || ''">{{ tpl.name }}</span>
+                  <div class="manage-item-actions">
+                    <button class="btn btn-outline btn-sm" @click="startRename(tpl)" aria-label="重命名模版">✏️</button>
+                    <button class="btn btn-danger-ghost btn-sm" @click="confirmDeleteTemplate(tpl)" aria-label="删除模版">🗑️</button>
+                  </div>
+                </template>
+              </div>
+            </div>
+            <p v-if="manageError" class="manage-error">{{ manageError }}</p>
+          </div>
+
           <div class="logic-selector">
             <label for="exit-logic">条件逻辑:</label>
             <select id="exit-logic" v-model="form.exitConditions.logic" class="input input-sm">
@@ -116,11 +179,11 @@
       </div>
 
       <div class="form-actions">
-        <button class="btn btn-primary" @click="runBacktest" :disabled="running" aria-label="开始回测">
+        <button class="btn btn-primary" @click="runBacktest" :disabled="running || !form.strategyId" aria-label="开始回测">
           <span v-if="running" class="spinner" aria-hidden="true"></span>
           {{ running ? '回测中...' : '开始回测' }}
         </button>
-        <button class="btn btn-outline" @click="runOptimize" :disabled="optimizing || running">
+        <button class="btn btn-outline" @click="runOptimize" :disabled="optimizing || running || !form.strategyId">
           {{ optimizing ? '优化中...' : '参数优化' }}
         </button>
       </div>
@@ -222,6 +285,62 @@
       </nav>
     </section>
 
+    <!-- 保存模版对话框 -->
+    <div v-if="showSaveDialog" class="dialog-overlay" @click.self="closeSaveDialog">
+      <div class="dialog-box" role="dialog" aria-label="保存为模版">
+        <h3 class="dialog-title">保存为模版</h3>
+        <div class="dialog-body">
+          <div class="dialog-field">
+            <label for="tpl-name">模版名称 <span class="required">*</span></label>
+            <input
+              id="tpl-name"
+              v-model.trim="templateName"
+              type="text"
+              class="input"
+              maxlength="100"
+              placeholder="请输入模版名称"
+            />
+          </div>
+          <div class="dialog-field">
+            <label for="tpl-desc">描述</label>
+            <input
+              id="tpl-desc"
+              v-model.trim="templateDescription"
+              type="text"
+              class="input"
+              maxlength="500"
+              placeholder="可选描述"
+            />
+          </div>
+          <p v-if="saveError" class="dialog-error">{{ saveError }}</p>
+          <p v-if="saveSuccess" class="dialog-success">保存成功</p>
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-outline" @click="closeSaveDialog" :disabled="saving">取消</button>
+          <button class="btn btn-primary" @click="handleSaveTemplate" :disabled="!templateName || saving">
+            {{ saving ? '保存中...' : '确认保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 删除模版确认对话框 -->
+    <div v-if="showDeleteConfirm" class="dialog-overlay" @click.self="cancelDelete">
+      <div class="dialog-box" role="dialog" aria-label="确认删除模版">
+        <h3 class="dialog-title">确认删除</h3>
+        <div class="dialog-body">
+          <p class="dialog-text">确定要删除模版「{{ deletingTemplate?.name }}」吗？此操作不可撤销。</p>
+          <p v-if="deleteError" class="dialog-error">{{ deleteError }}</p>
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-outline" @click="cancelDelete" :disabled="deleting">取消</button>
+          <button class="btn btn-danger" @click="handleDeleteTemplate" :disabled="deleting">
+            {{ deleting ? '删除中...' : '确认删除' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- 参数优化结果 -->
     <section v-if="optimizeResults.length" class="card" aria-label="参数优化结果">
       <h2 class="section-title">参数优化结果 (Top 10)</h2>
@@ -255,14 +374,28 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { storeToRefs } from 'pinia'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
-import { useBacktestStore } from '@/stores/backtest'
+import { useBacktestStore, FREQ_OPTIONS } from '@/stores/backtest'
 import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus } from '@/stores/backtest'
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 const store = useBacktestStore()
+
+const {
+  exitTemplates,
+  selectedTemplateId,
+  templateLoading,
+} = storeToRefs(store)
+
+const {
+  fetchExitTemplates,
+  loadExitTemplate,
+  updateExitTemplate,
+  deleteExitTemplate,
+} = store
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -308,10 +441,35 @@ const form = store.form
 
 const exitPanelOpen = ref(false)
 
-const freqOptions = [
-  { value: 'daily', label: 'daily' },
-  { value: 'minute', label: 'minute' },
-]
+// 保存模版对话框状态
+const showSaveDialog = ref(false)
+const templateName = ref('')
+const templateDescription = ref('')
+const saveError = ref('')
+const saveSuccess = ref(false)
+const saving = ref(false)
+
+// 模版管理面板状态
+const showManagePanel = ref(false)
+const renamingTemplateId = ref<string | null>(null)
+const renameValue = ref('')
+const renaming = ref(false)
+const manageError = ref('')
+
+// 删除确认对话框状态
+const showDeleteConfirm = ref(false)
+const deletingTemplate = ref<{ id: string; name: string } | null>(null)
+const deleting = ref(false)
+const deleteError = ref('')
+
+// 面板展开时自动加载模版列表
+watch(exitPanelOpen, (open) => {
+  if (open) {
+    fetchExitTemplates()
+  }
+})
+
+const freqOptions = FREQ_OPTIONS
 
 const indicatorOptions = [
   { value: 'ma', label: 'MA' },
@@ -373,6 +531,119 @@ function onIndicatorChange(index: number) {
     if (!cond.params.period) cond.params.period = 20
   } else {
     delete cond.params.period
+  }
+}
+
+function onTemplateSelect(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
+  if (value) {
+    loadExitTemplate(value)
+  } else {
+    selectedTemplateId.value = null
+    form.exitConditions.conditions = []
+    form.exitConditions.logic = 'AND'
+  }
+}
+
+function closeSaveDialog() {
+  showSaveDialog.value = false
+  templateName.value = ''
+  templateDescription.value = ''
+  saveError.value = ''
+  saveSuccess.value = false
+}
+
+async function handleSaveTemplate() {
+  if (!templateName.value || saving.value) return
+  saving.value = true
+  saveError.value = ''
+  saveSuccess.value = false
+  try {
+    await store.createExitTemplate(
+      templateName.value,
+      templateDescription.value || undefined,
+    )
+    saveSuccess.value = true
+    setTimeout(() => closeSaveDialog(), 800)
+  } catch (e: unknown) {
+    // Axios 拦截器会将错误转为 Error 对象，需要从 message 或原始 response 中提取信息
+    const axiosErr = e as { response?: { status?: number; data?: { detail?: string } }; message?: string }
+    const status = axiosErr.response?.status
+    const detail = axiosErr.response?.data?.detail ?? ''
+    const message = axiosErr.message ?? (e instanceof Error ? e.message : '')
+    if (status === 409 || message.includes('409')) {
+      if (detail.includes('上限') || message.includes('上限')) {
+        saveError.value = '模版数量已达上限'
+      } else {
+        saveError.value = '模版名称已存在'
+      }
+    } else {
+      saveError.value = detail || message || '保存失败，请重试'
+    }
+  } finally {
+    saving.value = false
+  }
+}
+
+// ─── 模版管理功能 ─────────────────────────────────────────────────────────────
+
+function startRename(tpl: { id: string; name: string }) {
+  renamingTemplateId.value = tpl.id
+  renameValue.value = tpl.name
+  manageError.value = ''
+}
+
+function cancelRename() {
+  renamingTemplateId.value = null
+  renameValue.value = ''
+}
+
+async function confirmRename(templateId: string) {
+  if (!renameValue.value || renaming.value) return
+  renaming.value = true
+  manageError.value = ''
+  try {
+    await updateExitTemplate(templateId, { name: renameValue.value })
+    renamingTemplateId.value = null
+    renameValue.value = ''
+  } catch (e: unknown) {
+    const err = e as { response?: { status?: number; data?: { detail?: string } } }
+    const detail = err.response?.data?.detail ?? ''
+    if (err.response?.status === 409) {
+      manageError.value = '模版名称已存在'
+    } else {
+      manageError.value = detail || '重命名失败，请重试'
+    }
+  } finally {
+    renaming.value = false
+  }
+}
+
+function confirmDeleteTemplate(tpl: { id: string; name: string }) {
+  deletingTemplate.value = tpl
+  showDeleteConfirm.value = true
+  deleteError.value = ''
+}
+
+function cancelDelete() {
+  showDeleteConfirm.value = false
+  deletingTemplate.value = null
+  deleteError.value = ''
+}
+
+async function handleDeleteTemplate() {
+  if (!deletingTemplate.value || deleting.value) return
+  deleting.value = true
+  deleteError.value = ''
+  try {
+    await deleteExitTemplate(deletingTemplate.value.id)
+    showDeleteConfirm.value = false
+    deletingTemplate.value = null
+  } catch (e: unknown) {
+    const err = e as { response?: { status?: number; data?: { detail?: string } } }
+    deleteError.value = err.response?.data?.detail ?? '删除失败，请重试'
+  } finally {
+    deleting.value = false
   }
 }
 
@@ -842,4 +1113,55 @@ onUnmounted(() => {
 .btn-icon { padding: 4px 8px; font-size: 13px; line-height: 1; border-radius: 4px; }
 .btn-danger-ghost { background: transparent; border: 1px solid #30363d; color: #f85149; cursor: pointer; }
 .btn-danger-ghost:hover { background: rgba(248,81,73,0.1); border-color: #f85149; }
+
+/* ─── 模版选择 ──────────────────────────────────────────────────────────────── */
+.template-selector { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: #8b949e; }
+.template-selector select { min-width: 180px; }
+.template-loading { font-size: 12px; color: #8b949e; }
+
+/* ─── 保存模版对话框 ────────────────────────────────────────────────────────── */
+.dialog-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex;
+  align-items: center; justify-content: center; z-index: 1000;
+}
+.dialog-box {
+  background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+  padding: 20px; width: 400px; max-width: 90vw;
+}
+.dialog-title { font-size: 16px; color: #e6edf3; margin-bottom: 16px; }
+.dialog-body { display: flex; flex-direction: column; gap: 12px; }
+.dialog-field { display: flex; flex-direction: column; gap: 4px; }
+.dialog-field label { font-size: 13px; color: #8b949e; }
+.required { color: #f85149; }
+.dialog-error { font-size: 13px; color: #f85149; margin: 0; }
+.dialog-success { font-size: 13px; color: #3fb950; margin: 0; }
+.dialog-text { font-size: 14px; color: #e6edf3; margin: 0; line-height: 1.5; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+/* ─── 删除按钮 ──────────────────────────────────────────────────────────────── */
+.btn-danger { background: #da3633; color: #fff; }
+.btn-danger:hover:not(:disabled) { background: #f85149; }
+
+/* ─── 模版管理面板 ──────────────────────────────────────────────────────────── */
+.manage-panel {
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+  padding: 12px; margin-bottom: 12px;
+}
+.manage-panel-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;
+}
+.manage-panel-title { font-size: 14px; color: #e6edf3; font-weight: 500; }
+.manage-empty { font-size: 13px; color: #484f58; text-align: center; padding: 8px 0; }
+.manage-list { display: flex; flex-direction: column; gap: 6px; }
+.manage-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 6px 8px; border-radius: 4px; background: #0d1117;
+}
+.manage-item-name {
+  font-size: 13px; color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.manage-item-actions { display: flex; gap: 4px; flex-shrink: 0; margin-left: 8px; }
+.manage-item-edit { display: flex; align-items: center; gap: 6px; width: 100%; }
+.manage-item-edit .input { flex: 1; min-width: 0; }
+.manage-error { font-size: 13px; color: #f85149; margin: 8px 0 0; }
 </style>

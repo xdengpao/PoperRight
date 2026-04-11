@@ -64,6 +64,9 @@ apiClient.interceptors.response.use(
         return Promise.reject(new Error('权限不足，无法执行此操作'))
       case 404:
         return Promise.reject(new Error('请求的资源不存在'))
+      case 409:
+        // 保留原始错误，让调用方处理冲突逻辑
+        return Promise.reject(error)
       case 422:
         return Promise.reject(new Error(data?.detail ?? '数据校验失败'))
       case 429:

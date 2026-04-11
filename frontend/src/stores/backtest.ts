@@ -45,12 +45,40 @@ export interface OptimizeResult {
 }
 
 export interface ExitConditionForm {
-  freq: 'daily' | 'minute'
+  freq: 'daily' | '1min' | '5min' | '15min' | '30min' | '60min'
   indicator: string
   operator: string
   threshold: number | null
   crossTarget: string | null
   params: Record<string, number>
+}
+
+export const FREQ_OPTIONS = [
+  { value: 'daily', label: '日K' },
+  { value: '1min', label: '1分钟' },
+  { value: '5min', label: '5分钟' },
+  { value: '15min', label: '15分钟' },
+  { value: '30min', label: '30分钟' },
+  { value: '60min', label: '60分钟' },
+] as const
+
+export interface ExitTemplate {
+  id: string
+  name: string
+  description: string | null
+  exit_conditions: {
+    conditions: Array<{
+      freq: string
+      indicator: string
+      operator: string
+      threshold: number | null
+      cross_target: string | null
+      params: Record<string, number>
+    }>
+    logic: 'AND' | 'OR'
+  }
+  created_at: string
+  updated_at: string
 }
 
 export type RunStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed'
@@ -63,6 +91,11 @@ export const useBacktestStore = defineStore('backtest', () => {
   const runError = ref('')
   const optimizeResults = ref<OptimizeResult[]>([])
   const activeTaskId = ref<string | null>(null)
+
+  // 模版状态
+  const exitTemplates = ref<ExitTemplate[]>([])
+  const selectedTemplateId = ref<string | null>(null)
+  const templateLoading = ref(false)
 
   // 回测参数（跨页面保持）
   const form = ref({
@@ -236,6 +269,77 @@ export const useBacktestStore = defineStore('backtest', () => {
     pollAborted = true
   }
 
+  // ─── 模版 CRUD 方法 ──────────────────────────────────────────────────────────
+
+  async function fetchExitTemplates() {
+    templateLoading.value = true
+    try {
+      const res = await apiClient.get<ExitTemplate[]>('/backtest/exit-templates')
+      exitTemplates.value = res.data
+    } finally {
+      templateLoading.value = false
+    }
+  }
+
+  async function createExitTemplate(name: string, description?: string) {
+    const exitConds = form.value.exitConditions
+    const payload = {
+      name,
+      description: description ?? null,
+      exit_conditions: {
+        conditions: exitConds.conditions.map((c) => ({
+          freq: c.freq,
+          indicator: c.indicator,
+          operator: c.operator,
+          threshold: c.threshold,
+          cross_target: c.crossTarget,
+          params: c.params,
+        })),
+        logic: exitConds.logic,
+      },
+    }
+    const res = await apiClient.post<ExitTemplate>('/backtest/exit-templates', payload)
+    await fetchExitTemplates()
+    return res.data
+  }
+
+  async function loadExitTemplate(templateId: string) {
+    templateLoading.value = true
+    try {
+      const res = await apiClient.get<ExitTemplate>(`/backtest/exit-templates/${templateId}`)
+      const tpl = res.data
+      selectedTemplateId.value = templateId
+      // snake_case → camelCase 转换
+      form.value.exitConditions = {
+        conditions: (tpl.exit_conditions.conditions ?? []).map((c) => ({
+          freq: c.freq as ExitConditionForm['freq'],
+          indicator: c.indicator,
+          operator: c.operator,
+          threshold: c.threshold ?? null,
+          crossTarget: c.cross_target ?? null,
+          params: c.params ?? {},
+        })),
+        logic: (tpl.exit_conditions.logic ?? 'AND') as 'AND' | 'OR',
+      }
+    } finally {
+      templateLoading.value = false
+    }
+  }
+
+  async function updateExitTemplate(templateId: string, data: Partial<{ name: string; description: string | null; exit_conditions: ExitTemplate['exit_conditions'] }>) {
+    const res = await apiClient.put<ExitTemplate>(`/backtest/exit-templates/${templateId}`, data)
+    await fetchExitTemplates()
+    return res.data
+  }
+
+  async function deleteExitTemplate(templateId: string) {
+    await apiClient.delete(`/backtest/exit-templates/${templateId}`)
+    if (selectedTemplateId.value === templateId) {
+      selectedTemplateId.value = null
+    }
+    await fetchExitTemplates()
+  }
+
   return {
     running,
     result,
@@ -246,9 +350,17 @@ export const useBacktestStore = defineStore('backtest', () => {
     activeTaskId,
     tradeRecords,
     form,
+    exitTemplates,
+    selectedTemplateId,
+    templateLoading,
     reset,
     startBacktest,
     resumePolling,
     abortPolling,
+    fetchExitTemplates,
+    createExitTemplate,
+    loadExitTemplate,
+    updateExitTemplate,
+    deleteExitTemplate,
   }
 })

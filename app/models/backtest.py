@@ -3,6 +3,7 @@
 
 对应数据库表：
 - backtest_run：回测配置与结果
+- exit_condition_template：平仓条件模版
 """
 
 from datetime import date, datetime
@@ -54,3 +55,28 @@ class BacktestRun(PGBase):
 
     def __repr__(self) -> str:
         return f"<BacktestRun {self.id} status={self.status} user={self.user_id}>"
+
+
+class ExitConditionTemplate(PGBase):
+    """平仓条件模版"""
+
+    __tablename__ = "exit_condition_template"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        server_default=sa_text("gen_random_uuid()"),
+    )
+    user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    exit_conditions: Mapped[dict] = mapped_column(JSONB, nullable=False)  # ExitConditionConfig.to_dict()
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ExitConditionTemplate {self.id} name={self.name} user={self.user_id}>"

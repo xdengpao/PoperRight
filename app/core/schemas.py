@@ -611,6 +611,8 @@ class Alert:
 # 自定义平仓条件数据类
 # ---------------------------------------------------------------------------
 
+VALID_FREQS = {"daily", "1min", "5min", "15min", "30min", "60min"}
+
 VALID_INDICATORS = {
     "ma", "macd_dif", "macd_dea", "macd_histogram",
     "boll_upper", "boll_middle", "boll_lower",
@@ -623,7 +625,7 @@ VALID_OPERATORS = {">", "<", ">=", "<=", "cross_up", "cross_down"}
 @dataclass
 class ExitCondition:
     """单条自定义平仓条件"""
-    freq: str                          # 数据源频率："daily" | "minute"
+    freq: str                          # 数据源频率："daily" | "1min" | "5min" | "15min" | "30min" | "60min"
     indicator: str                     # 指标名称
     operator: str                      # 比较运算符
     threshold: float | None = None     # 数值阈值（数值比较时使用）
@@ -642,8 +644,12 @@ class ExitCondition:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ExitCondition":
+        freq = data["freq"]
+        # 向后兼容：旧版 "minute" 映射为 "1min"
+        if freq == "minute":
+            freq = "1min"
         return cls(
-            freq=data["freq"],
+            freq=freq,
             indicator=data["indicator"],
             operator=data["operator"],
             threshold=data.get("threshold"),

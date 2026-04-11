@@ -49,7 +49,7 @@ class TestNumericComparison:
         """RSI > 80 应触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -66,7 +66,7 @@ class TestNumericComparison:
         """RSI < 80 不应触发 > 80 条件"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -124,10 +124,10 @@ class TestCrossDetection:
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
         # prev: dif >= dea, curr: dif < dea
-        exit_cache = {
+        exit_cache = {"daily": {
             "macd_dif": [0.5, 0.3, 0.2, 0.1, -0.1],
             "macd_dea": [0.1, 0.1, 0.1, 0.1, 0.1],
-        }
+        }}
 
         config = ExitConditionConfig(
             conditions=[
@@ -147,10 +147,10 @@ class TestCrossDetection:
         """cross_up: prev <= target, curr > target"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {
+        exit_cache = {"daily": {
             "macd_dif": [-0.1, -0.05, 0.0, 0.15, 0.3],
             "macd_dea": [0.1, 0.1, 0.1, 0.1, 0.1],
-        }
+        }}
 
         config = ExitConditionConfig(
             conditions=[
@@ -168,10 +168,10 @@ class TestCrossDetection:
         """无交叉时不应触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {
+        exit_cache = {"daily": {
             "macd_dif": [0.5, 0.4, 0.3, 0.2, 0.15],
             "macd_dea": [0.1, 0.1, 0.1, 0.1, 0.1],
-        }
+        }}
 
         config = ExitConditionConfig(
             conditions=[
@@ -188,10 +188,10 @@ class TestCrossDetection:
         """bar_index=0 时交叉检测应跳过"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {
+        exit_cache = {"daily": {
             "macd_dif": [0.5, 0.3],
             "macd_dea": [0.1, 0.1],
-        }
+        }}
 
         config = ExitConditionConfig(
             conditions=[
@@ -212,7 +212,7 @@ class TestLogicCombination:
         """AND: 所有条件满足时触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(closes=[100.0, 101.0, 102.0, 103.0, 104.0])
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -228,7 +228,7 @@ class TestLogicCombination:
         """AND: 一个条件不满足时不触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(closes=[100.0, 101.0, 102.0, 103.0, 104.0])
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -244,7 +244,7 @@ class TestLogicCombination:
         """OR: 任一条件满足时触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(closes=[100.0, 101.0, 102.0, 103.0, 104.0])
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -260,7 +260,7 @@ class TestLogicCombination:
         """OR: 所有条件不满足时不触发"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(closes=[100.0, 101.0, 102.0, 103.0, 104.0])
-        exit_cache = {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}
+        exit_cache = {"daily": {"rsi": [50.0, 60.0, 70.0, 75.0, 78.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -290,7 +290,7 @@ class TestEdgeCases:
         """NaN 指标值应跳过条件"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"rsi": [float("nan")] * 5}
+        exit_cache = {"daily": {"rsi": [float("nan")] * 5}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -330,7 +330,7 @@ class TestEdgeCases:
         """MA 指标需要 period 参数"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"ma_10": [100.0, 101.0, 102.0, 103.0, 104.0]}
+        exit_cache = {"daily": {"ma_10": [100.0, 101.0, 102.0, 103.0, 104.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -394,7 +394,7 @@ class TestCustomParamIndicators:
         """MACD 自定义参数从 exit_indicator_cache 获取"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"macd_dif_8_21_5": [0.1, 0.2, 0.3, 0.4, 0.5]}
+        exit_cache = {"daily": {"macd_dif_8_21_5": [0.1, 0.2, 0.3, 0.4, 0.5]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -412,7 +412,7 @@ class TestCustomParamIndicators:
         """RSI 自定义周期"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"rsi_7": [50.0, 60.0, 70.0, 85.0, 90.0]}
+        exit_cache = {"daily": {"rsi_7": [50.0, 60.0, 70.0, 85.0, 90.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -430,7 +430,7 @@ class TestCustomParamIndicators:
         """BOLL 自定义参数"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"boll_upper_15": [110.0, 111.0, 112.0, 113.0, 114.0]}
+        exit_cache = {"daily": {"boll_upper_15": [110.0, 111.0, 112.0, 113.0, 114.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -448,7 +448,7 @@ class TestCustomParamIndicators:
         """DMA 自定义参数"""
         evaluator = ExitConditionEvaluator()
         cache = _make_cache(n=5)
-        exit_cache = {"dma_5_20": [1.0, 1.5, 2.0, 2.5, 3.0]}
+        exit_cache = {"daily": {"dma_5_20": [1.0, 1.5, 2.0, 2.5, 3.0]}}
 
         config = ExitConditionConfig(
             conditions=[
@@ -461,3 +461,72 @@ class TestCustomParamIndicators:
         )
         triggered, _ = evaluator.evaluate(config, "TEST", 4, cache, exit_cache)
         assert triggered is True
+
+
+class TestFreqResolution:
+    """频率解析与按频率缓存选择测试 (需求 2.7, 2.8, 8.1)"""
+
+    def test_resolve_freq_minute_returns_1min(self):
+        """_resolve_freq('minute') 应返回 '1min' (向后兼容)"""
+        assert ExitConditionEvaluator._resolve_freq("minute") == "1min"
+
+    def test_resolve_freq_daily_unchanged(self):
+        """_resolve_freq('daily') 应返回 'daily' (无变化)"""
+        assert ExitConditionEvaluator._resolve_freq("daily") == "daily"
+
+    def test_resolve_freq_5min_unchanged(self):
+        """_resolve_freq('5min') 应返回 '5min' (无变化)"""
+        assert ExitConditionEvaluator._resolve_freq("5min") == "5min"
+
+    def test_condition_with_5min_uses_5min_cache(self):
+        """freq='5min' 的条件应使用 '5min' 频率缓存"""
+        evaluator = ExitConditionEvaluator()
+        cache = _make_cache(n=5)
+        exit_cache = {
+            "daily": {"rsi": [50.0, 50.0, 50.0, 50.0, 50.0]},
+            "5min": {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]},
+        }
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(config, "TEST", 3, cache, exit_cache)
+        assert triggered is True
+        assert "RSI" in reason
+
+    def test_condition_with_5min_falls_back_to_daily(self):
+        """freq='5min' 缓存不可用时应回退到 daily 缓存"""
+        evaluator = ExitConditionEvaluator()
+        cache = _make_cache(n=5)
+        # 只有 daily 缓存，没有 5min 缓存
+        exit_cache = {
+            "daily": {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]},
+        }
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(config, "TEST", 3, cache, exit_cache)
+        assert triggered is True
+        assert "RSI" in reason
+
+    def test_condition_with_minute_treated_as_1min(self):
+        """freq='minute' 的条件应被视为 '1min' (向后兼容)"""
+        evaluator = ExitConditionEvaluator()
+        cache = _make_cache(n=5)
+        exit_cache = {
+            "1min": {"rsi": [50.0, 60.0, 70.0, 85.0, 90.0]},
+        }
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="minute", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(config, "TEST", 3, cache, exit_cache)
+        assert triggered is True
+        assert "RSI" in reason

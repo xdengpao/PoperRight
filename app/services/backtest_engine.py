@@ -494,21 +494,25 @@ def _precompute_indicators(
 # ---------------------------------------------------------------------------
 
 def _precompute_exit_indicators(
-    kline_data: dict[str, list[KlineBar]],
+    kline_data: dict[str, dict[str, list[KlineBar]]],
     exit_config: ExitConditionConfig | None,
     existing_cache: dict[str, IndicatorCache],
-) -> dict[str, dict[str, list[float]]]:
+) -> dict[str, dict[str, dict[str, list[float]]]]:
     """
-    为自定义平仓条件补充计算非默认参数的指标。
+    为自定义平仓条件补充计算非默认参数的指标，按频率分组。
 
-    检查 ExitConditionConfig 中引用的指标参数组合，对每种组合计算完整时间序列
-    并缓存。同时为所有引用的指标类型补充默认参数版本，确保评估器能通过
-    cache_key 直接查表。
+    Args:
+        kline_data: 按频率和股票代码组织的K线数据
+            格式: {freq: {symbol: [KlineBar, ...]}}
+            例: {"daily": {"600519.SH": [...]}, "5min": {"600519.SH": [...]}}
+        exit_config: 平仓条件配置
+        existing_cache: 现有日K线指标缓存
 
-    返回 {symbol: {cache_key: values}} 格式的补充缓存。
-    cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5", "boll_upper_20_2.0" 等。
+    Returns:
+        {symbol: {freq: {cache_key: values}}} 格式的按频率分组补充缓存。
+        cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5" 等。
 
-    Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
+    Requirements: 4.1, 4.2, 4.3
     """
     from app.services.screener.indicators import (
         DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL,
@@ -519,127 +523,176 @@ def _precompute_exit_indicators(
     )
     from app.services.screener.ma_trend import calculate_ma
 
+    _FREQ_MIGRATION: dict[str, str] = {"minute": "1min"}
+
     if not exit_config or not exit_config.conditions:
         return {}
 
     # ------------------------------------------------------------------
-    # Step 1: Collect all indicator+params combos referenced by conditions
+    # Step 1: Collect all (freq, indicator, params) combos per frequency
     # ------------------------------------------------------------------
-    # Each entry: (indicator_name, frozen_params_dict)
-    ma_periods: set[int] = set()
-    macd_param_sets: set[tuple[int, int, int]] = set()  # (fast, slow, signal)
-    boll_param_sets: set[tuple[int, float]] = set()     # (period, std_dev)
-    rsi_periods: set[int] = set()
-    dma_param_sets: set[tuple[int, int]] = set()        # (short, long)
-
-    # Collect referenced indicator names (for default-param fallback)
-    referenced_indicators: set[str] = set()
+    # Per-freq collection sets
+    freq_ma_periods: dict[str, set[int]] = {}
+    freq_macd_param_sets: dict[str, set[tuple[int, int, int]]] = {}
+    freq_boll_param_sets: dict[str, set[tuple[int, float]]] = {}
+    freq_rsi_periods: dict[str, set[int]] = {}
+    freq_dma_param_sets: dict[str, set[tuple[int, int]]] = {}
+    freq_referenced_indicators: dict[str, set[str]] = {}
 
     for cond in exit_config.conditions:
-        # Only process daily-freq conditions (minute data handled separately)
+        raw_freq = cond.freq
+        freq = _FREQ_MIGRATION.get(raw_freq, raw_freq)
         indicator = cond.indicator
         params = cond.params or {}
-        referenced_indicators.add(indicator)
 
-        # Also collect cross_target indicators
+        # Ensure per-freq sets exist
+        if freq not in freq_ma_periods:
+            freq_ma_periods[freq] = set()
+            freq_macd_param_sets[freq] = set()
+            freq_boll_param_sets[freq] = set()
+            freq_rsi_periods[freq] = set()
+            freq_dma_param_sets[freq] = set()
+            freq_referenced_indicators[freq] = set()
+
+        freq_referenced_indicators[freq].add(indicator)
         if cond.cross_target:
-            referenced_indicators.add(cond.cross_target)
+            freq_referenced_indicators[freq].add(cond.cross_target)
 
         _collect_indicator_params(
             indicator, params,
-            ma_periods, macd_param_sets, boll_param_sets,
-            rsi_periods, dma_param_sets,
+            freq_ma_periods[freq], freq_macd_param_sets[freq],
+            freq_boll_param_sets[freq], freq_rsi_periods[freq],
+            freq_dma_param_sets[freq],
         )
         if cond.cross_target:
             _collect_indicator_params(
                 cond.cross_target, params,
-                ma_periods, macd_param_sets, boll_param_sets,
-                rsi_periods, dma_param_sets,
+                freq_ma_periods[freq], freq_macd_param_sets[freq],
+                freq_boll_param_sets[freq], freq_rsi_periods[freq],
+                freq_dma_param_sets[freq],
             )
 
-    # Ensure default params are included for all referenced indicator types
-    for ind_name in referenced_indicators:
-        if ind_name == "ma":
-            # MA always needs explicit period from params; no global default to add
-            pass
-        elif ind_name in ("macd_dif", "macd_dea", "macd_histogram"):
-            macd_param_sets.add((DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL))
-        elif ind_name in ("boll_upper", "boll_middle", "boll_lower"):
-            boll_param_sets.add((DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV))
-        elif ind_name == "rsi":
-            rsi_periods.add(DEFAULT_RSI_PERIOD)
-        elif ind_name in ("dma", "ama"):
-            dma_param_sets.add((DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG))
+    # Ensure default params are included for all referenced indicator types per freq
+    for freq, ref_inds in freq_referenced_indicators.items():
+        for ind_name in ref_inds:
+            if ind_name == "ma":
+                pass
+            elif ind_name in ("macd_dif", "macd_dea", "macd_histogram"):
+                freq_macd_param_sets[freq].add(
+                    (DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL)
+                )
+            elif ind_name in ("boll_upper", "boll_middle", "boll_lower"):
+                freq_boll_param_sets[freq].add(
+                    (DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV)
+                )
+            elif ind_name == "rsi":
+                freq_rsi_periods[freq].add(DEFAULT_RSI_PERIOD)
+            elif ind_name in ("dma", "ama"):
+                freq_dma_param_sets[freq].add(
+                    (DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG)
+                )
 
-    # If nothing to compute, return empty
-    if not (ma_periods or macd_param_sets or boll_param_sets
-            or rsi_periods or dma_param_sets):
+    # Collect all freqs that have something to compute
+    all_freqs = set()
+    for freq in list(freq_ma_periods.keys()):
+        if (freq_ma_periods.get(freq) or freq_macd_param_sets.get(freq)
+                or freq_boll_param_sets.get(freq) or freq_rsi_periods.get(freq)
+                or freq_dma_param_sets.get(freq)):
+            all_freqs.add(freq)
+
+    if not all_freqs:
         return {}
 
     # ------------------------------------------------------------------
-    # Step 2: Compute indicators per symbol
+    # Helper: compute indicators for a list of closes
     # ------------------------------------------------------------------
-    result: dict[str, dict[str, list[float]]] = {}
+    def _compute_for_closes(
+        closes: list[float],
+        ma_periods: set[int],
+        macd_params: set[tuple[int, int, int]],
+        boll_params: set[tuple[int, float]],
+        rsi_periods_set: set[int],
+        dma_params: set[tuple[int, int]],
+    ) -> dict[str, list[float]]:
+        cache: dict[str, list[float]] = {}
 
-    for symbol, ic in existing_cache.items():
-        closes = ic.closes
-        if not closes:
-            continue
-
-        sym_cache: dict[str, list[float]] = {}
-
-        # MA indicators
         for period in ma_periods:
-            cache_key = f"ma_{period}"
-            sym_cache[cache_key] = calculate_ma(closes, period)
+            cache[f"ma_{period}"] = calculate_ma(closes, period)
 
-        # MACD indicators
-        for fast, slow, signal in macd_param_sets:
+        for fast, slow, signal in macd_params:
             macd_result = calculate_macd(closes, fast, slow, signal)
             suffix = f"_{fast}_{slow}_{signal}"
-            sym_cache[f"macd_dif{suffix}"] = macd_result.dif
-            sym_cache[f"macd_dea{suffix}"] = macd_result.dea
-            sym_cache[f"macd_histogram{suffix}"] = macd_result.macd
-            # Also store without suffix for default params lookup
+            cache[f"macd_dif{suffix}"] = macd_result.dif
+            cache[f"macd_dea{suffix}"] = macd_result.dea
+            cache[f"macd_histogram{suffix}"] = macd_result.macd
             if (fast, slow, signal) == (DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL):
-                sym_cache["macd_dif"] = macd_result.dif
-                sym_cache["macd_dea"] = macd_result.dea
-                sym_cache["macd_histogram"] = macd_result.macd
+                cache["macd_dif"] = macd_result.dif
+                cache["macd_dea"] = macd_result.dea
+                cache["macd_histogram"] = macd_result.macd
 
-        # BOLL indicators
-        for period, std_dev in boll_param_sets:
+        for period, std_dev in boll_params:
             boll_result = calculate_boll(closes, period, std_dev)
             suffix = f"_{period}_{std_dev}"
-            sym_cache[f"boll_upper{suffix}"] = boll_result.upper
-            sym_cache[f"boll_middle{suffix}"] = boll_result.middle
-            sym_cache[f"boll_lower{suffix}"] = boll_result.lower
-            # Also store without suffix for default params lookup
+            cache[f"boll_upper{suffix}"] = boll_result.upper
+            cache[f"boll_middle{suffix}"] = boll_result.middle
+            cache[f"boll_lower{suffix}"] = boll_result.lower
             if (period, std_dev) == (DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV):
-                sym_cache["boll_upper"] = boll_result.upper
-                sym_cache["boll_middle"] = boll_result.middle
-                sym_cache["boll_lower"] = boll_result.lower
+                cache["boll_upper"] = boll_result.upper
+                cache["boll_middle"] = boll_result.middle
+                cache["boll_lower"] = boll_result.lower
 
-        # RSI indicators
-        for period in rsi_periods:
+        for period in rsi_periods_set:
             rsi_result = calculate_rsi(closes, period)
-            sym_cache[f"rsi_{period}"] = rsi_result.values
-            # Also store without suffix for default params lookup
+            cache[f"rsi_{period}"] = rsi_result.values
             if period == DEFAULT_RSI_PERIOD:
-                sym_cache["rsi"] = rsi_result.values
+                cache["rsi"] = rsi_result.values
 
-        # DMA / AMA indicators
-        for short_p, long_p in dma_param_sets:
+        for short_p, long_p in dma_params:
             dma_result = calculate_dma(closes, short_p, long_p)
             suffix = f"_{short_p}_{long_p}"
-            sym_cache[f"dma{suffix}"] = dma_result.dma
-            sym_cache[f"ama{suffix}"] = dma_result.ama
-            # Also store without suffix for default params lookup
+            cache[f"dma{suffix}"] = dma_result.dma
+            cache[f"ama{suffix}"] = dma_result.ama
             if (short_p, long_p) == (DEFAULT_DMA_SHORT, DEFAULT_DMA_LONG):
-                sym_cache["dma"] = dma_result.dma
-                sym_cache["ama"] = dma_result.ama
+                cache["dma"] = dma_result.dma
+                cache["ama"] = dma_result.ama
 
-        if sym_cache:
-            result[symbol] = sym_cache
+        return cache
+
+    # ------------------------------------------------------------------
+    # Step 2: Compute indicators per freq per symbol
+    # ------------------------------------------------------------------
+    result: dict[str, dict[str, dict[str, list[float]]]] = {}
+
+    for freq in all_freqs:
+        ma_p = freq_ma_periods.get(freq, set())
+        macd_p = freq_macd_param_sets.get(freq, set())
+        boll_p = freq_boll_param_sets.get(freq, set())
+        rsi_p = freq_rsi_periods.get(freq, set())
+        dma_p = freq_dma_param_sets.get(freq, set())
+
+        if freq == "daily":
+            # Daily: reuse closes from existing_cache
+            for symbol, ic in existing_cache.items():
+                closes = ic.closes
+                if not closes:
+                    continue
+                freq_cache = _compute_for_closes(
+                    closes, ma_p, macd_p, boll_p, rsi_p, dma_p,
+                )
+                if freq_cache:
+                    result.setdefault(symbol, {})[freq] = freq_cache
+        else:
+            # Minute freqs: load from kline_data[freq]
+            freq_klines = kline_data.get(freq, {})
+            for symbol, bars in freq_klines.items():
+                if not bars:
+                    continue
+                closes = [float(b.close) for b in bars]
+                freq_cache = _compute_for_closes(
+                    closes, ma_p, macd_p, boll_p, rsi_p, dma_p,
+                )
+                if freq_cache:
+                    result.setdefault(symbol, {})[freq] = freq_cache
 
     return result
 
@@ -1531,7 +1584,7 @@ class BacktestEngine:
         config: BacktestConfig,
         date_index: dict[str, KlineDateIndex] | None = None,
         indicator_cache: dict[str, IndicatorCache] | None = None,
-        exit_indicator_cache: dict[str, dict[str, list[float]]] | None = None,
+        exit_indicator_cache: dict[str, dict[str, dict[str, list[float]]]] | None = None,
     ) -> _SellSignal | None:
         """
         检查单只持仓标的的卖出条件。
@@ -2048,7 +2101,7 @@ class BacktestEngine:
 
         # 自定义平仓条件指标预计算（Requirements 4.1, 4.2）
         exit_indicator_cache = _precompute_exit_indicators(
-            kline_data, config.exit_conditions, indicator_cache,
+            {"daily": kline_data}, config.exit_conditions, indicator_cache,
         )
         if exit_indicator_cache:
             logger.info(

@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 # 默认 MA 周期 → IndicatorCache 中无直接字段，需从 exit_indicator_cache 获取
 _DEFAULT_MA_PERIODS = {5, 10, 20, 60}
 
+# 合法频率常量
+VALID_FREQS = {"daily", "1min", "5min", "15min", "30min", "60min"}
+
+# 旧版频率映射
+_FREQ_MIGRATION: dict[str, str] = {"minute": "1min"}
+
 # 数值比较运算符映射
 _NUMERIC_OPS = {
     ">": lambda a, b: a > b,
@@ -46,10 +52,19 @@ class ExitConditionEvaluator:
         symbol: str,
         bar_index: int,
         indicator_cache: IndicatorCache,
-        exit_indicator_cache: dict[str, list[float]] | None = None,
+        exit_indicator_cache: dict[str, dict[str, list[float]]] | None = None,
     ) -> tuple[bool, str | None]:
         """
         评估单只持仓的自定义平仓条件。
+
+        Args:
+            config: 平仓条件配置
+            symbol: 股票代码
+            bar_index: 当前交易日在 K 线序列中的索引
+            indicator_cache: 日K线预计算指标缓存
+            exit_indicator_cache: 按频率分组的补充缓存
+                格式: {freq: {cache_key: values}}
+                例: {"daily": {"ma_10": [...]}, "5min": {"rsi_14": [...]}}
 
         Returns:
             (triggered, reason) - triggered 为 True 时 reason 包含触发条件描述
@@ -60,8 +75,21 @@ class ExitConditionEvaluator:
         results: list[tuple[bool, str]] = []
         for cond in config.conditions:
             try:
+                freq = self._resolve_freq(cond.freq)
+                # 根据频率从 exit_indicator_cache 获取对应缓存
+                freq_cache: dict[str, list[float]] | None = None
+                if exit_indicator_cache is not None:
+                    freq_cache = exit_indicator_cache.get(freq)
+                    if freq_cache is None and freq != "daily":
+                        # 分钟K线缓存不可用时回退到 daily
+                        logger.info(
+                            "分钟K线缓存不可用 (freq=%s, symbol=%s)，回退到 daily",
+                            freq, symbol,
+                        )
+                        freq_cache = exit_indicator_cache.get("daily")
+
                 triggered, reason = self._evaluate_single(
-                    cond, bar_index, indicator_cache, exit_indicator_cache,
+                    cond, bar_index, indicator_cache, freq_cache,
                 )
                 results.append((triggered, reason))
             except Exception:
@@ -89,6 +117,11 @@ class ExitConditionEvaluator:
             return True, reason
 
         return False, None
+
+    @staticmethod
+    def _resolve_freq(freq: str) -> str:
+        """将旧版频率值映射为新版，如 'minute' → '1min'。"""
+        return _FREQ_MIGRATION.get(freq, freq)
 
     def _evaluate_single(
         self,
