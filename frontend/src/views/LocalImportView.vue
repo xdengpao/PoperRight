@@ -213,8 +213,12 @@
       <div class="progress-header">
         <span class="status-badge syncing">运行中</span>
         <span v-if="store.adjResult.current_type" class="progress-step">
-          {{ store.adjResult.current_type }} — {{ store.adjResult.current_step }}
+          {{ store.adjResult.current_type }}
         </span>
+      </div>
+
+      <div v-if="store.adjResult.current_step" class="progress-detail">
+        {{ store.adjResult.current_step }}
       </div>
 
       <div class="progress-bar-container">
@@ -222,7 +226,7 @@
       </div>
       <div class="progress-text">
         已完成 {{ store.adjResult.completed_types }} / {{ store.adjResult.total_types }} 项 ({{ adjProgressPct }}%)
-        <span v-if="store.adjResult.elapsed_seconds"> · {{ store.adjResult.elapsed_seconds.toFixed(1) }}s</span>
+        <span v-if="store.adjResult.elapsed_seconds"> · {{ formatElapsed(store.adjResult.elapsed_seconds) }}</span>
       </div>
 
       <!-- 已完成的类型实时展示 -->
@@ -265,7 +269,7 @@
       </div>
 
       <div v-if="store.adjResult.elapsed_seconds" class="progress-text" style="margin-top: 8px;">
-        耗时 {{ store.adjResult.elapsed_seconds.toFixed(1) }}s
+        耗时 {{ formatElapsed(store.adjResult.elapsed_seconds) }}
       </div>
     </section>
   </div>
@@ -382,6 +386,17 @@ function adjStatClass(status: string): string {
   if (status === 'completed') return 'highlight'
   if (status === 'skipped') return 'muted'
   return 'error-text'
+}
+
+/** 将秒数格式化为友好的时间字符串 */
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds.toFixed(1)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  if (m < 60) return `${m}分${s}秒`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return `${h}时${rm}分${s}秒`
 }
 
 // ── 生命周期 ──────────────────────────────────────────────────────────────────
@@ -523,6 +538,13 @@ onUnmounted(() => {
 .progress-step {
   font-size: 13px;
   color: #8b949e;
+}
+
+.progress-detail {
+  font-size: 13px;
+  color: #58a6ff;
+  margin-bottom: 10px;
+  font-family: monospace;
 }
 
 .stats-grid {

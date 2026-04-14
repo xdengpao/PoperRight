@@ -1020,6 +1020,7 @@ async def _sync_historical_money_flow(
     queue="data_sync",
     soft_time_limit=86400,   # 24h 软限制
     time_limit=None,         # 无硬限制
+    acks_late=False,
 )
 def import_local_kline(
     markets: list[str] | None = None,
@@ -1062,8 +1063,11 @@ def import_local_kline(
 @celery_app.task(
     name="app.tasks.data_sync.import_adj_factors",
     queue="data_sync",
-    soft_time_limit=3600,
+    soft_time_limit=7200,
     time_limit=None,
+    autoretry_for=(),
+    max_retries=0,
+    acks_late=False,
 )
 def import_adj_factors(
     adj_factors: list[str] | None = None,

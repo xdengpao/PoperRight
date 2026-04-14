@@ -54,16 +54,23 @@ class AdjFactorRepository:
 
         inserted = 0
         async with self._get_session_ctx() as session:
-            for i in range(0, len(factors), _BATCH_SIZE):
-                chunk = factors[i : i + _BATCH_SIZE]
-                stmt = (
-                    pg_insert(AdjustmentFactor)
-                    .values(chunk)
-                    .on_conflict_do_nothing()
-                )
-                result = await session.execute(stmt)
-                inserted += result.rowcount or 0
-            await session.commit()
+            # 批量导入时临时关闭 SQL echo，避免日志 I/O 拖慢性能
+            engine = session.get_bind()
+            original_echo = engine.echo
+            engine.echo = False
+            try:
+                for i in range(0, len(factors), _BATCH_SIZE):
+                    chunk = factors[i : i + _BATCH_SIZE]
+                    stmt = (
+                        pg_insert(AdjustmentFactor)
+                        .values(chunk)
+                        .on_conflict_do_nothing()
+                    )
+                    result = await session.execute(stmt)
+                    inserted += result.rowcount or 0
+                await session.commit()
+            finally:
+                engine.echo = original_echo
 
         logger.info("复权因子批量写入完成，共 %d 条，实际插入 %d 条", len(factors), inserted)
         return inserted

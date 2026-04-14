@@ -19,6 +19,7 @@ import json
 import logging
 import time
 import zipfile
+from collections.abc import Callable
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -29,6 +30,10 @@ from app.models.kline import KlineBar
 from app.services.data_engine.kline_repository import KlineRepository
 
 logger = logging.getLogger(__name__)
+
+
+class _AdjStopRequested(Exception):
+    """复权因子导入停止信号异常，用于中断解析/写入流程。"""
 
 
 class LocalKlineImportService:
@@ -677,6 +682,7 @@ class LocalKlineImportService:
 
     def parse_adj_factor_zip(
         self, zip_path: Path, adj_type: int,
+        progress_callback: "Callable[[int, int, int], None] | None" = None,
     ) -> tuple[list[dict], int, int]:
         """
         解压并解析复权因子 ZIP 文件。
@@ -688,6 +694,7 @@ class LocalKlineImportService:
         Args:
             zip_path: 复权因子 ZIP 文件路径
             adj_type: 1=前复权, 2=后复权
+            progress_callback: 可选回调 (parsed_csv_files, total_csv_files, total_parsed_rows)
 
         Returns:
             (factors, parsed_count, skipped_count)
@@ -702,10 +709,11 @@ class LocalKlineImportService:
                 zip_bytes = f.read()
 
             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
-                for name in zf.namelist():
-                    if name.endswith("/"):
-                        continue
+                csv_names = [n for n in zf.namelist() if not n.endswith("/")]
+                total_csv_files = len(csv_names)
+                parsed_csv_files = 0
 
+                for name in csv_names:
                     # 从文件名推断 symbol
                     csv_symbol = self.infer_symbol_from_adj_csv_name(name)
                     if csv_symbol is None:
@@ -714,6 +722,7 @@ class LocalKlineImportService:
                             name, zip_path,
                         )
                         total_skipped += 1
+                        parsed_csv_files += 1
                         continue
 
                     csv_bytes = zf.read(name)
@@ -763,6 +772,15 @@ class LocalKlineImportService:
                                 name, line_no, exc,
                             )
                             total_skipped += 1
+
+                    parsed_csv_files += 1
+                    # 每解析完一个 CSV 文件回调一次进度
+                    if progress_callback and parsed_csv_files % 50 == 0:
+                        progress_callback(parsed_csv_files, total_csv_files, total_parsed)
+
+                # 最终回调确保 100%
+                if progress_callback:
+                    progress_callback(parsed_csv_files, total_csv_files, total_parsed)
 
         except zipfile.BadZipFile:
             logger.error("复权因子 ZIP 文件损坏: %s", zip_path)
@@ -1177,6 +1195,133 @@ class LocalKlineImportService:
         finally:
             await client.aclose()
 
+    async def _stream_adj_factor_zip(
+        self,
+        zip_path: Path,
+        adj_type: int,
+        adj_repo: "AdjFactorRepository",
+        start_time: float,
+    ) -> tuple[int, int, int]:
+        """
+        流式解压解析并写入复权因子 ZIP 文件。
+
+        边解析边写入数据库，避免将 1750 万条数据全部加载到内存。
+        每积累 STREAM_BATCH_SIZE 条记录就写入一次数据库。
+
+        Args:
+            zip_path: 复权因子 ZIP 文件路径
+            adj_type: 1=前复权, 2=后复权
+            adj_repo: 复权因子仓储实例
+            start_time: 任务开始时间戳
+
+        Returns:
+            (total_parsed, total_inserted, total_skipped)
+
+        Raises:
+            _AdjStopRequested: 收到停止信号时抛出
+        """
+        import asyncio
+
+        STREAM_BATCH = 50000  # 每 5 万条写入一次 DB
+        buffer: list[dict] = []
+        total_parsed = 0
+        total_inserted = 0
+        total_skipped = 0
+
+        with open(zip_path, "rb") as f:
+            zip_bytes = f.read()
+
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            csv_names = [n for n in zf.namelist() if not n.endswith("/")]
+            total_csv_files = len(csv_names)
+            parsed_csv_files = 0
+
+            for name in csv_names:
+                csv_symbol = self.infer_symbol_from_adj_csv_name(name)
+                if csv_symbol is None:
+                    total_skipped += 1
+                    parsed_csv_files += 1
+                    continue
+
+                csv_bytes_data = zf.read(name)
+                try:
+                    csv_text = csv_bytes_data.decode("utf-8")
+                except UnicodeDecodeError:
+                    csv_text = csv_bytes_data.decode("gbk", errors="replace")
+
+                reader = csv.reader(io.StringIO(csv_text))
+                header_skipped = False
+
+                for _line_no, row in enumerate(reader, start=1):
+                    if not row or all(cell.strip() == "" for cell in row):
+                        continue
+                    if not header_skipped:
+                        first_cell = row[0].strip().lstrip("\ufeff")
+                        if first_cell in ("股票代码", "code", "symbol"):
+                            header_skipped = True
+                            continue
+                        header_skipped = True
+                    if len(row) < 3:
+                        total_skipped += 1
+                        continue
+                    try:
+                        trade_date_str = row[1].strip()
+                        trade_date_val = date(
+                            int(trade_date_str[:4]),
+                            int(trade_date_str[4:6]),
+                            int(trade_date_str[6:8]),
+                        )
+                        adj_factor_val = Decimal(row[2].strip())
+                        buffer.append({
+                            "symbol": csv_symbol,
+                            "trade_date": trade_date_val,
+                            "adj_factor": adj_factor_val,
+                            "adj_type": adj_type,
+                        })
+                        total_parsed += 1
+                    except (ValueError, InvalidOperation, IndexError):
+                        total_skipped += 1
+
+                # 缓冲区满时写入 DB
+                if len(buffer) >= STREAM_BATCH:
+                    batch_inserted = await adj_repo.bulk_insert(buffer)
+                    total_inserted += batch_inserted
+                    buffer.clear()
+
+                parsed_csv_files += 1
+
+                # 每 50 个文件更新进度、检查停止信号
+                if parsed_csv_files % 50 == 0:
+                    await asyncio.sleep(0)
+                    pct = round(parsed_csv_files / total_csv_files * 100, 1)
+                    await self._update_adj_progress(
+                        current_step=f"导入中（{parsed_csv_files:,}/{total_csv_files:,} 文件 {pct}%，已解析 {total_parsed:,}，已入库 {total_inserted:,}）",
+                        elapsed_seconds=round(time.time() - start_time, 2),
+                    )
+                    if await self._check_adj_stop_signal():
+                        logger.info("导入阶段收到停止信号")
+                        await self._clear_adj_stop_signal()
+                        # 写入剩余缓冲区
+                        if buffer:
+                            batch_inserted = await adj_repo.bulk_insert(buffer)
+                            total_inserted += batch_inserted
+                            buffer.clear()
+                        raise _AdjStopRequested()
+
+            # 写入最后一批缓冲区
+            if buffer:
+                batch_inserted = await adj_repo.bulk_insert(buffer)
+                total_inserted += batch_inserted
+                buffer.clear()
+
+        # 最终进度
+        await self._update_adj_progress(
+            current_step=f"导入完成（{total_csv_files:,} 文件，{total_parsed:,} 条，入库 {total_inserted:,}）",
+            elapsed_seconds=round(time.time() - start_time, 2),
+        )
+
+        return total_parsed, total_inserted, total_skipped
+
     async def execute_adj_factors(
         self,
         adj_factors: list[str] | None = None,
@@ -1313,16 +1458,44 @@ class LocalKlineImportService:
             except Exception:
                 pass  # 增量检查失败不影响导入
 
-            # 解压解析阶段
+            # 流式导入：边解析边写入，避免内存溢出
             await self._update_adj_progress(
-                current_step="解压解析中",
+                current_step="导入中",
                 elapsed_seconds=round(time.time() - start_time, 2),
             )
 
             try:
-                factors, adj_parsed, adj_skipped = self.parse_adj_factor_zip(
-                    adj_zip_path, adj_type_val,
+                adj_parsed, adj_inserted, adj_skipped = await self._stream_adj_factor_zip(
+                    adj_zip_path, adj_type_val, adj_repo, start_time,
                 )
+            except _AdjStopRequested:
+                adj_factor_stats[adj_key] = {
+                    "status": "stopped",
+                    "parsed": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                }
+                elapsed = round(time.time() - start_time, 2)
+                result = {
+                    "status": "stopped",
+                    "adj_factor_stats": adj_factor_stats,
+                    "elapsed_seconds": elapsed,
+                    "total_types": total_types,
+                    "completed_types": completed_types,
+                    "current_type": "",
+                    "current_step": "",
+                }
+                await self._update_adj_progress(**result)
+                client = get_redis_client()
+                try:
+                    await client.set(
+                        self.REDIS_ADJ_RESULT_KEY,
+                        json.dumps(result, ensure_ascii=False),
+                        ex=self.PROGRESS_TTL,
+                    )
+                finally:
+                    await client.aclose()
+                return result
             except Exception as exc:
                 logger.error("复权因子导入异常: %s error=%s", adj_zip_path, exc)
                 adj_factor_stats[adj_key] = {
@@ -1331,47 +1504,6 @@ class LocalKlineImportService:
                     "parsed": 0,
                     "inserted": 0,
                     "skipped": 0,
-                }
-                completed_types += 1
-                await self._update_adj_progress(
-                    adj_factor_stats=adj_factor_stats,
-                    completed_types=completed_types,
-                    elapsed_seconds=round(time.time() - start_time, 2),
-                )
-                continue
-
-            if not factors:
-                logger.warning("复权因子解析结果为空: %s", adj_zip_path)
-                adj_factor_stats[adj_key] = {
-                    "status": "completed",
-                    "parsed": adj_parsed,
-                    "inserted": 0,
-                    "skipped": adj_skipped,
-                }
-                completed_types += 1
-                await self._update_adj_progress(
-                    adj_factor_stats=adj_factor_stats,
-                    completed_types=completed_types,
-                    elapsed_seconds=round(time.time() - start_time, 2),
-                )
-                continue
-
-            # 写入数据库阶段
-            await self._update_adj_progress(
-                current_step=f"写入数据库（{len(factors)} 条）",
-                elapsed_seconds=round(time.time() - start_time, 2),
-            )
-
-            try:
-                adj_inserted = await adj_repo.bulk_insert(factors)
-            except Exception as exc:
-                logger.error("复权因子写入数据库异常: %s error=%s", adj_zip_path, exc)
-                adj_factor_stats[adj_key] = {
-                    "status": "failed",
-                    "error": str(exc),
-                    "parsed": adj_parsed,
-                    "inserted": 0,
-                    "skipped": adj_skipped,
                 }
                 completed_types += 1
                 await self._update_adj_progress(
