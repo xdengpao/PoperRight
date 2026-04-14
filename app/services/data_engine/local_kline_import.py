@@ -19,7 +19,7 @@ import json
 import logging
 import time
 import zipfile
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -35,11 +35,35 @@ class LocalKlineImportService:
     """本地分钟级K线数据导入服务"""
 
     VALID_FREQS: set[str] = {"1m", "5m", "15m", "30m", "60m"}
+    VALID_MARKETS: set[str] = {"hushen", "jingshi", "zhishu"}
     BATCH_SIZE: int = 1000
     REDIS_PROGRESS_KEY: str = "import:local_kline:progress"
     REDIS_RESULT_KEY: str = "import:local_kline:result"
     REDIS_INCREMENTAL_KEY: str = "import:local_kline:files"
+    REDIS_STOP_KEY: str = "import:local_kline:stop"
     PROGRESS_TTL: int = 86400  # 24h
+
+    # 市场分类 → 目录名映射
+    MARKET_DIR_MAP: dict[str, str] = {
+        "hushen": "A股_分时数据_沪深",
+        "jingshi": "A股_分时数据_京市",
+        "zhishu": "A股_分时数据_指数",
+    }
+
+    # 频率 → 目录名映射（新格式：{N}分钟_按月归档）
+    FREQ_DIR_MAP: dict[str, str] = {
+        "1m": "1分钟_按月归档",
+        "5m": "5分钟_按月归档",
+        "15m": "15分钟_按月归档",
+        "30m": "30分钟_按月归档",
+        "60m": "60分钟_按月归档",
+    }
+
+    # 反向映射：新格式目录名 → 标准频率
+    DIR_FREQ_MAP_NEW: dict[str, str] = {v: k for k, v in FREQ_DIR_MAP.items()}
+
+    # 反向映射：市场目录名 → 市场分类键
+    _MARKET_DIR_REVERSE: dict[str, str] = {v: k for k, v in MARKET_DIR_MAP.items()}
 
     # ------------------------------------------------------------------
     # 目录扫描
@@ -75,10 +99,140 @@ class LocalKlineImportService:
         logger.info("扫描目录 %s，发现 %d 个 ZIP 文件", scan_path, len(zip_files))
         return zip_files
 
-    # 中文目录名 → 标准频率映射
+    def scan_market_zip_files(
+        self,
+        base_dir: str,
+        markets: list[str] | None = None,
+        freqs: list[str] | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> list[tuple[Path, str, str]]:
+        """
+        按四级目录结构扫描ZIP文件：{市场目录}/{频率目录}/{月份目录}/{日期ZIP}
+
+        支持日期级别过滤（YYYY-MM-DD）和月份级别过滤（YYYY-MM）。
+        日期级别过滤时，从 ZIP 文件名中提取日期（YYYYMMDD）进行精确匹配。
+
+        Args:
+            base_dir: 根数据目录
+            markets: 可选市场分类过滤列表（hushen/jingshi/zhishu），None 表示全部
+            freqs: 可选频率过滤列表（1m/5m/15m/30m/60m），None 表示全部
+            start_date: 可选起始日期（YYYY-MM-DD 或 YYYY-MM），None 表示不限
+            end_date: 可选结束日期（YYYY-MM-DD 或 YYYY-MM），None 表示不限
+
+        Returns:
+            [(zip_path, market_key, freq_key), ...] 元组列表
+        """
+        import re
+
+        base_path = Path(base_dir)
+        if not base_path.exists() or not base_path.is_dir():
+            logger.error("数据目录不存在或不可读: %s", base_path)
+            return []
+
+        # 解析日期过滤参数
+        start_month: str | None = None
+        end_month: str | None = None
+        start_day: str | None = None  # YYYYMMDD format for ZIP name comparison
+        end_day: str | None = None
+
+        if start_date:
+            parts = start_date.split("-")
+            start_month = f"{parts[0]}-{parts[1]}"
+            if len(parts) >= 3:
+                start_day = f"{parts[0]}{parts[1]}{parts[2]}"
+
+        if end_date:
+            parts = end_date.split("-")
+            end_month = f"{parts[0]}-{parts[1]}"
+            if len(parts) >= 3:
+                end_day = f"{parts[0]}{parts[1]}{parts[2]}"
+
+        # 确定要扫描的市场分类
+        target_markets = list(self.VALID_MARKETS) if markets is None else [
+            m for m in markets if m in self.VALID_MARKETS
+        ]
+
+        # 确定要扫描的频率
+        target_freqs = list(self.VALID_FREQS) if freqs is None else [
+            f for f in freqs if f in self.VALID_FREQS
+        ]
+
+        # 正则：从 ZIP 文件名提取日期部分（YYYYMMDD）
+        date_pattern = re.compile(r"(\d{8})")
+
+        results: list[tuple[Path, str, str]] = []
+
+        for market_key in target_markets:
+            market_dir_name = self.MARKET_DIR_MAP[market_key]
+            market_path = base_path / market_dir_name
+
+            if not market_path.exists() or not market_path.is_dir():
+                logger.warning("市场目录不存在，跳过: %s", market_path)
+                continue
+
+            market_count = 0
+
+            for freq_key in target_freqs:
+                freq_dir_name = self.FREQ_DIR_MAP[freq_key]
+                freq_path = market_path / freq_dir_name
+
+                if not freq_path.exists() or not freq_path.is_dir():
+                    continue
+
+                # 遍历月份目录
+                try:
+                    month_dirs = sorted(
+                        d for d in freq_path.iterdir() if d.is_dir()
+                    )
+                except PermissionError:
+                    logger.error("频率目录不可读: %s", freq_path)
+                    continue
+
+                for month_dir in month_dirs:
+                    month_name = month_dir.name
+
+                    # 月份范围过滤（字符串比较）
+                    if start_month and month_name < start_month:
+                        continue
+                    if end_month and month_name > end_month:
+                        continue
+
+                    # 扫描月份目录下的 ZIP 文件
+                    try:
+                        zip_files = sorted(month_dir.glob("*.zip"))
+                    except PermissionError:
+                        logger.error("月份目录不可读: %s", month_dir)
+                        continue
+
+                    for zip_path in zip_files:
+                        # 日期级别过滤：从 ZIP 文件名提取 YYYYMMDD
+                        if start_day or end_day:
+                            match = date_pattern.search(zip_path.stem)
+                            if match:
+                                zip_date = match.group(1)
+                                if start_day and zip_date < start_day:
+                                    continue
+                                if end_day and zip_date > end_day:
+                                    continue
+
+                        results.append((zip_path, market_key, freq_key))
+                        market_count += 1
+
+            logger.info(
+                "市场 %s（%s）扫描完成，发现 %d 个 ZIP 文件",
+                market_key, market_dir_name, market_count,
+            )
+
+        logger.info("四级目录扫描完成，共发现 %d 个 ZIP 文件", len(results))
+        return results
+
+    # 中文目录名 → 标准频率映射（旧格式 + 新格式）
     DIR_FREQ_MAP: dict[str, str] = {
         "1分钟": "1m", "5分钟": "5m", "15分钟": "15m",
         "30分钟": "30m", "60分钟": "60m",
+        "1分钟_按月归档": "1m", "5分钟_按月归档": "5m", "15分钟_按月归档": "15m",
+        "30分钟_按月归档": "30m", "60分钟_按月归档": "60m",
     }
     # 文件名中的英文频率标识 → 标准频率映射
     FILE_FREQ_MAP: dict[str, str] = {
@@ -96,17 +250,23 @@ class LocalKlineImportService:
         """
         从 ZIP 文件路径推断K线频率。
 
-        支持两种目录结构：
-        1. {base_dir}/{中文频率目录}/{日期_频率}.zip  (如 /AData/5分钟/20250721_5min.zip)
-        2. {base_dir}/{symbol}/{freq}.zip             (如 /AData/000001/5m.zip)
+        支持三种目录结构：
+        1. {base_dir}/{中文频率目录}/{日期_频率}.zip        (如 /AData/5分钟/20250721_5min.zip)
+        2. {base_dir}/{symbol}/{freq}.zip                   (如 /AData/000001/5m.zip)
+        3. {base_dir}/{市场}/{N分钟_按月归档}/{月份}/{日期}.zip (四级结构)
 
         Returns:
             标准频率字符串（如 "5m"），无法推断时返回 None
         """
-        # 优先从父目录中文名推断
+        # 优先从父目录中文名推断（旧格式短名 + 新格式长名）
         parent_name = zip_path.parent.name
         if parent_name in self.DIR_FREQ_MAP:
             return self.DIR_FREQ_MAP[parent_name]
+
+        # 检查祖父目录（四级结构：月份目录的父目录是频率目录）
+        grandparent_name = zip_path.parent.parent.name
+        if grandparent_name in self.DIR_FREQ_MAP:
+            return self.DIR_FREQ_MAP[grandparent_name]
 
         # 从文件名推断：尝试 stem 直接匹配或提取 _freq 后缀
         stem = zip_path.stem  # e.g. "20250721_5min" or "5m"
@@ -124,25 +284,66 @@ class LocalKlineImportService:
 
         return None
 
-    def infer_symbol_from_csv_name(self, csv_name: str) -> str | None:
+    def infer_market_from_path(self, zip_path: Path) -> str | None:
         """
-        从 ZIP 内 CSV 文件名推断股票代码。
+        从 ZIP 文件路径推断市场分类。
+
+        检查路径中是否包含已知的市场目录名称。
+
+        Returns:
+            市场分类键（hushen/jingshi/zhishu），无法推断时返回 None
+        """
+        path_parts = zip_path.parts
+        for part in path_parts:
+            if part in self._MARKET_DIR_REVERSE:
+                return self._MARKET_DIR_REVERSE[part]
+        return None
+
+    def infer_symbol_from_csv_name(self, csv_name: str, market: str = "hushen") -> str | None:
+        """
+        从 ZIP 内 CSV 文件名推断股票代码（市场感知）。
 
         支持格式：
-        - sz000001.csv → 000001
-        - sh600000.csv → 600000
-        - 000001.csv   → 000001
+        - hushen: sz000001.csv → 000001, sh600000.csv → 600000
+        - jingshi: bj920000.csv → 920000
+        - zhishu: 000001.csv → 000001（无前缀，直接数字）
+
+        Args:
+            csv_name: CSV 文件名
+            market: 市场分类（hushen/jingshi/zhishu），默认 hushen
 
         Returns:
             纯数字股票代码，无法推断时返回 None
         """
         import re
         basename = Path(csv_name).stem  # e.g. "sz000001"
-        # 去掉 sh/sz/bj 前缀
+        # 去掉 sh/sz/bj 前缀（对 zhishu 无前缀文件名无影响）
         cleaned = re.sub(r"^(sz|sh|bj)", "", basename, flags=re.IGNORECASE)
         # 验证是纯数字
         if cleaned and cleaned.isdigit():
             return cleaned
+        return None
+
+    def infer_symbol_from_adj_csv_name(self, csv_name: str) -> str | None:
+        """
+        从复权因子 CSV 文件名推断股票代码。
+
+        支持格式：
+        - 000001.SZ.csv → 000001
+        - 600000.SH.csv → 600000
+
+        提取第一个 '.' 之前的部分，验证为纯数字后返回。
+
+        Args:
+            csv_name: CSV 文件名
+
+        Returns:
+            纯数字股票代码，无法推断时返回 None
+        """
+        basename = Path(csv_name).name  # e.g. "000001.SZ.csv"
+        parts = basename.split(".")
+        if parts and parts[0].isdigit():
+            return parts[0]
         return None
 
     def infer_symbol_and_freq(self, zip_path: Path) -> tuple[str, str] | None:
@@ -220,14 +421,16 @@ class LocalKlineImportService:
     # ------------------------------------------------------------------
 
     def parse_csv_content(
-        self, csv_text: str, symbol: str, freq: str,
+        self, csv_text: str, symbol: str, freq: str, market: str = "hushen",
     ) -> tuple[list[KlineBar], int]:
         """
-        解析 CSV 文本为 KlineBar 列表。
+        解析 CSV 文本为 KlineBar 列表（市场感知）。
 
         支持两种 CSV 格式：
         1. 新格式（实际数据）: 时间,代码,名称,开盘价,收盘价,最高价,最低价,成交量,成交额,...
         2. 旧格式: time,open,high,low,close,volume,amount
+
+        指数数据（zhishu）无成交量列时，volume 自动设为 0。
 
         第一行为表头时自动检测列映射。
 
@@ -235,6 +438,7 @@ class LocalKlineImportService:
             csv_text: CSV 文本内容
             symbol: 股票代码（可被 CSV 中的代码列覆盖）
             freq: K线频率
+            market: 市场分类（hushen/jingshi/zhishu），默认 hushen
 
         Returns:
             (bars, skipped_count) 元组
@@ -268,7 +472,7 @@ class LocalKlineImportService:
                 continue
 
             try:
-                bar = self._parse_csv_row(row, symbol, freq, col_map)
+                bar = self._parse_csv_row(row, symbol, freq, col_map, market)
             except (ValueError, InvalidOperation, IndexError) as exc:
                 logger.warning(
                     "CSV 行解析失败，跳过: symbol=%s line=%d error=%s",
@@ -307,10 +511,12 @@ class LocalKlineImportService:
     def _parse_csv_row(
         self, row: list[str], symbol: str, freq: str,
         col_map: dict[str, int] | None = None,
+        market: str = "hushen",
     ) -> KlineBar:
         """将单行 CSV 数据解析为 KlineBar。
 
         如果有 col_map（从表头检测），按列名取值；否则按位置取值。
+        指数市场（zhishu）CSV 无成交量列时，volume 设为 0。
         """
         if col_map:
             # 按列名映射取值
@@ -331,8 +537,14 @@ class LocalKlineImportService:
             close_val = Decimal(row[col_map["close"]].strip())
             high_val = Decimal(row[col_map["high"]].strip())
             low_val = Decimal(row[col_map["low"]].strip())
-            volume_val = int(Decimal(row[col_map["volume"]].strip()))
-            amount_val = Decimal(row[col_map.get("amount", col_map["volume"])].strip()) if "amount" in col_map else Decimal("0")
+
+            # 指数数据可能无成交量列，volume 设为 0
+            if "volume" in col_map:
+                volume_val = int(Decimal(row[col_map["volume"]].strip()))
+            else:
+                volume_val = 0
+
+            amount_val = Decimal(row[col_map.get("amount", col_map.get("volume", -1))].strip()) if "amount" in col_map else Decimal("0")
 
             return KlineBar(
                 time=dt, symbol=csv_symbol, freq=freq,
@@ -384,6 +596,7 @@ class LocalKlineImportService:
 
     def extract_and_parse_zip(
         self, zip_path: Path, freq_filter: set[str] | None = None,
+        market: str = "hushen",
     ) -> tuple[list[KlineBar], int, int]:
         """
         内存解压 ZIP 并解析 CSV 内容。
@@ -392,9 +605,12 @@ class LocalKlineImportService:
         1. 新格式：ZIP 内含多个 CSV（每个 CSV 对应一只股票），频率从路径推断
         2. 旧格式：ZIP 内含单个 CSV，symbol 和 freq 都从路径推断
 
+        K线数据始终以不复权（adj_type=0）方式存储。
+
         Args:
             zip_path: ZIP 文件路径
             freq_filter: 可选频率过滤集合，仅处理匹配的频率
+            market: 市场分类（hushen/jingshi/zhishu），默认 hushen
 
         Returns:
             (bars, parsed_count, skipped_count) 元组
@@ -426,7 +642,7 @@ class LocalKlineImportService:
                         continue
 
                     # 从 CSV 文件名推断 symbol
-                    csv_symbol = self.infer_symbol_from_csv_name(name)
+                    csv_symbol = self.infer_symbol_from_csv_name(name, market)
                     if csv_symbol is None:
                         # 回退到路径推断的 symbol
                         csv_symbol = path_symbol if path_symbol != "__from_csv__" else None
@@ -441,7 +657,7 @@ class LocalKlineImportService:
                     except UnicodeDecodeError:
                         csv_text = csv_bytes.decode("gbk", errors="replace")
 
-                    bars, skipped = self.parse_csv_content(csv_text, csv_symbol, freq)
+                    bars, skipped = self.parse_csv_content(csv_text, csv_symbol, freq, market)
                     all_bars.extend(bars)
                     total_parsed += len(bars)
                     total_skipped += skipped
@@ -454,6 +670,108 @@ class LocalKlineImportService:
         except OSError as exc:
             logger.error("读取 ZIP 文件失败: %s error=%s", zip_path, exc)
             return [], 0, 0
+
+    # ------------------------------------------------------------------
+    # 复权因子 ZIP 解压与解析
+    # ------------------------------------------------------------------
+
+    def parse_adj_factor_zip(
+        self, zip_path: Path, adj_type: int,
+    ) -> tuple[list[dict], int, int]:
+        """
+        解压并解析复权因子 ZIP 文件。
+
+        ZIP 内含多个 CSV 文件，每个 CSV 对应一只股票的复权因子数据。
+        CSV 表头：股票代码,交易日期,复权因子
+        交易日期格式：YYYYMMDD
+
+        Args:
+            zip_path: 复权因子 ZIP 文件路径
+            adj_type: 1=前复权, 2=后复权
+
+        Returns:
+            (factors, parsed_count, skipped_count)
+            factors: [{"symbol": str, "trade_date": date, "adj_factor": Decimal, "adj_type": int}, ...]
+        """
+        factors: list[dict] = []
+        total_parsed = 0
+        total_skipped = 0
+
+        try:
+            with open(zip_path, "rb") as f:
+                zip_bytes = f.read()
+
+            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                for name in zf.namelist():
+                    if name.endswith("/"):
+                        continue
+
+                    # 从文件名推断 symbol
+                    csv_symbol = self.infer_symbol_from_adj_csv_name(name)
+                    if csv_symbol is None:
+                        logger.warning(
+                            "无法从复权因子 CSV 文件名推断 symbol，跳过: %s in %s",
+                            name, zip_path,
+                        )
+                        total_skipped += 1
+                        continue
+
+                    csv_bytes = zf.read(name)
+                    try:
+                        csv_text = csv_bytes.decode("utf-8")
+                    except UnicodeDecodeError:
+                        csv_text = csv_bytes.decode("gbk", errors="replace")
+
+                    reader = csv.reader(io.StringIO(csv_text))
+                    header_skipped = False
+
+                    for line_no, row in enumerate(reader, start=1):
+                        if not row or all(cell.strip() == "" for cell in row):
+                            continue
+
+                        # 跳过表头行
+                        if not header_skipped:
+                            first_cell = row[0].strip().lstrip("\ufeff")
+                            if first_cell in ("股票代码", "code", "symbol"):
+                                header_skipped = True
+                                continue
+                            header_skipped = True
+
+                        if len(row) < 3:
+                            total_skipped += 1
+                            continue
+
+                        try:
+                            trade_date_str = row[1].strip()
+                            trade_date_val = date(
+                                int(trade_date_str[:4]),
+                                int(trade_date_str[4:6]),
+                                int(trade_date_str[6:8]),
+                            )
+                            adj_factor_val = Decimal(row[2].strip())
+
+                            factors.append({
+                                "symbol": csv_symbol,
+                                "trade_date": trade_date_val,
+                                "adj_factor": adj_factor_val,
+                                "adj_type": adj_type,
+                            })
+                            total_parsed += 1
+                        except (ValueError, InvalidOperation, IndexError) as exc:
+                            logger.warning(
+                                "复权因子行解析失败，跳过: file=%s line=%d error=%s",
+                                name, line_no, exc,
+                            )
+                            total_skipped += 1
+
+        except zipfile.BadZipFile:
+            logger.error("复权因子 ZIP 文件损坏: %s", zip_path)
+            return [], 0, 0
+        except OSError as exc:
+            logger.error("读取复权因子 ZIP 文件失败: %s error=%s", zip_path, exc)
+            return [], 0, 0
+
+        return factors, total_parsed, total_skipped
 
     # ------------------------------------------------------------------
     # 增量导入
@@ -512,14 +830,39 @@ class LocalKlineImportService:
             await client.aclose()
 
     async def is_running(self) -> bool:
-        """检查是否有导入任务正在运行。"""
+        """检查是否有导入任务正在运行（包括 pending 等待执行状态）。"""
         client = get_redis_client()
         try:
             raw = await client.get(self.REDIS_PROGRESS_KEY)
             if not raw:
                 return False
             progress = json.loads(raw)
-            return progress.get("status") == "running"
+            return progress.get("status") in ("running", "pending")
+        finally:
+            await client.aclose()
+
+    async def request_stop(self) -> None:
+        """发送K线导入停止信号。"""
+        client = get_redis_client()
+        try:
+            await client.set(self.REDIS_STOP_KEY, "1", ex=3600)
+        finally:
+            await client.aclose()
+
+    async def _check_stop_signal(self) -> bool:
+        """检查是否收到停止信号。"""
+        client = get_redis_client()
+        try:
+            val = await client.get(self.REDIS_STOP_KEY)
+            return val is not None
+        finally:
+            await client.aclose()
+
+    async def _clear_stop_signal(self) -> None:
+        """清除停止信号。"""
+        client = get_redis_client()
+        try:
+            await client.delete(self.REDIS_STOP_KEY)
         finally:
             await client.aclose()
 
@@ -529,16 +872,22 @@ class LocalKlineImportService:
 
     async def execute(
         self,
+        markets: list[str] | None = None,
         freqs: list[str] | None = None,
-        sub_dir: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
         force: bool = False,
     ) -> dict:
         """
-        执行导入流程，返回结果摘要字典。
+        执行K线数据导入流程，返回结果摘要字典。
+
+        K线数据始终以不复权（adj_type=0）方式存储。
 
         Args:
+            markets: 可选市场分类过滤列表（hushen/jingshi/zhishu）
             freqs: 可选频率过滤列表
-            sub_dir: 可选子目录
+            start_date: 可选起始日期（YYYY-MM-DD 或 YYYY-MM）
+            end_date: 可选结束日期（YYYY-MM-DD 或 YYYY-MM）
             force: 强制全量导入，忽略增量缓存
 
         Returns:
@@ -547,13 +896,9 @@ class LocalKlineImportService:
         start_time = time.time()
         base_dir = settings.local_kline_data_dir
 
-        # 扫描 ZIP 文件
-        zip_files = self.scan_zip_files(base_dir, sub_dir)
-
-        scan_path = Path(base_dir)
-        if sub_dir:
-            scan_path = scan_path / sub_dir
-        if not scan_path.exists() or not scan_path.is_dir():
+        # 检查基础目录是否存在
+        base_path = Path(base_dir)
+        if not base_path.exists() or not base_path.is_dir():
             result = {
                 "status": "failed",
                 "error": "目录不存在或不可读",
@@ -566,15 +911,24 @@ class LocalKlineImportService:
                 "elapsed_seconds": round(time.time() - start_time, 2),
                 "skipped_files": 0,
                 "failed_details": [],
+                "market_stats": {},
             }
             return result
 
-        freq_filter = set(freqs) if freqs else None
+        # 按四级目录结构扫描 ZIP 文件
+        scan_results = self.scan_market_zip_files(
+            base_dir, markets, freqs, start_date, end_date,
+        )
+
+        # 初始化每市场统计
+        market_stats: dict[str, dict] = {
+            m: {"files": 0, "inserted": 0} for m in self.VALID_MARKETS
+        }
 
         # 初始化进度
         await self.update_progress(
             status="running",
-            total_files=len(zip_files),
+            total_files=len(scan_results),
             processed_files=0,
             success_files=0,
             failed_files=0,
@@ -586,6 +940,7 @@ class LocalKlineImportService:
             current_file="",
             failed_details=[],
             skipped_files=0,
+            market_stats=market_stats,
         )
 
         # 统计
@@ -599,7 +954,44 @@ class LocalKlineImportService:
 
         repo = KlineRepository()
 
-        for idx, zip_path in enumerate(zip_files):
+        # 清除可能残留的停止信号
+        await self._clear_stop_signal()
+
+        for idx, (zip_path, market, freq) in enumerate(scan_results):
+            # 检查停止信号
+            if await self._check_stop_signal():
+                logger.info("收到停止信号，终止K线导入")
+                await self._clear_stop_signal()
+                elapsed = round(time.time() - start_time, 2)
+                await self.update_progress(
+                    status="stopped",
+                    processed_files=idx,
+                    elapsed_seconds=elapsed,
+                )
+                result = {
+                    "status": "stopped",
+                    "total_files": len(scan_results),
+                    "success_files": success_files,
+                    "failed_files": failed_files,
+                    "total_parsed": total_parsed,
+                    "total_inserted": total_inserted,
+                    "total_skipped": total_skipped,
+                    "elapsed_seconds": elapsed,
+                    "skipped_files": skipped_files,
+                    "failed_details": failed_details,
+                    "market_stats": market_stats,
+                }
+                client = get_redis_client()
+                try:
+                    await client.set(
+                        self.REDIS_RESULT_KEY,
+                        json.dumps(result, ensure_ascii=False),
+                        ex=self.PROGRESS_TTL,
+                    )
+                finally:
+                    await client.aclose()
+                return result
+
             # 更新当前文件
             await self.update_progress(
                 current_file=str(zip_path),
@@ -615,13 +1007,17 @@ class LocalKlineImportService:
                     should_skip = False
                 if should_skip:
                     skipped_files += 1
-                    await self.update_progress(skipped_files=skipped_files)
+                    await self.update_progress(
+                        skipped_files=skipped_files,
+                        processed_files=idx + 1,
+                        elapsed_seconds=round(time.time() - start_time, 2),
+                    )
                     continue
 
-            # 解压解析
+            # 解压解析（market 已知，无需 freq_filter）
             try:
                 bars, parsed, skipped = self.extract_and_parse_zip(
-                    zip_path, freq_filter,
+                    zip_path, market=market,
                 )
             except Exception as exc:
                 logger.error("处理 ZIP 文件异常: %s error=%s", zip_path, exc)
@@ -659,6 +1055,10 @@ class LocalKlineImportService:
             total_inserted += inserted_for_file
             success_files += 1
 
+            # 更新每市场统计
+            market_stats[market]["files"] += 1
+            market_stats[market]["inserted"] += inserted_for_file
+
             # 只有实际解析到数据时才标记为已导入，避免空解析污染增量缓存
             if parsed > 0:
                 try:
@@ -667,8 +1067,8 @@ class LocalKlineImportService:
                     logger.warning("标记已导入失败: %s error=%s", zip_path, exc)
 
             logger.info(
-                "文件导入完成: %s parsed=%d inserted=%d",
-                zip_path, parsed, inserted_for_file,
+                "文件导入完成: %s market=%s parsed=%d inserted=%d",
+                zip_path, market, parsed, inserted_for_file,
             )
 
             # 更新进度
@@ -682,13 +1082,14 @@ class LocalKlineImportService:
                 skipped_files=skipped_files,
                 elapsed_seconds=round(time.time() - start_time, 2),
                 failed_details=failed_details,
+                market_stats=market_stats,
             )
 
         elapsed = round(time.time() - start_time, 2)
 
         result = {
             "status": "completed",
-            "total_files": len(zip_files),
+            "total_files": len(scan_results),
             "success_files": success_files,
             "failed_files": failed_files,
             "total_parsed": total_parsed,
@@ -697,13 +1098,15 @@ class LocalKlineImportService:
             "elapsed_seconds": elapsed,
             "skipped_files": skipped_files,
             "failed_details": failed_details,
+            "market_stats": market_stats,
         }
 
         # 写入最终进度
         await self.update_progress(
             status="completed",
-            processed_files=len(zip_files),
+            processed_files=len(scan_results),
             elapsed_seconds=elapsed,
+            market_stats=market_stats,
         )
 
         # 写入结果摘要到 Redis（24h TTL）
@@ -719,8 +1122,324 @@ class LocalKlineImportService:
 
         logger.info(
             "导入任务完成: total=%d success=%d failed=%d parsed=%d inserted=%d skipped=%d elapsed=%.2fs",
-            len(zip_files), success_files, failed_files,
+            len(scan_results), success_files, failed_files,
             total_parsed, total_inserted, total_skipped, elapsed,
         )
 
+        return result
+
+    # ------------------------------------------------------------------
+    # 复权因子独立导入
+    # ------------------------------------------------------------------
+
+    REDIS_ADJ_PROGRESS_KEY: str = "import:adj_factor:progress"
+    REDIS_ADJ_RESULT_KEY: str = "import:adj_factor:result"
+    REDIS_ADJ_INCREMENTAL_KEY: str = "import:adj_factor:files"
+    REDIS_ADJ_STOP_KEY: str = "import:adj_factor:stop"
+
+    async def _update_adj_progress(self, **kwargs) -> None:
+        """更新复权因子导入进度到 Redis。"""
+        client = get_redis_client()
+        try:
+            raw = await client.get(self.REDIS_ADJ_PROGRESS_KEY)
+            progress = json.loads(raw) if raw else {}
+            progress.update(kwargs)
+            await client.set(
+                self.REDIS_ADJ_PROGRESS_KEY,
+                json.dumps(progress, ensure_ascii=False),
+                ex=self.PROGRESS_TTL,
+            )
+        finally:
+            await client.aclose()
+
+    async def request_adj_stop(self) -> None:
+        """发送复权因子导入停止信号。"""
+        client = get_redis_client()
+        try:
+            await client.set(self.REDIS_ADJ_STOP_KEY, "1", ex=3600)
+        finally:
+            await client.aclose()
+
+    async def _check_adj_stop_signal(self) -> bool:
+        """检查复权因子导入停止信号。"""
+        client = get_redis_client()
+        try:
+            val = await client.get(self.REDIS_ADJ_STOP_KEY)
+            return val is not None
+        finally:
+            await client.aclose()
+
+    async def _clear_adj_stop_signal(self) -> None:
+        """清除复权因子导入停止信号。"""
+        client = get_redis_client()
+        try:
+            await client.delete(self.REDIS_ADJ_STOP_KEY)
+        finally:
+            await client.aclose()
+
+    async def execute_adj_factors(
+        self,
+        adj_factors: list[str] | None = None,
+    ) -> dict:
+        """
+        独立执行复权因子导入流程。
+
+        Args:
+            adj_factors: 复权因子类型列表（qfq/hfq）
+
+        Returns:
+            结果摘要字典
+        """
+        start_time = time.time()
+        base_dir = settings.local_kline_data_dir
+
+        if not adj_factors:
+            return {"status": "failed", "error": "未指定复权因子类型", "adj_factor_stats": {}, "elapsed_seconds": 0, "total_types": 0, "completed_types": 0, "current_type": ""}
+
+        total_types = len(adj_factors)
+
+        # 写入运行中状态
+        await self._update_adj_progress(
+            status="running",
+            adj_factor_stats={},
+            elapsed_seconds=0,
+            total_types=total_types,
+            completed_types=0,
+            current_type="",
+            current_step="",
+        )
+
+        from app.services.data_engine.adj_factor_repository import AdjFactorRepository
+
+        adj_type_map: dict[str, tuple[int, str]] = {
+            "qfq": (1, "复权因子_前复权.zip"),
+            "hfq": (2, "复权因子_后复权.zip"),
+        }
+        adj_label_map: dict[str, str] = {"qfq": "前复权", "hfq": "后复权"}
+
+        adj_repo = AdjFactorRepository()
+        adj_factor_stats: dict[str, dict] = {}
+        completed_types = 0
+
+        # 清除可能残留的停止信号
+        await self._clear_adj_stop_signal()
+
+        for adj_key in adj_factors:
+            # 检查停止信号
+            if await self._check_adj_stop_signal():
+                logger.info("收到停止信号，终止复权因子导入")
+                await self._clear_adj_stop_signal()
+                elapsed = round(time.time() - start_time, 2)
+                result = {
+                    "status": "stopped",
+                    "adj_factor_stats": adj_factor_stats,
+                    "elapsed_seconds": elapsed,
+                    "total_types": total_types,
+                    "completed_types": completed_types,
+                    "current_type": "",
+                    "current_step": "",
+                }
+                await self._update_adj_progress(**result)
+                client = get_redis_client()
+                try:
+                    await client.set(
+                        self.REDIS_ADJ_RESULT_KEY,
+                        json.dumps(result, ensure_ascii=False),
+                        ex=self.PROGRESS_TTL,
+                    )
+                finally:
+                    await client.aclose()
+                return result
+
+            if adj_key not in adj_type_map:
+                logger.warning("未知的复权因子类型，跳过: %s", adj_key)
+                continue
+
+            adj_type_val, zip_name = adj_type_map[adj_key]
+            adj_zip_path = Path(base_dir) / "复权因子" / zip_name
+            label = adj_label_map.get(adj_key, adj_key)
+
+            # 更新当前处理的类型
+            await self._update_adj_progress(
+                current_type=label,
+                current_step="检查文件",
+                elapsed_seconds=round(time.time() - start_time, 2),
+            )
+
+            if not adj_zip_path.exists():
+                logger.error("复权因子 ZIP 文件不存在: %s", adj_zip_path)
+                adj_factor_stats[adj_key] = {
+                    "status": "failed",
+                    "error": "文件不存在",
+                    "parsed": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                }
+                completed_types += 1
+                await self._update_adj_progress(
+                    adj_factor_stats=adj_factor_stats,
+                    completed_types=completed_types,
+                    elapsed_seconds=round(time.time() - start_time, 2),
+                )
+                continue
+
+            # 增量检查：文件 mtime 未变化则跳过
+            try:
+                current_mtime = str(adj_zip_path.stat().st_mtime)
+                client = get_redis_client()
+                try:
+                    cached_mtime = await client.hget(
+                        self.REDIS_ADJ_INCREMENTAL_KEY, str(adj_zip_path),
+                    )
+                finally:
+                    await client.aclose()
+
+                if cached_mtime and cached_mtime == current_mtime:
+                    logger.info("复权因子文件未变化，跳过: %s", adj_zip_path)
+                    adj_factor_stats[adj_key] = {
+                        "status": "skipped",
+                        "parsed": 0,
+                        "inserted": 0,
+                        "skipped": 0,
+                    }
+                    completed_types += 1
+                    await self._update_adj_progress(
+                        adj_factor_stats=adj_factor_stats,
+                        completed_types=completed_types,
+                        current_step="已跳过（文件未变化）",
+                        elapsed_seconds=round(time.time() - start_time, 2),
+                    )
+                    continue
+            except Exception:
+                pass  # 增量检查失败不影响导入
+
+            # 解压解析阶段
+            await self._update_adj_progress(
+                current_step="解压解析中",
+                elapsed_seconds=round(time.time() - start_time, 2),
+            )
+
+            try:
+                factors, adj_parsed, adj_skipped = self.parse_adj_factor_zip(
+                    adj_zip_path, adj_type_val,
+                )
+            except Exception as exc:
+                logger.error("复权因子导入异常: %s error=%s", adj_zip_path, exc)
+                adj_factor_stats[adj_key] = {
+                    "status": "failed",
+                    "error": str(exc),
+                    "parsed": 0,
+                    "inserted": 0,
+                    "skipped": 0,
+                }
+                completed_types += 1
+                await self._update_adj_progress(
+                    adj_factor_stats=adj_factor_stats,
+                    completed_types=completed_types,
+                    elapsed_seconds=round(time.time() - start_time, 2),
+                )
+                continue
+
+            if not factors:
+                logger.warning("复权因子解析结果为空: %s", adj_zip_path)
+                adj_factor_stats[adj_key] = {
+                    "status": "completed",
+                    "parsed": adj_parsed,
+                    "inserted": 0,
+                    "skipped": adj_skipped,
+                }
+                completed_types += 1
+                await self._update_adj_progress(
+                    adj_factor_stats=adj_factor_stats,
+                    completed_types=completed_types,
+                    elapsed_seconds=round(time.time() - start_time, 2),
+                )
+                continue
+
+            # 写入数据库阶段
+            await self._update_adj_progress(
+                current_step=f"写入数据库（{len(factors)} 条）",
+                elapsed_seconds=round(time.time() - start_time, 2),
+            )
+
+            try:
+                adj_inserted = await adj_repo.bulk_insert(factors)
+            except Exception as exc:
+                logger.error("复权因子写入数据库异常: %s error=%s", adj_zip_path, exc)
+                adj_factor_stats[adj_key] = {
+                    "status": "failed",
+                    "error": str(exc),
+                    "parsed": adj_parsed,
+                    "inserted": 0,
+                    "skipped": adj_skipped,
+                }
+                completed_types += 1
+                await self._update_adj_progress(
+                    adj_factor_stats=adj_factor_stats,
+                    completed_types=completed_types,
+                    elapsed_seconds=round(time.time() - start_time, 2),
+                )
+                continue
+
+            adj_factor_stats[adj_key] = {
+                "status": "completed",
+                "parsed": adj_parsed,
+                "inserted": adj_inserted,
+                "skipped": adj_skipped,
+            }
+            completed_types += 1
+
+            await self._update_adj_progress(
+                adj_factor_stats=adj_factor_stats,
+                completed_types=completed_types,
+                elapsed_seconds=round(time.time() - start_time, 2),
+            )
+
+            logger.info(
+                "复权因子导入完成: type=%s parsed=%d inserted=%d skipped=%d",
+                adj_key, adj_parsed, adj_inserted, adj_skipped,
+            )
+
+            # 标记文件已导入（记录 mtime）
+            try:
+                client = get_redis_client()
+                try:
+                    mtime = str(adj_zip_path.stat().st_mtime)
+                    await client.hset(
+                        self.REDIS_ADJ_INCREMENTAL_KEY, str(adj_zip_path), mtime,
+                    )
+                finally:
+                    await client.aclose()
+            except Exception as exc:
+                logger.warning("标记复权因子已导入失败: %s error=%s", adj_zip_path, exc)
+
+        elapsed = round(time.time() - start_time, 2)
+
+        result = {
+            "status": "completed",
+            "adj_factor_stats": adj_factor_stats,
+            "elapsed_seconds": elapsed,
+            "total_types": total_types,
+            "completed_types": completed_types,
+            "current_type": "",
+            "current_step": "",
+        }
+
+        # 写入最终结果到 Redis
+        client = get_redis_client()
+        try:
+            await client.set(
+                self.REDIS_ADJ_PROGRESS_KEY,
+                json.dumps(result, ensure_ascii=False),
+                ex=self.PROGRESS_TTL,
+            )
+            await client.set(
+                self.REDIS_ADJ_RESULT_KEY,
+                json.dumps(result, ensure_ascii=False),
+                ex=self.PROGRESS_TTL,
+            )
+        finally:
+            await client.aclose()
+
+        logger.info("复权因子导入任务完成: elapsed=%.2fs stats=%s", elapsed, adj_factor_stats)
         return result

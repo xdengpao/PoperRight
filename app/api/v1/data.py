@@ -849,8 +849,10 @@ async def get_stock_money_flow(
 
 
 class LocalKlineImportRequest(BaseModel):
+    markets: list[str] | None = None     # 市场分类: hushen/jingshi/zhishu
     freqs: list[str] | None = None       # 频率过滤列表
-    sub_dir: str | None = None           # 子目录路径
+    start_date: str | None = None        # 起始日期 YYYY-MM-DD（兼容 YYYY-MM）
+    end_date: str | None = None          # 结束日期 YYYY-MM-DD（兼容 YYYY-MM）
     force: bool = False                  # 强制全量导入
 
 
@@ -865,6 +867,7 @@ class LocalKlineImportStatusResponse(BaseModel):
     processed_files: int = 0
     success_files: int = 0
     failed_files: int = 0
+    skipped_files: int = 0               # 增量跳过的文件数
     total_parsed: int = 0
     total_inserted: int = 0
     total_skipped: int = 0
@@ -893,8 +896,29 @@ async def start_local_kline_import(
     if await svc.is_running():
         raise HTTPException(status_code=409, detail="已有导入任务正在运行")
 
+    # 立即重置 Redis 进度数据，避免前端轮询读到上次的终态
+    import json
+    from app.core.redis_client import get_redis_client
+    client = get_redis_client()
+    try:
+        await client.set(
+            svc.REDIS_PROGRESS_KEY,
+            json.dumps({"status": "pending", "total_files": 0, "processed_files": 0,
+                         "success_files": 0, "failed_files": 0, "skipped_files": 0,
+                         "total_parsed": 0, "total_inserted": 0, "total_skipped": 0,
+                         "elapsed_seconds": 0, "failed_details": []}, ensure_ascii=False),
+            ex=svc.PROGRESS_TTL,
+        )
+        await client.delete(svc.REDIS_RESULT_KEY)
+    finally:
+        await client.aclose()
+
     result = import_local_kline.delay(
-        freqs=body.freqs, sub_dir=body.sub_dir, force=body.force,
+        markets=body.markets,
+        freqs=body.freqs,
+        start_date=body.start_date,
+        end_date=body.end_date,
+        force=body.force,
     )
 
     return LocalKlineImportResponse(
@@ -929,9 +953,194 @@ async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
         processed_files=data.get("processed_files", 0),
         success_files=data.get("success_files", 0),
         failed_files=data.get("failed_files", 0),
+        skipped_files=data.get("skipped_files", 0),
         total_parsed=data.get("total_parsed", 0),
         total_inserted=data.get("total_inserted", 0),
         total_skipped=data.get("total_skipped", 0),
         elapsed_seconds=data.get("elapsed_seconds", 0),
         failed_details=data.get("failed_details", []),
     )
+
+
+@router.post("/import/local-kline/stop")
+async def stop_local_kline_import() -> dict:
+    """发送K线导入停止信号。"""
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    svc = LocalKlineImportService()
+    if not await svc.is_running():
+        raise HTTPException(status_code=409, detail="没有正在运行的导入任务")
+
+    await svc.request_stop()
+    return {"message": "停止信号已发送"}
+
+
+# ---------------------------------------------------------------------------
+# 复权因子独立导入端点
+# ---------------------------------------------------------------------------
+
+
+class AdjFactorImportRequest(BaseModel):
+    adj_factors: list[str]  # 复权因子类型: qfq/hfq（至少选一个）
+
+
+class AdjFactorImportResponse(BaseModel):
+    task_id: str
+    message: str
+
+
+class AdjFactorImportStatusResponse(BaseModel):
+    status: str = "idle"  # idle/running/completed/failed
+    adj_factor_stats: dict = {}  # {qfq: {status, parsed, inserted, skipped}, ...}
+    elapsed_seconds: float = 0
+    error: str = ""
+    total_types: int = 0
+    completed_types: int = 0
+    current_type: str = ""
+    current_step: str = ""
+
+
+@router.post("/import/adj-factors", status_code=202)
+async def start_adj_factor_import(
+    body: AdjFactorImportRequest,
+) -> AdjFactorImportResponse:
+    """触发复权因子独立导入任务。
+
+    - 已有复权因子导入任务运行中时返回 HTTP 409
+    - 成功时分发 Celery 任务并返回 202 + task_id
+    """
+    import json
+
+    from app.core.redis_client import get_redis_client
+    from app.tasks.data_sync import import_adj_factors
+
+    client = get_redis_client()
+    try:
+        raw = await client.get("import:adj_factor:progress")
+        if raw:
+            progress = json.loads(raw)
+            if progress.get("status") == "running":
+                raise HTTPException(status_code=409, detail="已有复权因子导入任务正在运行")
+    finally:
+        await client.aclose()
+
+    result = import_adj_factors.delay(adj_factors=body.adj_factors)
+
+    return AdjFactorImportResponse(
+        task_id=result.id,
+        message="复权因子导入任务已触发",
+    )
+
+
+@router.get("/import/adj-factors/status")
+async def get_adj_factor_import_status() -> AdjFactorImportStatusResponse:
+    """查询复权因子导入进度，无数据时返回 idle 默认值。"""
+    import json
+
+    from app.core.redis_client import get_redis_client
+
+    client = get_redis_client()
+    try:
+        raw_progress = await client.get("import:adj_factor:progress")
+        raw_result = await client.get("import:adj_factor:result")
+    finally:
+        await client.aclose()
+
+    raw = raw_progress or raw_result
+    if not raw:
+        return AdjFactorImportStatusResponse()
+
+    data = json.loads(raw)
+    return AdjFactorImportStatusResponse(
+        status=data.get("status", "idle"),
+        adj_factor_stats=data.get("adj_factor_stats", {}),
+        elapsed_seconds=data.get("elapsed_seconds", 0),
+        error=data.get("error", ""),
+        total_types=data.get("total_types", 0),
+        completed_types=data.get("completed_types", 0),
+        current_type=data.get("current_type", ""),
+        current_step=data.get("current_step", ""),
+    )
+
+
+@router.post("/import/adj-factors/stop")
+async def stop_adj_factor_import() -> dict:
+    """发送复权因子导入停止信号。"""
+    import json
+
+    from app.core.redis_client import get_redis_client
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    # 检查是否有运行中的任务
+    client = get_redis_client()
+    try:
+        raw = await client.get("import:adj_factor:progress")
+        if not raw:
+            raise HTTPException(status_code=409, detail="没有正在运行的复权因子导入任务")
+        progress = json.loads(raw)
+        if progress.get("status") != "running":
+            raise HTTPException(status_code=409, detail="没有正在运行的复权因子导入任务")
+    finally:
+        await client.aclose()
+
+    svc = LocalKlineImportService()
+    await svc.request_adj_stop()
+    return {"message": "停止信号已发送"}
+
+
+# ---------------------------------------------------------------------------
+# 导入参数缓存端点
+# ---------------------------------------------------------------------------
+
+IMPORT_PARAMS_REDIS_KEY = "import:local_kline:last_params"
+IMPORT_PARAMS_TTL = 86400 * 30  # 30 天
+
+
+class ImportParamsCache(BaseModel):
+    """缓存的导入页面参数"""
+    markets: list[str] | None = None
+    freqs: list[str] | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    force: bool = False
+    adj_factors: list[str] | None = None
+
+
+@router.put("/import/params")
+async def save_import_params(body: ImportParamsCache) -> dict:
+    """保存导入参数到 Redis 缓存。"""
+    import json
+
+    from app.core.redis_client import get_redis_client
+
+    client = get_redis_client()
+    try:
+        await client.set(
+            IMPORT_PARAMS_REDIS_KEY,
+            json.dumps(body.model_dump(), ensure_ascii=False),
+            ex=IMPORT_PARAMS_TTL,
+        )
+    finally:
+        await client.aclose()
+
+    return {"message": "ok"}
+
+
+@router.get("/import/params")
+async def load_import_params() -> ImportParamsCache:
+    """从 Redis 缓存加载上次导入参数。"""
+    import json
+
+    from app.core.redis_client import get_redis_client
+
+    client = get_redis_client()
+    try:
+        raw = await client.get(IMPORT_PARAMS_REDIS_KEY)
+    finally:
+        await client.aclose()
+
+    if not raw:
+        return ImportParamsCache()
+
+    data = json.loads(raw)
+    return ImportParamsCache(**data)

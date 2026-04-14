@@ -1022,27 +1022,65 @@ async def _sync_historical_money_flow(
     time_limit=None,         # 无硬限制
 )
 def import_local_kline(
+    markets: list[str] | None = None,
     freqs: list[str] | None = None,
-    sub_dir: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
     force: bool = False,
 ) -> dict:
     """
     本地K线数据导入 Celery 任务。
 
     通过 LocalKlineImportService 扫描本地数据目录、解压 ZIP、解析 CSV、
-    校验数据质量并批量写入 TimescaleDB。支持频率过滤、子目录指定和强制全量导入。
+    校验数据质量并批量写入 TimescaleDB。支持市场分类、频率过滤、日期范围和强制全量导入。
+    K线数据始终以不复权（adj_type=0）方式存储。
 
     Args:
-        freqs:   可选频率过滤列表，如 ["1m", "5m"]
-        sub_dir: 可选子目录路径，限定扫描范围
-        force:   强制全量导入，忽略增量缓存
+        markets:     可选市场分类过滤列表，如 ["hushen", "jingshi"]
+        freqs:       可选频率过滤列表，如 ["1m", "5m"]
+        start_date:  可选起始日期（YYYY-MM-DD 或 YYYY-MM）
+        end_date:    可选结束日期（YYYY-MM-DD 或 YYYY-MM）
+        force:       强制全量导入，忽略增量缓存
 
     Returns:
         导入结果摘要字典
 
-    需求：6.1, 6.2
+    需求：6.1, 6.2, 7.1, 9.1, 11.2
     """
     from app.services.data_engine.local_kline_import import LocalKlineImportService
 
     service = LocalKlineImportService()
-    return _run_async(service.execute(freqs=freqs, sub_dir=sub_dir, force=force))
+    return _run_async(service.execute(
+        markets=markets,
+        freqs=freqs,
+        start_date=start_date,
+        end_date=end_date,
+        force=force,
+    ))
+
+
+@celery_app.task(
+    name="app.tasks.data_sync.import_adj_factors",
+    queue="data_sync",
+    soft_time_limit=3600,
+    time_limit=None,
+)
+def import_adj_factors(
+    adj_factors: list[str] | None = None,
+) -> dict:
+    """
+    复权因子独立导入 Celery 任务。
+
+    从本地 AData/复权因子/ 目录解压并解析前复权/后复权因子 ZIP，
+    批量写入 TimescaleDB adjustment_factor 表。
+
+    Args:
+        adj_factors: 复权因子类型列表，如 ["qfq", "hfq"]
+
+    Returns:
+        导入结果摘要字典
+    """
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    service = LocalKlineImportService()
+    return _run_async(service.execute_adj_factors(adj_factors=adj_factors))

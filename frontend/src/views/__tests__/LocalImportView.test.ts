@@ -30,6 +30,25 @@ function idleStatus() {
   }
 }
 
+function idleAdjStatus() {
+  return {
+    data: {
+      status: 'idle',
+      adj_factor_stats: {},
+      elapsed_seconds: 0,
+      error: '',
+    },
+  }
+}
+
+/** Create a mockGet implementation that returns klineData for kline status and idle for adj-factors */
+function mockGetWithKline(klineData: Record<string, unknown>) {
+  return (url: string) => {
+    if (url.includes('adj-factors')) return Promise.resolve(idleAdjStatus())
+    return Promise.resolve({ data: klineData })
+  }
+}
+
 function mountView() {
   return mount(LocalImportView, {
     global: { plugins: [createPinia()] },
@@ -43,7 +62,10 @@ describe('LocalImportView', () => {
     mockPost.mockReset()
     vi.useFakeTimers()
     // Default: onMounted fetchStatus returns idle
-    mockGet.mockResolvedValue(idleStatus())
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes('adj-factors')) return Promise.resolve(idleAdjStatus())
+      return Promise.resolve(idleStatus())
+    })
   })
 
   afterEach(() => {
@@ -57,7 +79,7 @@ describe('LocalImportView', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('本地数据导入')
-    expect(wrapper.text()).toContain('导入配置')
+    expect(wrapper.text()).toContain('K线数据导入')
     expect(wrapper.text()).toContain('频率选择')
     expect(wrapper.find('button[aria-label="开始导入"]').exists()).toBe(true)
   })
@@ -75,23 +97,78 @@ describe('LocalImportView', () => {
     expect(freqCheckboxes.length).toBe(5)
   })
 
-  it('渲染子目录输入框', async () => {
+  // ── 市场分类选择控件 (需求 16.2) ──
+
+  it('渲染三种市场分类的复选框', async () => {
     const wrapper = mountView()
     await flushPromises()
 
-    const input = wrapper.find('#sub-dir')
-    expect(input.exists()).toBe(true)
-    expect(input.attributes('placeholder')).toContain('000001')
+    const marketGroup = wrapper.find('[aria-label="市场分类"]')
+    expect(marketGroup.exists()).toBe(true)
+
+    const checkboxes = marketGroup.findAll('input[type="checkbox"]')
+    expect(checkboxes.length).toBe(3)
+
+    // All should be checked by default
+    for (const cb of checkboxes) {
+      expect((cb.element as HTMLInputElement).checked).toBe(true)
+    }
   })
 
-  it('渲染定时任务配置区域', async () => {
+  it('市场分类复选框可以取消和恢复勾选', async () => {
     const wrapper = mountView()
     await flushPromises()
 
-    expect(wrapper.text()).toContain('定时任务配置')
-    expect(wrapper.find('#sched-hour').exists()).toBe(true)
-    expect(wrapper.find('#sched-minute').exists()).toBe(true)
-    expect(wrapper.find('button[aria-label="保存定时配置"]').exists()).toBe(true)
+    const marketGroup = wrapper.find('[aria-label="市场分类"]')
+    const firstCheckbox = marketGroup.findAll('input[type="checkbox"]')[0]
+
+    await firstCheckbox.setValue(false)
+    expect((firstCheckbox.element as HTMLInputElement).checked).toBe(false)
+
+    await firstCheckbox.setValue(true)
+    expect((firstCheckbox.element as HTMLInputElement).checked).toBe(true)
+  })
+
+  // ── 日期范围选择器 (需求 16.4) ──
+
+  it('渲染起始日期和结束日期选择器', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    // DatePicker components render text inputs with placeholder
+    const dateInputs = wrapper.findAll('.date-picker .date-input')
+    expect(dateInputs.length).toBe(2)
+    expect(dateInputs[0].attributes('placeholder')).toBe('选择起始日期')
+    expect(dateInputs[1].attributes('placeholder')).toBe('选择结束日期')
+  })
+
+  // ── 复权因子选择控件 (需求 16.5) ──
+
+  it('渲染复权因子选择控件', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const adjGroup = wrapper.find('[aria-label="复权因子"]')
+    expect(adjGroup.exists()).toBe(true)
+
+    const checkboxes = adjGroup.findAll('input[type="checkbox"]')
+    expect(checkboxes.length).toBe(2)
+
+    // Default: none selected
+    for (const cb of checkboxes) {
+      expect((cb.element as HTMLInputElement).checked).toBe(false)
+    }
+  })
+
+  it('复权因子复选框可以勾选', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+
+    const adjGroup = wrapper.find('[aria-label="复权因子"]')
+    const firstCheckbox = adjGroup.findAll('input[type="checkbox"]')[0]
+
+    await firstCheckbox.setValue(true)
+    expect((firstCheckbox.element as HTMLInputElement).checked).toBe(true)
   })
 
   // ── 频率多选控件交互 (需求 11.2) ──
@@ -208,20 +285,18 @@ describe('LocalImportView', () => {
 
   it('导入成功后启动轮询', async () => {
     mockPost.mockResolvedValue({ data: { task_id: 'task-poll', message: 'ok' } })
-    mockGet.mockResolvedValue({
-      data: {
-        status: 'running',
-        total_files: 10,
-        processed_files: 3,
-        success_files: 3,
-        failed_files: 0,
-        total_parsed: 3000,
-        total_inserted: 2900,
-        total_skipped: 100,
-        elapsed_seconds: 5.2,
-        failed_details: [],
-      },
-    })
+    mockGet.mockImplementation(mockGetWithKline({
+      status: 'running',
+      total_files: 10,
+      processed_files: 3,
+      success_files: 3,
+      failed_files: 0,
+      total_parsed: 3000,
+      total_inserted: 2900,
+      total_skipped: 100,
+      elapsed_seconds: 5.2,
+      failed_details: [],
+    }))
 
     const wrapper = mountView()
     await flushPromises()
@@ -250,38 +325,34 @@ describe('LocalImportView', () => {
     await flushPromises()
 
     // First poll returns running
-    mockGet.mockResolvedValue({
-      data: {
-        status: 'running',
-        total_files: 5,
-        processed_files: 2,
-        success_files: 2,
-        failed_files: 0,
-        total_parsed: 2000,
-        total_inserted: 1900,
-        total_skipped: 100,
-        elapsed_seconds: 3.0,
-        failed_details: [],
-      },
-    })
+    mockGet.mockImplementation(mockGetWithKline({
+      status: 'running',
+      total_files: 5,
+      processed_files: 2,
+      success_files: 2,
+      failed_files: 0,
+      total_parsed: 2000,
+      total_inserted: 1900,
+      total_skipped: 100,
+      elapsed_seconds: 3.0,
+      failed_details: [],
+    }))
     vi.advanceTimersByTime(3000)
     await flushPromises()
 
     // Second poll returns completed → should stop polling
-    mockGet.mockResolvedValue({
-      data: {
-        status: 'completed',
-        total_files: 5,
-        processed_files: 5,
-        success_files: 5,
-        failed_files: 0,
-        total_parsed: 5000,
-        total_inserted: 4800,
-        total_skipped: 200,
-        elapsed_seconds: 10.5,
-        failed_details: [],
-      },
-    })
+    mockGet.mockImplementation(mockGetWithKline({
+      status: 'completed',
+      total_files: 5,
+      processed_files: 5,
+      success_files: 5,
+      failed_files: 0,
+      total_parsed: 5000,
+      total_inserted: 4800,
+      total_skipped: 200,
+      elapsed_seconds: 10.5,
+      failed_details: [],
+    }))
     vi.advanceTimersByTime(3000)
     await flushPromises()
 
@@ -292,24 +363,22 @@ describe('LocalImportView', () => {
     await flushPromises()
 
     expect(mockGet.mock.calls.length).toBe(callCountAfterComplete)
-    expect(wrapper.text()).toContain('结果摘要')
+    expect(wrapper.text()).toContain('K线导入结果')
   })
 
   it('页面挂载时检测到运行中任务自动恢复轮询', async () => {
-    mockGet.mockResolvedValue({
-      data: {
-        status: 'running',
-        total_files: 20,
-        processed_files: 8,
-        success_files: 8,
-        failed_files: 0,
-        total_parsed: 8000,
-        total_inserted: 7500,
-        total_skipped: 500,
-        elapsed_seconds: 15.0,
-        failed_details: [],
-      },
-    })
+    mockGet.mockImplementation(mockGetWithKline({
+      status: 'running',
+      total_files: 20,
+      processed_files: 8,
+      success_files: 8,
+      failed_files: 0,
+      total_parsed: 8000,
+      total_inserted: 7500,
+      total_skipped: 500,
+      elapsed_seconds: 15.0,
+      failed_details: [],
+    }))
 
     const wrapper = mountView()
     await flushPromises()
@@ -326,20 +395,18 @@ describe('LocalImportView', () => {
   })
 
   it('组件卸载时停止轮询', async () => {
-    mockGet.mockResolvedValue({
-      data: {
-        status: 'running',
-        total_files: 10,
-        processed_files: 2,
-        success_files: 2,
-        failed_files: 0,
-        total_parsed: 2000,
-        total_inserted: 1800,
-        total_skipped: 200,
-        elapsed_seconds: 4.0,
-        failed_details: [],
-      },
-    })
+    mockGet.mockImplementation(mockGetWithKline({
+      status: 'running',
+      total_files: 10,
+      processed_files: 2,
+      success_files: 2,
+      failed_files: 0,
+      total_parsed: 2000,
+      total_inserted: 1800,
+      total_skipped: 200,
+      elapsed_seconds: 4.0,
+      failed_details: [],
+    }))
 
     const wrapper = mountView()
     await flushPromises()

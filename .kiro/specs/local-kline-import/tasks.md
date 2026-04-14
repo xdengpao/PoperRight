@@ -1,158 +1,143 @@
-# 实现计划：本地分钟级K线数据导入
+# 实现计划：本地A股分时数据与复权因子导入
 
 ## 概述
 
-基于需求文档和设计文档，将本地K线数据导入功能拆分为后端服务层、Celery 任务层、API 层和前端四个阶段，逐步实现并集成。后端使用 Python（FastAPI + Celery + Hypothesis），前端使用 TypeScript（Vue 3 + Pinia + fast-check）。
+基于更新后的需求文档和设计文档，将本地数据导入功能拆分为：核心服务重构（市场感知扫描与解析）、复权因子导入、API扩展、前端扩展四个阶段。已有的基础设施（配置、Celery任务、Redis进度、增量导入）大部分可复用，重点在于适配实际的四级目录结构和市场特定的CSV格式。
 
 ## 任务列表
 
-- [x] 1. 配置扩展与核心服务实现
-  - [x] 1.1 在 `app/core/config.py` 的 Settings 类中新增 `local_kline_data_dir` 配置项
-    - 类型 `str`，默认值 `/Users/poper/AData`，对应环境变量 `LOCAL_KLINE_DATA_DIR`
-    - _需求: 7.1, 7.2, 7.3_
+- [x] 1. 核心服务重构：市场感知目录扫描与解析
+  - [x] 1.1 重构 `LocalKlineImportService` 的目录扫描逻辑
+    - 新增 `scan_market_zip_files(base_dir, markets, freqs, start_month, end_month)` 方法
+    - 按 `{市场目录}/{频率目录}/{月份目录}/{日期ZIP}` 四级结构扫描
+    - 新增 `MARKET_DIR_MAP` 和 `FREQ_DIR_MAP` 常量映射
+    - 支持 `markets` 参数过滤市场分类（hushen/jingshi/zhishu）
+    - 支持 `freqs` 参数过滤频率目录
+    - 支持 `start_month`/`end_month` 参数过滤月份目录
+    - 返回 `[(zip_path, market, freq), ...]` 元组列表
+    - 更新 `infer_freq_from_path` 支持 `{N}分钟_按月归档` 目录名
+    - 新增 `infer_market_from_path` 方法
+    - _需求: 1.1, 1.2, 1.3, 1.4, 7.1, 7.2, 7.3, 8.2, 8.3, 9.1, 9.2, 9.3_
 
-  - [x] 1.2 创建 `app/services/data_engine/local_kline_import.py`，实现 `LocalKlineImportService` 核心类
-    - 实现 `scan_zip_files(base_dir, sub_dir)` 方法：递归扫描目录下所有 `.zip` 文件，返回路径列表
-    - 实现 `infer_symbol_and_freq(zip_path)` 方法：从文件路径推断股票代码和频率
-    - 实现 `validate_bar(bar)` 方法：校验 KlineBar 数据质量（价格正数、high/low 关系、volume 非负、freq 合法）
-    - 实现 `parse_csv_content(csv_text, symbol, freq)` 方法：解析 CSV 文本为 KlineBar 列表，跳过不合法行
-    - 实现 `extract_and_parse_zip(zip_path, freq_filter)` 方法：内存解压 ZIP 并解析 CSV
-    - _需求: 1.1, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.1_
+  - [x] 1.2 重构 CSV 解析逻辑，支持市场感知解析
+    - 更新 `infer_symbol_from_csv_name(csv_name, market)` 支持三种市场的文件名格式
+    - 沪深: `sz000001.csv` → `000001`, `sh600000.csv` → `600000`
+    - 京市: `bj920000.csv` → `920000`
+    - 指数: `000001.csv` → `000001`（无前缀）
+    - 更新 `parse_csv_content` 接受 `market` 参数
+    - 指数市场 CSV 无 `成交量` 列时，volume 设为 0
+    - 更新 `_build_column_map` 处理指数表头（无成交量列）
+    - _需求: 2.2, 2.3, 3.1, 3.2, 4.1, 4.2, 4.3_
 
-  - [x] 1.3 编写属性测试：目录扫描仅返回 ZIP 文件
-    - **Property 1: 目录扫描仅返回 ZIP 文件**
-    - 在 `tests/properties/test_local_kline_import_properties.py` 中实现
-    - 使用 Hypothesis 生成随机目录结构（含各种扩展名文件），验证 `scan_zip_files` 仅返回 `.zip` 文件且不遗漏
-    - **验证: 需求 1.1**
+  - [x] 1.3 重构 `extract_and_parse_zip` 方法
+    - 接受 `market` 参数，传递给 CSV 解析
+    - 从四级路径推断 freq 和 market
+    - _需求: 2.1, 2.5, 2.6_
 
-  - [ ]* 1.4 编写属性测试：文件路径推断股票代码和频率
-    - **Property 3: 文件路径推断股票代码和频率**
-    - 使用 Hypothesis 生成符合命名规则的文件路径，验证 `infer_symbol_and_freq` 正确提取 symbol 和 freq
-    - **验证: 需求 2.3**
+  - [x] 1.4 重构 `execute` 主流程方法
+    - 使用 `scan_market_zip_files` 替代 `scan_zip_files`
+    - 接受新参数：`markets`, `start_month`, `end_month`, `adj_factors`
+    - 按市场分类统计导入结果
+    - 在进度中包含 `market_stats` 字段
+    - _需求: 7.1, 8.1, 9.1, 11.2, 11.3, 14.1_
 
-  - [ ]* 1.5 编写属性测试：KlineBar 数据校验完备性
-    - **Property 4: KlineBar 数据校验完备性**
-    - 使用 Hypothesis 生成随机 KlineBar（含合法和非法值），验证 `validate_bar` 的判定逻辑与规则一致
-    - **验证: 需求 3.1, 3.2, 3.3, 3.4, 3.5**
+  - [x] 1.5 编写属性测试：市场分类过滤正确性
+    - **Property 8: 市场分类过滤正确性**
+    - 使用 Hypothesis 生成随机市场分类集合，验证扫描结果仅包含对应市场目录下的文件
+    - **验证: 需求 7.1, 7.2, 7.3**
 
-  - [ ]* 1.6 编写属性测试：CSV 解析往返一致性
-    - **Property 2: CSV 解析往返一致性**
-    - 使用 Hypothesis 生成有效 KlineBar，序列化为 CSV 行后再解析回 KlineBar，验证数值字段等价
-    - **验证: 需求 2.1, 2.2**
+  - [x] 1.6 编写属性测试：月份范围过滤正确性
+    - **Property 9: 月份范围过滤正确性**
+    - 使用 Hypothesis 生成随机月份范围，验证扫描结果仅包含范围内的月份目录
+    - **验证: 需求 9.1, 9.2, 9.3**
 
-- [x] 2. 检查点 - 确保核心服务测试通过
-  - 确保所有测试通过，如有问题请向用户确认。
+  - [x] 1.7 编写属性测试：指数数据 volume 为零
+    - **Property 12: 指数数据 volume 为零**
+    - 使用 Hypothesis 生成随机指数 CSV 数据，验证解析后所有 KlineBar 的 volume 为 0
+    - **验证: 需求 4.3**
 
-- [x] 3. 批量写入、增量导入与执行流程
-  - [x] 3.1 在 `LocalKlineImportService` 中实现批量写入和增量导入逻辑
-    - 实现 `check_incremental(zip_path)` 方法：基于 Redis 哈希表检查文件 mtime 是否变化
-    - 实现 `mark_imported(zip_path)` 方法：将文件路径和 mtime 写入 Redis 增量缓存
-    - 实现 `update_progress(**kwargs)` 方法：更新 Redis 中的导入进度 JSON
-    - 实现 `is_running()` 方法：检查是否有导入任务正在运行
-    - 实现 `execute(freqs, sub_dir, force)` 主流程方法：编排扫描→增量检查→解压解析→校验→分批写入→进度更新→结果摘要
-    - 调用 `KlineRepository.bulk_insert` 分批写入，每批不超过 1000 条
-    - _需求: 4.1, 4.2, 4.3, 4.4, 5.2, 5.3, 6.3, 6.4, 8.1, 8.2, 8.3, 9.1, 9.2, 9.3, 9.4, 9.5_
+- [x] 2. 检查点 - 确保核心服务重构测试通过
+  - 运行 `pytest tests/properties/test_local_kline_import_properties.py tests/services/test_local_kline_import.py`，确保所有测试通过。
 
-  - [x] 3.2 编写属性测试：批量写入分批不超过上限
-    - **Property 5: 批量写入分批不超过上限**
-    - 使用 Hypothesis 生成随机长度的 KlineBar 列表，验证每批 `bulk_insert` 调用不超过 1000 条且总数等于 N
-    - **验证: 需求 4.2**
+- [x] 3. 复权因子导入
+  - [x] 3.1 创建 `app/models/adjustment_factor.py` 复权因子 ORM 模型
+    - 定义 `AdjustmentFactor` 模型，主键 `(symbol, trade_date, adj_type)`
+    - 字段：symbol、trade_date、adj_type（1=前复权, 2=后复权）、adj_factor
+    - 使用 `TSBase`（TimescaleDB）
+    - _需求: 10.6_
 
-  - [x] 3.3 编写属性测试：频率过滤正确性
-    - **Property 7: 频率过滤正确性**
-    - 使用 Hypothesis 生成随机频率集合和文件集合，验证导入后数据的 freq 字段都属于过滤列表
-    - **验证: 需求 5.2, 5.3**
+  - [x] 3.2 创建 `app/services/data_engine/adj_factor_repository.py` 复权因子仓储
+    - 实现 `bulk_insert(factors)` 方法，ON CONFLICT DO NOTHING
+    - _需求: 10.6_
 
-  - [x] 3.4 编写属性测试：增量导入跳过未变化文件
-    - **Property 8: 增量导入跳过未变化文件**
-    - 使用 Hypothesis 生成随机文件路径和 mtime，验证 mtime 未变化时文件被跳过，变化时重新导入
-    - **验证: 需求 9.1, 9.2, 9.3, 9.4**
+  - [x] 3.3 创建 Alembic 迁移脚本，新增 `adjustment_factor` 表
+    - _需求: 10.6_
 
-  - [x] 3.5 编写属性测试：强制导入忽略增量缓存
-    - **Property 9: 强制导入忽略增量缓存**
-    - 使用 Hypothesis 生成已导入文件集合，验证 `force=True` 时所有文件都被重新处理
-    - **验证: 需求 9.5**
+  - [x] 3.4 在 `LocalKlineImportService` 中实现复权因子导入逻辑
+    - 实现 `parse_adj_factor_zip(zip_path, adj_type)` 方法
+    - 实现 `infer_symbol_from_adj_csv_name(csv_name)` 方法：`000001.SZ.csv` → `000001`
+    - 解析 CSV 表头 `股票代码,交易日期,复权因子`，交易日期格式 `YYYYMMDD`
+    - 在 `execute` 中根据 `adj_factors` 参数调用复权因子导入
+    - _需求: 10.1, 10.2, 10.3, 10.4, 10.5, 10.7_
 
-  - [x] 3.6 编写属性测试：结果摘要字段完整性
-    - **Property 10: 结果摘要字段完整性**
-    - 使用 Hypothesis 生成随机导入执行结果，验证摘要字典包含所有必需字段且数值关系正确
-    - **验证: 需求 8.1, 6.3**
+  - [x] 3.5 编写属性测试：复权因子文件名推断正确性
+    - **Property 13: 复权因子 CSV 文件名推断正确性**
+    - 使用 Hypothesis 生成 `{code}.{suffix}.csv` 格式文件名，验证正确提取股票代码
+    - **验证: 需求 10.4**
 
-- [x] 4. 检查点 - 确保批量写入和增量导入测试通过
-  - 确保所有测试通过，如有问题请向用户确认。
+- [x] 4. 检查点 - 确保复权因子导入测试通过
+  - 运行相关测试，确保所有测试通过。
 
-- [x] 5. Celery 任务与 API 端点
-  - [x] 5.1 在 `app/tasks/data_sync.py` 中新增 `import_local_kline` Celery 任务
-    - 注册到 `data_sync` 队列，设置 `soft_time_limit=7200`、`time_limit=10800`
-    - 接受 `freqs`、`sub_dir`、`force` 参数，调用 `LocalKlineImportService.execute()`
-    - 使用 `_run_async` 辅助函数在同步 worker 中运行异步协程
-    - _需求: 6.1, 6.2_
+- [x] 5. API 扩展与 Celery 任务更新
+  - [x] 5.1 更新 `app/api/v1/data.py` 中的请求模型
+    - 扩展 `LocalKlineImportRequest`，新增字段：`markets`、`start_month`、`end_month`、`adj_factors`
+    - 更新 `start_local_kline_import` 端点，传递新参数给 Celery 任务
+    - _需求: 15.1, 15.3, 15.4_
 
-  - [x] 5.2 在 `app/api/v1/data.py` 中新增请求/响应模型和两个 API 端点
-    - 定义 `LocalKlineImportRequest`、`LocalKlineImportResponse`、`LocalKlineImportStatusResponse` Pydantic 模型
-    - 实现 `POST /import/local-kline` 端点：检查并发锁→分发 Celery 任务→返回 202 + task_id
-    - 实现 `GET /import/local-kline/status` 端点：从 Redis 读取进度和最近结果→返回状态
-    - 已有任务运行中时返回 HTTP 409
-    - _需求: 10.1, 10.2, 10.3, 10.4_
+  - [x] 5.2 更新 `app/tasks/data_sync.py` 中的 Celery 任务
+    - 扩展 `import_local_kline` 任务参数：`markets`、`start_month`、`end_month`、`adj_factors`
+    - 传递新参数给 `LocalKlineImportService.execute()`
+    - _需求: 11.1, 11.2_
 
-  - [x] 5.3 编写单元测试：API 端点和 Celery 任务
-    - 在 `tests/services/test_local_kline_import.py` 中编写单元测试
-    - 测试配置项读取和默认值（需求 7）
-    - 测试目录不存在时的错误处理（需求 1.3）
-    - 测试 ZIP 文件损坏时的跳过行为（需求 2.4）
-    - 测试 CSV 行格式不合法时的跳过行为（需求 2.5）
-    - 测试 API 端点 202/409 响应（需求 10.3, 10.4）
-    - 测试并发任务保护（需求 6.4）
-    - _需求: 1.3, 2.4, 2.5, 6.4, 7, 10.3, 10.4_
+  - [x] 5.3 更新单元测试
+    - 更新 `tests/services/test_local_kline_import.py` 中的测试用例
+    - 新增市场分类过滤测试
+    - 新增月份范围过滤测试
+    - 新增复权因子导入测试
+    - 新增指数数据（无成交量列）解析测试
+    - _需求: 2.3, 3.1, 4.2, 7.2, 9.2, 10.3_
 
 - [x] 6. 检查点 - 确保后端全部测试通过
-  - 确保所有测试通过，如有问题请向用户确认。
+  - 运行 `pytest`，确保所有测试通过。
 
-- [x] 7. 前端实现
-  - [x] 7.1 创建 `frontend/src/stores/localImport.ts` Pinia store
-    - 定义状态：`taskId`、`progress`（reactive 对象）、`result`、`loading`、`polling`
-    - 实现 `startImport(params)` 动作：调用 POST API 触发导入
-    - 实现 `fetchStatus()` 动作：调用 GET API 获取进度
-    - 实现 `startPolling()` / `stopPolling()` 方法：3 秒间隔轮询进度
-    - _需求: 11.5, 11.6, 11.7, 11.9, 11.13_
+- [x] 7. 前端扩展
+  - [x] 7.1 更新 `frontend/src/stores/localImport.ts` Pinia store
+    - 扩展 `ImportParams` 接口，新增 `markets`、`start_month`、`end_month`、`adj_factors` 字段
+    - 更新 `startImport` 方法传递新参数
+    - _需求: 16.13_
 
-  - [x] 7.2 创建 `frontend/src/views/LocalImportView.vue` 页面组件
-    - 使用 Vue 3 Composition API + `<script setup>`
-    - 实现频率多选控件（checkbox group，默认全选 1m/5m/15m/30m/60m）
-    - 实现子目录路径输入框
-    - 实现"强制全量导入"开关（toggle）
-    - 实现定时任务配置区域（小时/分钟选择器 + 保存按钮）
-    - 实现"开始导入"按钮（点击后禁用直到收到响应）
-    - 实现进度条（已处理文件数 / 总文件数）
-    - 实现结果摘要卡片和失败文件列表
-    - 页面挂载时检查是否有运行中任务，自动恢复轮询
-    - 遵循项目暗色主题样式，与 DataManageView 保持视觉一致性
-    - _需求: 11.1, 11.2, 11.3, 11.4, 11.5, 11.6, 11.7, 11.8, 11.9, 11.10, 11.11, 11.12, 11.14, 11.15_
+  - [x] 7.2 更新 `frontend/src/views/LocalImportView.vue` 页面组件
+    - 新增市场分类多选控件（checkbox group：沪深、京市、指数，默认全选）
+    - 新增月份范围选择器（起始月份、结束月份，input[type=month]）
+    - 新增复权因子选择控件（checkbox group：前复权、后复权，默认不选）
+    - 移除定时任务配置区域（简化页面，定时任务通过 Celery Beat 配置）
+    - 更新"开始导入"按钮逻辑，传递新参数
+    - _需求: 16.2, 16.3, 16.4, 16.5, 16.6, 16.7, 16.15_
 
-  - [x] 7.3 在 `frontend/src/router/index.ts` 中注册路由
-    - 在 MainLayout children 中新增 `{ path: 'data/local-import', name: 'LocalImport', component: () => import('@/views/LocalImportView.vue'), meta: { title: '本地数据导入' } }`
-    - _需求: 11.1_
-
-  - [x] 7.4 编写前端属性测试：进度百分比计算
-    - 在 `frontend/src/views/__tests__/LocalImportView.property.test.ts` 中实现
-    - 使用 fast-check 生成随机 `processed_files` 和 `total_files`，验证进度百分比始终在 [0, 100] 范围内
-    - _需求: 11.10_
-
-  - [x] 7.5 编写前端单元测试
-    - 在 `frontend/src/views/__tests__/LocalImportView.test.ts` 中实现
-    - 测试组件挂载和渲染
-    - 测试频率多选控件交互
-    - 测试开始导入按钮禁用/启用状态
-    - 测试 409 错误提示展示
-    - 测试进度轮询启动/停止
-    - _需求: 11.2, 11.5, 11.7, 11.9_
+  - [x] 7.3 更新前端单元测试
+    - 更新 `frontend/src/views/__tests__/LocalImportView.test.ts`
+    - 新增市场分类选择控件测试
+    - 新增月份范围选择器测试
+    - 新增复权因子选择控件测试
+    - _需求: 16.2, 16.4, 16.5_
 
 - [x] 8. 最终检查点 - 确保全部测试通过
-  - 确保所有测试通过，如有问题请向用户确认。
+  - 运行后端 `pytest` 和前端 `npm test`，确保所有测试通过。
 
 ## 备注
 
-- 标记 `*` 的任务为可选测试任务，可跳过以加速 MVP 交付
+- 已有的基础设施（配置项、Redis进度追踪、增量导入、并发保护）大部分可复用
+- 核心变更集中在目录扫描逻辑（四级结构）和CSV解析逻辑（市场感知）
+- 复权因子导入是全新功能，需要新建模型和仓储
 - 每个任务引用了对应的需求编号，确保需求可追溯
 - 检查点用于阶段性验证，确保增量正确性
-- 属性测试验证通用正确性属性，单元测试验证具体示例和边界情况

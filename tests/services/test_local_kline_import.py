@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import zipfile
+from datetime import date
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -400,3 +402,207 @@ class TestConcurrencyProtection:
 
         assert resp1.status_code == 202
         assert resp2.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# 需求 7.2：市场分类过滤
+# ---------------------------------------------------------------------------
+
+
+class TestMarketCategoryFiltering:
+    """市场分类过滤测试（需求 7.2）"""
+
+    def _create_market_structure(self, tmp_path: Path) -> None:
+        """在 tmp_path 下创建三个市场的四级目录结构并放入 dummy ZIP。"""
+        for market_dir_name in (
+            "A股_分时数据_沪深",
+            "A股_分时数据_京市",
+            "A股_分时数据_指数",
+        ):
+            month_dir = tmp_path / market_dir_name / "1分钟_按月归档" / "2026-01"
+            month_dir.mkdir(parents=True)
+            zip_path = month_dir / "20260102_1min.zip"
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("dummy.csv", "placeholder")
+            zip_path.write_bytes(buf.getvalue())
+
+    def test_scan_market_zip_files_filters_by_market(self, tmp_path):
+        """指定 markets=["hushen"] 时仅返回沪深目录下的文件。"""
+        self._create_market_structure(tmp_path)
+        svc = LocalKlineImportService()
+
+        results = svc.scan_market_zip_files(
+            str(tmp_path), markets=["hushen"],
+        )
+
+        assert len(results) == 1
+        zip_path, market, freq = results[0]
+        assert market == "hushen"
+        assert "A股_分时数据_沪深" in str(zip_path)
+
+    def test_scan_market_zip_files_all_markets_when_none(self, tmp_path):
+        """markets=None 时返回所有三个市场的文件。"""
+        self._create_market_structure(tmp_path)
+        svc = LocalKlineImportService()
+
+        results = svc.scan_market_zip_files(
+            str(tmp_path), markets=None,
+        )
+
+        returned_markets = {r[1] for r in results}
+        assert returned_markets == {"hushen", "jingshi", "zhishu"}
+        assert len(results) == 3
+
+    def test_infer_market_from_path(self, tmp_path):
+        """infer_market_from_path 从路径部分正确识别市场分类。"""
+        svc = LocalKlineImportService()
+
+        hushen_path = tmp_path / "A股_分时数据_沪深" / "1分钟_按月归档" / "2026-01" / "20260102_1min.zip"
+        assert svc.infer_market_from_path(hushen_path) == "hushen"
+
+        jingshi_path = tmp_path / "A股_分时数据_京市" / "5分钟_按月归档" / "2026-01" / "20260102_5min.zip"
+        assert svc.infer_market_from_path(jingshi_path) == "jingshi"
+
+        zhishu_path = tmp_path / "A股_分时数据_指数" / "15分钟_按月归档" / "2026-01" / "20260102_15min.zip"
+        assert svc.infer_market_from_path(zhishu_path) == "zhishu"
+
+        unknown_path = tmp_path / "unknown_dir" / "data.zip"
+        assert svc.infer_market_from_path(unknown_path) is None
+
+
+# ---------------------------------------------------------------------------
+# 需求 9.2：月份范围过滤
+# ---------------------------------------------------------------------------
+
+
+class TestMonthRangeFiltering:
+    """月份范围过滤测试（需求 9.2）"""
+
+    def _create_months_structure(self, tmp_path: Path, months: list[str]) -> None:
+        """在 tmp_path 下创建沪深市场指定月份的目录结构。"""
+        for month in months:
+            month_dir = tmp_path / "A股_分时数据_沪深" / "1分钟_按月归档" / month
+            month_dir.mkdir(parents=True)
+            zip_path = month_dir / f"{month.replace('-', '')}01_1min.zip"
+            buf = BytesIO()
+            with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("dummy.csv", "placeholder")
+            zip_path.write_bytes(buf.getvalue())
+
+    def test_scan_market_zip_files_filters_by_month_range(self, tmp_path):
+        """start_date/end_date 过滤后仅返回范围内的月份。"""
+        self._create_months_structure(tmp_path, ["2025-06", "2026-01", "2026-06"])
+        svc = LocalKlineImportService()
+
+        results = svc.scan_market_zip_files(
+            str(tmp_path),
+            markets=["hushen"],
+            start_date="2025-09",
+            end_date="2026-03",
+        )
+
+        assert len(results) == 1
+        zip_path, market, freq = results[0]
+        assert "2026-01" in str(zip_path)
+
+    def test_scan_market_zip_files_no_month_filter(self, tmp_path):
+        """不指定月份范围时返回所有月份的文件。"""
+        self._create_months_structure(tmp_path, ["2025-06", "2026-01", "2026-06"])
+        svc = LocalKlineImportService()
+
+        results = svc.scan_market_zip_files(
+            str(tmp_path),
+            markets=["hushen"],
+        )
+
+        assert len(results) == 3
+
+
+# ---------------------------------------------------------------------------
+# 需求 10.3：复权因子导入
+# ---------------------------------------------------------------------------
+
+
+class TestAdjFactorImport:
+    """复权因子导入测试（需求 10.3, 10.4）"""
+
+    def test_infer_symbol_from_adj_csv_name_sz(self):
+        """000001.SZ.csv → 000001"""
+        svc = LocalKlineImportService()
+        assert svc.infer_symbol_from_adj_csv_name("000001.SZ.csv") == "000001"
+
+    def test_infer_symbol_from_adj_csv_name_sh(self):
+        """600000.SH.csv → 600000"""
+        svc = LocalKlineImportService()
+        assert svc.infer_symbol_from_adj_csv_name("600000.SH.csv") == "600000"
+
+    def test_infer_symbol_from_adj_csv_name_invalid(self):
+        """非法文件名返回 None。"""
+        svc = LocalKlineImportService()
+        assert svc.infer_symbol_from_adj_csv_name("invalid_name.csv") is None
+        assert svc.infer_symbol_from_adj_csv_name("abc.SZ.csv") is None
+
+    def test_parse_adj_factor_zip(self, tmp_path):
+        """解析复权因子 ZIP，验证返回正确的因子数据。"""
+        svc = LocalKlineImportService()
+
+        csv_content = (
+            "股票代码,交易日期,复权因子\n"
+            "000001,20240115,1.2345\n"
+            "000001,20240116,1.2400\n"
+        )
+
+        zip_path = tmp_path / "复权因子_前复权.zip"
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("000001.SZ.csv", csv_content)
+        zip_path.write_bytes(buf.getvalue())
+
+        factors, parsed, skipped = svc.parse_adj_factor_zip(zip_path, adj_type=1)
+
+        assert parsed == 2
+        assert skipped == 0
+        assert len(factors) == 2
+
+        f0 = factors[0]
+        assert f0["symbol"] == "000001"
+        assert f0["trade_date"] == date(2024, 1, 15)
+        assert f0["adj_factor"] == Decimal("1.2345")
+        assert f0["adj_type"] == 1
+
+        f1 = factors[1]
+        assert f1["trade_date"] == date(2024, 1, 16)
+        assert f1["adj_factor"] == Decimal("1.2400")
+
+
+# ---------------------------------------------------------------------------
+# 需求 4.2：指数数据（无成交量列）解析
+# ---------------------------------------------------------------------------
+
+
+class TestIndexDataParsing:
+    """指数数据解析测试（需求 4.2, 4.3）"""
+
+    def test_parse_csv_content_index_no_volume(self):
+        """指数 CSV 无成交量列时，所有 bar 的 volume 应为 0。"""
+        svc = LocalKlineImportService()
+
+        csv_text = (
+            "时间,代码,名称,开盘价,收盘价,最高价,最低价,成交额,涨幅,振幅\n"
+            "2026/04/01 09:30,000001,上证指数,3200.00,3210.00,3215.00,3195.00,50000000,0.31,0.63\n"
+            "2026/04/01 09:31,000001,上证指数,3210.00,3205.00,3212.00,3200.00,48000000,0.16,0.37\n"
+        )
+
+        bars, skipped = svc.parse_csv_content(csv_text, "000001", "1m", market="zhishu")
+
+        assert len(bars) == 2
+        assert skipped == 0
+        for bar in bars:
+            assert bar.volume == 0
+
+    def test_infer_symbol_from_csv_name_zhishu(self):
+        """指数市场 CSV 文件名 000001.csv → 000001（无前缀）。"""
+        svc = LocalKlineImportService()
+        result = svc.infer_symbol_from_csv_name("000001.csv", market="zhishu")
+        assert result == "000001"
