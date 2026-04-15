@@ -280,6 +280,8 @@ class TestLocalKlineImportAPI:
     @pytest.mark.asyncio
     async def test_get_status_returns_running_progress(self):
         """返回正在运行的导入进度。"""
+        import time
+
         progress = json.dumps({
             "status": "running",
             "total_files": 50,
@@ -291,6 +293,7 @@ class TestLocalKlineImportAPI:
             "total_skipped": 500,
             "elapsed_seconds": 45.3,
             "failed_details": [{"path": "bad.zip", "error": "损坏"}],
+            "heartbeat": time.time(),  # 活跃心跳，非僵尸任务
         })
 
         mock_client = AsyncMock()
@@ -323,9 +326,11 @@ class TestLocalKlineImportAPI:
 class TestConcurrencyProtection:
     @pytest.mark.asyncio
     async def test_is_running_returns_true_when_running(self):
-        """Redis 中 status=running 时 is_running 返回 True。"""
+        """Redis 中 status=running 且心跳活跃时 is_running 返回 True。"""
+        import time
+
         svc = LocalKlineImportService()
-        progress = json.dumps({"status": "running"})
+        progress = json.dumps({"status": "running", "heartbeat": time.time()})
 
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=progress)

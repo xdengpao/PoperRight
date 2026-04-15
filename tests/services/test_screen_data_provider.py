@@ -192,9 +192,13 @@ class TestLoadScreenData:
 
         with patch(
             "app.services.screener.screen_data_provider.KlineRepository"
-        ) as MockRepo:
+        ) as MockRepo, patch(
+            "app.services.screener.screen_data_provider.AdjFactorRepository"
+        ) as MockAdjRepo:
             mock_repo = MockRepo.return_value
             mock_repo.query = AsyncMock(return_value=[])
+            mock_adj_repo = MockAdjRepo.return_value
+            mock_adj_repo.query_batch = AsyncMock(return_value={})
 
             result = await provider.load_screen_data()
 
@@ -202,7 +206,7 @@ class TestLoadScreenData:
 
     @pytest.mark.asyncio
     async def test_stock_with_kline_included(self):
-        """有 K 线数据的股票应包含在结果中。"""
+        """有 K 线数据的股票应包含在结果中（无复权因子时使用原始价格）。"""
         stock = _make_stock(symbol="000001.SZ")
         bars = [_make_bar(symbol="000001.SZ", day_offset=i) for i in range(3)]
 
@@ -213,14 +217,19 @@ class TestLoadScreenData:
 
         with patch(
             "app.services.screener.screen_data_provider.KlineRepository"
-        ) as MockRepo:
+        ) as MockRepo, patch(
+            "app.services.screener.screen_data_provider.AdjFactorRepository"
+        ) as MockAdjRepo:
             mock_repo = MockRepo.return_value
             mock_repo.query = AsyncMock(return_value=bars)
+            mock_adj_repo = MockAdjRepo.return_value
+            mock_adj_repo.query_batch = AsyncMock(return_value={})
 
             result = await provider.load_screen_data()
 
         assert "000001.SZ" in result
         assert result["000001.SZ"]["close"] == bars[-1].close
+        assert result["000001.SZ"]["raw_close"] == bars[-1].close
 
     @pytest.mark.asyncio
     async def test_failed_stock_skipped_with_warning(self):
@@ -238,7 +247,9 @@ class TestLoadScreenData:
 
         with patch(
             "app.services.screener.screen_data_provider.KlineRepository"
-        ) as MockRepo:
+        ) as MockRepo, patch(
+            "app.services.screener.screen_data_provider.AdjFactorRepository"
+        ) as MockAdjRepo:
             mock_repo = MockRepo.return_value
 
             async def side_effect(symbol, **kwargs):
@@ -247,6 +258,8 @@ class TestLoadScreenData:
                 return bars
 
             mock_repo.query = AsyncMock(side_effect=side_effect)
+            mock_adj_repo = MockAdjRepo.return_value
+            mock_adj_repo.query_batch = AsyncMock(return_value={})
 
             result = await provider.load_screen_data()
 

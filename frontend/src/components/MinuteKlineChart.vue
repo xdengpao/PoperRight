@@ -18,6 +18,20 @@
       </button>
     </div>
 
+    <!-- 复权类型选择器 -->
+    <div class="adj-selector" role="group" aria-label="复权类型选择">
+      <button
+        v-for="opt in ADJ_OPTIONS"
+        :key="opt.value"
+        :class="['adj-btn', adjType === opt.value && 'active']"
+        :aria-pressed="adjType === opt.value"
+        :disabled="loading"
+        @click="adjType = opt.value"
+      >
+        {{ opt.label }}
+      </button>
+    </div>
+
     <!-- 图表区域 -->
     <div class="chart-area">
       <div v-if="loading" class="chart-placeholder">加载分钟K线中...</div>
@@ -36,7 +50,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { apiClient } from '@/api'
-import { type KlineBar, minuteKlineCache, buildCacheKey, buildRequestParams } from './minuteKlineUtils'
+import { type KlineBar, type AdjType, minuteKlineCache, buildCacheKey, buildRequestParams } from './minuteKlineUtils'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
@@ -48,6 +62,11 @@ use([CandlestickChart, BarChart, GridComponent, TooltipComponent, DataZoomCompon
 // ─── 常量 ─────────────────────────────────────────────────────────────────────
 
 const FREQ_OPTIONS = ['1m', '5m', '15m', '30m', '60m'] as const
+
+const ADJ_OPTIONS = [
+  { value: 0 as AdjType, label: '原始' },
+  { value: 1 as AdjType, label: '前复权' },
+] as const
 
 // ─── Props & Emits ────────────────────────────────────────────────────────────
 
@@ -64,6 +83,7 @@ const emit = defineEmits<{
 // ─── 内部状态 ──────────────────────────────────────────────────────────────────
 
 const freq = ref<string>('5m')
+const adjType = ref<AdjType>(0)
 const bars = ref<KlineBar[]>([])
 const loading = ref(false)
 const error = ref('')
@@ -148,7 +168,7 @@ async function loadMinuteKline() {
   const date = displayDate.value
   if (!date) return
 
-  const key = buildCacheKey(props.symbol, date, freq.value)
+  const key = buildCacheKey(props.symbol, date, freq.value, adjType.value)
 
   // 缓存命中
   if (minuteKlineCache.has(key)) {
@@ -163,7 +183,7 @@ async function loadMinuteKline() {
 
   try {
     const res = await apiClient.get(`/data/kline/${props.symbol}`, {
-      params: buildRequestParams(freq.value, date),
+      params: buildRequestParams(freq.value, date, adjType.value),
     })
     const raw: KlineBar[] = res.data?.bars ?? []
     // 过滤掉非日内数据（time 不含 HH:mm 或为 T00:00:00 的是日K线误入）
@@ -182,10 +202,10 @@ async function loadMinuteKline() {
   }
 }
 
-// ─── 侦听器：selectedDate 或 freq 变化时重新加载 ──────────────────────────────
+// ─── 侦听器：selectedDate、freq 或 adjType 变化时重新加载 ─────────────────
 
 watch(
-  [displayDate, freq],
+  [displayDate, freq, adjType],
   () => { loadMinuteKline() },
   { immediate: true },
 )
@@ -240,6 +260,39 @@ defineExpose({ cache: minuteKlineCache, loadMinuteKline })
   background: #1f6feb22;
   color: #58a6ff;
   border-color: #58a6ff;
+}
+
+/* ─── 复权类型选择器 ────────────────────────────────────────────────────────── */
+.adj-selector {
+  display: flex;
+  gap: 6px;
+}
+
+.adj-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.adj-btn:hover:not(:disabled) {
+  color: #e6edf3;
+  border-color: #8b949e;
+}
+
+.adj-btn.active {
+  background: #1f6feb22;
+  color: #58a6ff;
+  border-color: #58a6ff;
+}
+
+.adj-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* ─── 图表区域 ──────────────────────────────────────────────────────────────── */

@@ -292,6 +292,28 @@ async def get_kline(
         except Exception:
             pass
 
+    # 4. 如果 adj_type=1 且有K线数据，执行前复权计算
+    if adj_type == 1 and bars:
+        try:
+            from app.services.data_engine.adj_factor_repository import AdjFactorRepository
+            from app.services.data_engine.forward_adjustment import adjust_kline_bars
+
+            adj_repo = AdjFactorRepository()
+            factors = await adj_repo.query_by_symbol(
+                clean_symbol, adj_type=1, start=start_date, end=end_date,
+            )
+            latest = await adj_repo.query_latest_factor(clean_symbol, adj_type=1)
+            if factors and latest:
+                bars = adjust_kline_bars(bars, factors, latest)
+            else:
+                logger.warning(
+                    "股票 %s 无前复权因子数据，返回原始K线", clean_symbol,
+                )
+        except Exception as exc:
+            logger.warning(
+                "查询前复权因子失败 symbol=%s: %s，返回原始K线数据", clean_symbol, exc,
+            )
+
     return {
         "symbol": symbol,
         "name": stock_name,
@@ -898,6 +920,7 @@ async def start_local_kline_import(
 
     # 立即重置 Redis 进度数据，避免前端轮询读到上次的终态
     import json
+    import time as _time
     from app.core.redis_client import get_redis_client
     client = get_redis_client()
     try:
@@ -906,7 +929,8 @@ async def start_local_kline_import(
             json.dumps({"status": "pending", "total_files": 0, "processed_files": 0,
                          "success_files": 0, "failed_files": 0, "skipped_files": 0,
                          "total_parsed": 0, "total_inserted": 0, "total_skipped": 0,
-                         "elapsed_seconds": 0, "failed_details": []}, ensure_ascii=False),
+                         "elapsed_seconds": 0, "failed_details": [],
+                         "heartbeat": _time.time()}, ensure_ascii=False),
             ex=svc.PROGRESS_TTL,
         )
         await client.delete(svc.REDIS_RESULT_KEY)
@@ -929,8 +953,12 @@ async def start_local_kline_import(
 
 @router.get("/import/local-kline/status")
 async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
-    """查询导入进度和最近结果，无数据时返回 idle 默认值。"""
+    """查询导入进度和最近结果，无数据时返回 idle 默认值。
+
+    如果检测到心跳超时的僵尸任务，自动将状态标记为 failed。
+    """
     import json
+    import time as _time
 
     from app.core.redis_client import get_redis_client
 
@@ -947,6 +975,28 @@ async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
         return LocalKlineImportStatusResponse()
 
     data = json.loads(raw)
+
+    # 心跳超时检测：前端轮询时自动发现僵尸任务
+    if data.get("status") in ("running", "pending"):
+        heartbeat = data.get("heartbeat")
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        if is_zombie:
+            if heartbeat is None:
+                data["status"] = "failed"
+                data["error"] = "任务异常终止（无心跳记录）"
+            else:
+                data["status"] = "failed"
+                data["error"] = f"任务异常终止（心跳超时 {int(_time.time() - heartbeat)} 秒）"
+            client = get_redis_client()
+            try:
+                await client.set(
+                    "import:local_kline:progress",
+                    json.dumps(data, ensure_ascii=False),
+                    ex=86400,
+                )
+            finally:
+                await client.aclose()
+
     return LocalKlineImportStatusResponse(
         status=data.get("status", "idle"),
         total_files=data.get("total_files", 0),
@@ -964,7 +1014,10 @@ async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
 
 @router.post("/import/local-kline/stop")
 async def stop_local_kline_import() -> dict:
-    """发送K线导入停止信号。"""
+    """发送K线导入停止信号。
+
+    如果任务已因心跳超时被判定为僵尸任务，is_running() 会自动清理状态。
+    """
     from app.services.data_engine.local_kline_import import LocalKlineImportService
 
     svc = LocalKlineImportService()
@@ -973,6 +1026,33 @@ async def stop_local_kline_import() -> dict:
 
     await svc.request_stop()
     return {"message": "停止信号已发送"}
+
+
+@router.post("/import/local-kline/reset")
+async def reset_local_kline_import_status() -> dict:
+    """清空K线导入状态，重置为 idle。
+
+    删除 Redis 中的进度、结果和停止信号键，前端刷新后恢复初始状态。
+    运行中的任务不允许重置，需先停止。
+    """
+    from app.core.redis_client import get_redis_client
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    svc = LocalKlineImportService()
+    if await svc.is_running():
+        raise HTTPException(status_code=409, detail="导入任务正在运行，请先停止")
+
+    client = get_redis_client()
+    try:
+        await client.delete(
+            svc.REDIS_PROGRESS_KEY,
+            svc.REDIS_RESULT_KEY,
+            svc.REDIS_STOP_KEY,
+        )
+    finally:
+        await client.aclose()
+
+    return {"message": "K线导入状态已清空"}
 
 
 # ---------------------------------------------------------------------------
@@ -1007,9 +1087,11 @@ async def start_adj_factor_import(
     """触发复权因子独立导入任务。
 
     - 已有复权因子导入任务运行中时返回 HTTP 409
+    - 心跳超时的僵尸任务会被自动清理，允许重新启动
     - 成功时分发 Celery 任务并返回 202 + task_id
     """
     import json
+    import time as _time
 
     from app.core.redis_client import get_redis_client
     from app.tasks.data_sync import import_adj_factors
@@ -1020,7 +1102,34 @@ async def start_adj_factor_import(
         if raw:
             progress = json.loads(raw)
             if progress.get("status") == "running":
-                raise HTTPException(status_code=409, detail="已有复权因子导入任务正在运行")
+                # 心跳超时检测：进程异常终止后状态卡在 running
+                heartbeat = progress.get("heartbeat")
+                if heartbeat is None:
+                    # 旧版数据无心跳字段，视为僵尸任务
+                    logger.warning("复权因子导入任务无心跳字段，自动清理僵尸状态")
+                    progress["status"] = "failed"
+                    progress["error"] = "任务异常终止（无心跳记录）"
+                    await client.set(
+                        "import:adj_factor:progress",
+                        json.dumps(progress, ensure_ascii=False),
+                        ex=86400,
+                    )
+                elif (_time.time() - heartbeat) > 120:
+                    # 僵尸任务，自动清理状态
+                    elapsed = _time.time() - heartbeat
+                    logger.warning(
+                        "复权因子导入任务心跳超时（%.0f 秒），自动清理僵尸状态",
+                        elapsed,
+                    )
+                    progress["status"] = "failed"
+                    progress["error"] = f"任务异常终止（心跳超时 {int(elapsed)} 秒）"
+                    await client.set(
+                        "import:adj_factor:progress",
+                        json.dumps(progress, ensure_ascii=False),
+                        ex=86400,
+                    )
+                else:
+                    raise HTTPException(status_code=409, detail="已有复权因子导入任务正在运行")
     finally:
         await client.aclose()
 
@@ -1034,8 +1143,12 @@ async def start_adj_factor_import(
 
 @router.get("/import/adj-factors/status")
 async def get_adj_factor_import_status() -> AdjFactorImportStatusResponse:
-    """查询复权因子导入进度，无数据时返回 idle 默认值。"""
+    """查询复权因子导入进度，无数据时返回 idle 默认值。
+
+    如果检测到心跳超时的僵尸任务，自动将状态标记为 failed。
+    """
     import json
+    import time as _time
 
     from app.core.redis_client import get_redis_client
 
@@ -1051,6 +1164,29 @@ async def get_adj_factor_import_status() -> AdjFactorImportStatusResponse:
         return AdjFactorImportStatusResponse()
 
     data = json.loads(raw)
+
+    # 心跳超时检测：前端轮询时自动发现僵尸任务
+    if data.get("status") == "running":
+        heartbeat = data.get("heartbeat")
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        if is_zombie:
+            if heartbeat is None:
+                data["status"] = "failed"
+                data["error"] = "任务异常终止（无心跳记录）"
+            else:
+                data["status"] = "failed"
+                data["error"] = f"任务异常终止（心跳超时 {int(_time.time() - heartbeat)} 秒）"
+            # 更新 Redis 中的状态
+            client = get_redis_client()
+            try:
+                await client.set(
+                    "import:adj_factor:progress",
+                    json.dumps(data, ensure_ascii=False),
+                    ex=86400,
+                )
+            finally:
+                await client.aclose()
+
     return AdjFactorImportStatusResponse(
         status=data.get("status", "idle"),
         adj_factor_stats=data.get("adj_factor_stats", {}),
@@ -1065,8 +1201,12 @@ async def get_adj_factor_import_status() -> AdjFactorImportStatusResponse:
 
 @router.post("/import/adj-factors/stop")
 async def stop_adj_factor_import() -> dict:
-    """发送复权因子导入停止信号。"""
+    """发送复权因子导入停止信号。
+
+    如果任务已因心跳超时被判定为僵尸任务，直接清理状态。
+    """
     import json
+    import time as _time
 
     from app.core.redis_client import get_redis_client
     from app.services.data_engine.local_kline_import import LocalKlineImportService
@@ -1080,12 +1220,64 @@ async def stop_adj_factor_import() -> dict:
         progress = json.loads(raw)
         if progress.get("status") != "running":
             raise HTTPException(status_code=409, detail="没有正在运行的复权因子导入任务")
+
+        # 心跳超时检测：如果任务已死，直接清理状态
+        heartbeat = progress.get("heartbeat")
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        if is_zombie:
+            progress["status"] = "failed"
+            progress["error"] = "任务异常终止，已自动清理" if heartbeat is None else f"任务异常终止（心跳超时），已自动清理"
+            await client.set(
+                "import:adj_factor:progress",
+                json.dumps(progress, ensure_ascii=False),
+                ex=86400,
+            )
+            return {"message": "任务已异常终止，状态已清理"}
     finally:
         await client.aclose()
 
     svc = LocalKlineImportService()
     await svc.request_adj_stop()
     return {"message": "停止信号已发送"}
+
+
+@router.post("/import/adj-factors/reset")
+async def reset_adj_factor_import_status() -> dict:
+    """清空复权因子导入状态，重置为 idle。
+
+    删除 Redis 中的进度、结果和停止信号键，前端刷新后恢复初始状态。
+    运行中的任务不允许重置，需先停止。
+    """
+    import json
+    import time as _time
+
+    from app.core.redis_client import get_redis_client
+    from app.services.data_engine.local_kline_import import LocalKlineImportService
+
+    svc = LocalKlineImportService()
+
+    # 检查是否有运行中的任务（排除僵尸任务）
+    client = get_redis_client()
+    try:
+        raw = await client.get(svc.REDIS_ADJ_PROGRESS_KEY)
+        if raw:
+            progress = json.loads(raw)
+            if progress.get("status") == "running":
+                heartbeat = progress.get("heartbeat")
+                # 有心跳且未超时 → 真正在运行，不允许重置
+                if heartbeat is not None and (_time.time() - heartbeat) <= 120:
+                    raise HTTPException(status_code=409, detail="复权因子导入任务正在运行，请先停止")
+                # 无心跳或已超时 → 僵尸任务，允许重置
+
+        await client.delete(
+            svc.REDIS_ADJ_PROGRESS_KEY,
+            svc.REDIS_ADJ_RESULT_KEY,
+            svc.REDIS_ADJ_STOP_KEY,
+        )
+    finally:
+        await client.aclose()
+
+    return {"message": "复权因子导入状态已清空"}
 
 
 # ---------------------------------------------------------------------------

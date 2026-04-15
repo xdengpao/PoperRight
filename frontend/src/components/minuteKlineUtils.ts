@@ -12,6 +12,9 @@ export interface KlineBar {
   vol_ratio: string
 }
 
+/** 复权类型: 0=不复权, 1=前复权 */
+export type AdjType = 0 | 1
+
 /** 模块级缓存（跨组件实例持久化） */
 export const minuteKlineCache = new Map<string, KlineBar[]>()
 
@@ -22,14 +25,14 @@ if (import.meta.hot) {
   })
 }
 
-/** 构造缓存 key: `${symbol}-${date}-${freq}` */
-export function buildCacheKey(symbol: string, date: string, freq: string): string {
-  return `${symbol}-${date}-${freq}`
+/** 构造缓存 key: `${symbol}-${date}-${freq}-${adjType}` */
+export function buildCacheKey(symbol: string, date: string, freq: string, adjType: AdjType = 0): string {
+  return `${symbol}-${date}-${freq}-${adjType}`
 }
 
 /** 构造 API 请求参数 */
-export function buildRequestParams(freq: string, date: string) {
-  return { freq, start: date, end: date }
+export function buildRequestParams(freq: string, date: string, adjType: AdjType = 0) {
+  return { freq, start: date, end: date, adj_type: adjType }
 }
 
 /** 从日K线点击事件中提取日期（纯函数，便于测试） */

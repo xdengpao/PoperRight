@@ -131,6 +131,18 @@
                   </div>
                   <div class="detail-charts-container">
                     <div class="detail-chart">
+                      <!-- 日K线复权切换 -->
+                      <div class="adj-selector" role="group" aria-label="日K线复权类型选择">
+                        <button
+                          v-for="opt in DAILY_ADJ_OPTIONS"
+                          :key="opt.value"
+                          :class="['adj-btn', (dailyAdjType[row.symbol] ?? 0) === opt.value && 'active']"
+                          :disabled="klineLoading[row.symbol]"
+                          @click="onDailyAdjTypeChange(row.symbol, opt.value)"
+                        >
+                          {{ opt.label }}
+                        </button>
+                      </div>
                       <div v-if="klineLoading[row.symbol]" class="chart-loading">加载K线中...</div>
                       <div v-else-if="klineError[row.symbol]" class="chart-error">{{ klineError[row.symbol] }}</div>
                       <v-chart
@@ -174,7 +186,7 @@ import { usePageState } from '@/composables/usePageState'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
 import MinuteKlineChart from '@/components/MinuteKlineChart.vue'
-import { extractDateFromClick } from '@/components/minuteKlineUtils'
+import { type AdjType, extractDateFromClick } from '@/components/minuteKlineUtils'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
@@ -317,8 +329,41 @@ const latestTradeDates = reactive<Record<string, string>>({})
 const selectedDates = reactive<Record<string, string>>({})
 const klineDateArrays = reactive<Record<string, string[]>>({})
 
-async function fetchKline(symbol: string) {
-  if (klineOptions[symbol] || klineLoading[symbol]) return
+// ─── 日K线复权切换状态 ────────────────────────────────────────────────────────
+
+const DAILY_ADJ_OPTIONS = [
+  { value: 0 as AdjType, label: '原始' },
+  { value: 1 as AdjType, label: '前复权' },
+] as const
+
+/** 每只股票的日K线复权类型（独立于分钟K线的 adjType） */
+const dailyAdjType = reactive<Record<string, AdjType>>({})
+
+/** 日K线数据缓存：key 为 `daily-${symbol}-${adjType}` */
+const dailyKlineCache = new Map<string, any[]>()
+
+// 开发环境下 HMR 时自动清空缓存
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    dailyKlineCache.clear()
+  })
+}
+
+/** 构造日K线缓存键 */
+function buildDailyKlineCacheKey(symbol: string, adjType: AdjType): string {
+  return `daily-${symbol}-${adjType}`
+}
+
+async function fetchKline(symbol: string, adjType: AdjType = 0) {
+  const cacheKey = buildDailyKlineCacheKey(symbol, adjType)
+
+  // 缓存命中：直接从缓存构建图表选项
+  if (dailyKlineCache.has(cacheKey)) {
+    rebuildKlineOptions(symbol, dailyKlineCache.get(cacheKey)!)
+    return
+  }
+
+  if (klineLoading[symbol]) return
   klineLoading[symbol] = true
   klineError[symbol] = ''
   try {
@@ -327,69 +372,89 @@ async function fetchKline(symbol: string) {
     oneYearAgo.setFullYear(today.getFullYear() - 1)
     const fmt = (d: Date) => d.toISOString().slice(0, 10)
     const res = await apiClient.get(`/data/kline/${symbol}`, {
-      params: { freq: '1d', start: fmt(oneYearAgo), end: fmt(today) },
+      params: { freq: '1d', start: fmt(oneYearAgo), end: fmt(today), adj_type: adjType },
     })
     const bars = res.data?.bars ?? []
     if (!bars.length) {
       klineError[symbol] = '暂无K线数据'
       return
     }
-    // 记录最近交易日（日K线最后一根bar的日期）
-    const lastBar = bars[bars.length - 1]
-    latestTradeDates[symbol] = lastBar.time.slice(0, 10)
-    const dates = bars.map((b: any) => b.time.slice(0, 10))
-    klineDateArrays[symbol] = dates
-    const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
-    const vols = bars.map((b: any) => b.volume)
-    klineOptions[symbol] = {
-      tooltip: {
-        trigger: 'axis',
-        axisPointer: { type: 'cross' },
-        formatter: (params: any) => {
-          const p = Array.isArray(params) ? params[0] : params
-          if (!p || !p.data) return ''
-          const idx = p.dataIndex
-          const [open, close, low, high] = ohlc[idx]
-          const chg = open ? ((close - open) / open * 100).toFixed(2) : '0.00'
-          const color = close >= open ? '#f85149' : '#3fb950'
-          const vol = (vols[idx] / 10000).toFixed(0)
-          return `<div style="font-size:12px;line-height:1.6">
-            <div style="font-weight:600">${dates[idx]}</div>
-            <div>开 ${open.toFixed(2)}　高 ${high.toFixed(2)}</div>
-            <div>低 ${low.toFixed(2)}　收 ${close.toFixed(2)}</div>
-            <div>涨跌幅 <span style="color:${color};font-weight:600">${chg}%</span></div>
-            <div>成交量 ${vol} 万手</div>
-          </div>`
-        },
-      },
-      grid: [
-        { left: 50, right: 20, top: 20, height: '55%' },
-        { left: 50, right: 20, top: '72%', height: '18%' },
-      ],
-      xAxis: [
-        { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#8b949e', fontSize: 10 } },
-        { type: 'category', data: dates, gridIndex: 1, show: false },
-      ],
-      yAxis: [
-        { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: '#21262d' } }, axisLabel: { color: '#8b949e' } },
-        { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false } },
-      ],
-      dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 }],
-      series: [
-        {
-          type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0,
-          itemStyle: { color: '#f85149', color0: '#3fb950', borderColor: '#f85149', borderColor0: '#3fb950' },
-        },
-        {
-          type: 'bar', data: vols, xAxisIndex: 1, yAxisIndex: 1,
-          itemStyle: { color: '#30363d' },
-        },
-      ],
-    }
+    // 写入缓存
+    dailyKlineCache.set(cacheKey, bars)
+    rebuildKlineOptions(symbol, bars)
   } catch {
     klineError[symbol] = '加载K线失败'
   } finally {
     klineLoading[symbol] = false
+  }
+}
+
+/** 从 bars 数据构建/重建 ECharts 图表选项，保留已有的 dataZoom 和 markLine */
+function rebuildKlineOptions(symbol: string, bars: any[]) {
+  // 保存当前 dataZoom 范围和 markLine
+  const prevOpt = klineOptions[symbol]
+  const prevDataZoom = prevOpt?.dataZoom?.[0]
+    ? { start: prevOpt.dataZoom[0].start, end: prevOpt.dataZoom[0].end }
+    : null
+  const prevMarkLine = prevOpt?.series?.[0]?.markLine ?? null
+
+  // 记录最近交易日（日K线最后一根bar的日期）
+  const lastBar = bars[bars.length - 1]
+  latestTradeDates[symbol] = lastBar.time.slice(0, 10)
+  const dates = bars.map((b: any) => b.time.slice(0, 10))
+  klineDateArrays[symbol] = dates
+  const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
+  const vols = bars.map((b: any) => b.volume)
+  klineOptions[symbol] = {
+    tooltip: {
+      trigger: 'axis',
+      axisPointer: { type: 'cross' },
+      formatter: (params: any) => {
+        const p = Array.isArray(params) ? params[0] : params
+        if (!p || !p.data) return ''
+        const idx = p.dataIndex
+        const [open, close, low, high] = ohlc[idx]
+        const chg = open ? ((close - open) / open * 100).toFixed(2) : '0.00'
+        const color = close >= open ? '#f85149' : '#3fb950'
+        const vol = (vols[idx] / 10000).toFixed(0)
+        return `<div style="font-size:12px;line-height:1.6">
+          <div style="font-weight:600">${dates[idx]}</div>
+          <div>开 ${open.toFixed(2)}　高 ${high.toFixed(2)}</div>
+          <div>低 ${low.toFixed(2)}　收 ${close.toFixed(2)}</div>
+          <div>涨跌幅 <span style="color:${color};font-weight:600">${chg}%</span></div>
+          <div>成交量 ${vol} 万手</div>
+        </div>`
+      },
+    },
+    grid: [
+      { left: 50, right: 20, top: 20, height: '55%' },
+      { left: 50, right: 20, top: '72%', height: '18%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#8b949e', fontSize: 10 } },
+      { type: 'category', data: dates, gridIndex: 1, show: false },
+    ],
+    yAxis: [
+      { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: '#21262d' } }, axisLabel: { color: '#8b949e' } },
+      { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { show: false } },
+    ],
+    dataZoom: [{
+      type: 'inside',
+      xAxisIndex: [0, 1],
+      start: prevDataZoom?.start ?? 60,
+      end: prevDataZoom?.end ?? 100,
+    }],
+    series: [
+      {
+        type: 'candlestick', data: ohlc, xAxisIndex: 0, yAxisIndex: 0,
+        itemStyle: { color: '#f85149', color0: '#3fb950', borderColor: '#f85149', borderColor0: '#3fb950' },
+        ...(prevMarkLine ? { markLine: prevMarkLine } : {}),
+      },
+      {
+        type: 'bar', data: vols, xAxisIndex: 1, yAxisIndex: 1,
+        itemStyle: { color: '#30363d' },
+      },
+    ],
   }
 }
 
@@ -425,8 +490,13 @@ function toggleExpand(symbol: string) {
     expandedSymbols.value.delete(symbol)
   } else {
     expandedSymbols.value.add(symbol)
-    fetchKline(symbol)
+    fetchKline(symbol, dailyAdjType[symbol] ?? 0)
   }
+}
+
+function onDailyAdjTypeChange(symbol: string, adjType: AdjType) {
+  dailyAdjType[symbol] = adjType
+  fetchKline(symbol, adjType)
 }
 
 function toggleSort(key: SortKey) {
@@ -620,6 +690,40 @@ onMounted(() => {
 .chart-loading, .chart-error {
   display: flex; align-items: center; justify-content: center;
   height: 280px; color: #8b949e; font-size: 13px;
+}
+
+/* ─── 日K线复权切换 ─────────────────────────────────────────────────────────── */
+.adj-selector {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.adj-btn {
+  background: transparent;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.adj-btn:hover:not(:disabled) {
+  color: #e6edf3;
+  border-color: #8b949e;
+}
+
+.adj-btn.active {
+  background: #1f6feb22;
+  color: #58a6ff;
+  border-color: #58a6ff;
+}
+
+.adj-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .detail-header {
   font-size: 13px; font-weight: 600; color: #8b949e;

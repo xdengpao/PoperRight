@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.schemas import ExitConditionConfig, StrategyConfig
+from app.models.adjustment_factor import AdjustmentFactor
+from app.services.data_engine.forward_adjustment import adjust_kline_bars
 from app.tasks.base import BaseTask, BacktestTask
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,66 @@ def run_backtest_task(
                         len(kline_data), sum(len(v) for v in index_data.values()))
         except Exception as exc:
             logger.warning("K 线数据加载失败: %s", exc)
+
+        # ── 2.5 加载前复权因子并应用 ──
+        try:
+            adj_factors: dict[str, list[AdjustmentFactor]] = {}
+            latest_factors: dict[str, Decimal] = {}
+
+            ts_adj_engine = create_engine(_get_sync_ts_url())
+            with Session(ts_adj_engine) as session:
+                # 批量查询所有股票在回测日期范围内的前复权因子
+                adj_rows = session.execute(
+                    text("""
+                        SELECT symbol, trade_date, adj_factor
+                        FROM adjustment_factor
+                        WHERE adj_type = 1
+                          AND trade_date >= :start AND trade_date <= :end
+                        ORDER BY symbol, trade_date
+                    """),
+                    {"start": warmup_date.isoformat(), "end": ed.isoformat()},
+                ).fetchall()
+
+                for row in adj_rows:
+                    sym = row[0]
+                    adj_factors.setdefault(sym, []).append(
+                        AdjustmentFactor(
+                            symbol=sym,
+                            trade_date=row[1],
+                            adj_type=1,
+                            adj_factor=Decimal(str(row[2])),
+                        )
+                    )
+
+                # 查询每只股票的最新复权因子（全局最新，不限日期范围）
+                latest_rows = session.execute(
+                    text("""
+                        SELECT DISTINCT ON (symbol) symbol, adj_factor
+                        FROM adjustment_factor
+                        WHERE adj_type = 1
+                        ORDER BY symbol, trade_date DESC
+                    """),
+                ).fetchall()
+                for row in latest_rows:
+                    latest_factors[row[0]] = Decimal(str(row[1]))
+
+            ts_adj_engine.dispose()
+
+            # 对每只股票的K线应用前复权
+            adjusted_count = 0
+            for sym, bars in kline_data.items():
+                factors = adj_factors.get(sym, [])
+                latest = latest_factors.get(sym)
+                if factors and latest:
+                    kline_data[sym] = adjust_kline_bars(bars, factors, latest)
+                    adjusted_count += 1
+                else:
+                    logger.warning("股票 %s 无前复权因子数据，使用原始K线", sym)
+
+            logger.info("前复权处理完成: %d/%d 只股票已调整", adjusted_count, len(kline_data))
+
+        except Exception as exc:
+            logger.warning("前复权因子加载失败，使用原始K线继续回测: %s", exc)
 
         # ── 3. 执行回测 ──
         engine = BacktestEngine()

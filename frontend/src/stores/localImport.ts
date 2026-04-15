@@ -83,6 +83,15 @@ function defaultProgress(): ImportProgress {
   }
 }
 
+/** 从 catch 的 unknown 错误中提取可读消息（兼容 Error 和 Axios 原始错误） */
+function extractErrorMessage(err: unknown, fallback: string): string {
+  if (err instanceof Error) return err.message
+  // Axios 原始错误对象（409 等由拦截器透传）
+  const axiosErr = err as { response?: { data?: { detail?: string } } }
+  if (axiosErr?.response?.data?.detail) return axiosErr.response.data.detail
+  return fallback
+}
+
 // ─── Store ────────────────────────────────────────────────────────────────────
 
 export const useLocalImportStore = defineStore('localImport', () => {
@@ -119,13 +128,7 @@ export const useLocalImportStore = defineStore('localImport', () => {
       Object.assign(progress, defaultProgress())
       Object.assign(result, defaultProgress())
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes('已有导入任务正在运行')) {
-        error.value = '已有导入任务正在运行'
-      } else if (err instanceof Error) {
-        error.value = err.message
-      } else {
-        error.value = '触发导入失败'
-      }
+      error.value = extractErrorMessage(err, '触发导入失败')
     } finally {
       loading.value = false
     }
@@ -191,13 +194,7 @@ export const useLocalImportStore = defineStore('localImport', () => {
       await apiClient.post('/data/import/adj-factors', params)
       startAdjPolling()
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes('已有复权因子导入任务正在运行')) {
-        adjError.value = '已有复权因子导入任务正在运行'
-      } else if (err instanceof Error) {
-        adjError.value = err.message
-      } else {
-        adjError.value = '触发复权因子导入失败'
-      }
+      adjError.value = extractErrorMessage(err, '触发复权因子导入失败')
     } finally {
       adjLoading.value = false
     }
@@ -242,6 +239,32 @@ export const useLocalImportStore = defineStore('localImport', () => {
     }
   }
 
+  /** 清空K线导入状态（重置为 idle） */
+  async function resetImportStatus(): Promise<void> {
+    try {
+      await apiClient.post('/data/import/local-kline/reset')
+      stopPolling()
+      Object.assign(progress, defaultProgress())
+      Object.assign(result, defaultProgress())
+      taskId.value = null
+      error.value = ''
+    } catch (err: unknown) {
+      error.value = extractErrorMessage(err, '清空状态失败')
+    }
+  }
+
+  /** 清空复权因子导入状态（重置为 idle） */
+  async function resetAdjImportStatus(): Promise<void> {
+    try {
+      await apiClient.post('/data/import/adj-factors/reset')
+      stopAdjPolling()
+      Object.assign(adjResult, { status: 'idle', adj_factor_stats: {}, elapsed_seconds: 0, error: '', total_types: 0, completed_types: 0, current_type: '', current_step: '' })
+      adjError.value = ''
+    } catch (err: unknown) {
+      adjError.value = extractErrorMessage(err, '清空状态失败')
+    }
+  }
+
   /** 保存导入参数到 Redis */
   async function saveParams(params: CachedImportParams): Promise<void> {
     try {
@@ -282,6 +305,8 @@ export const useLocalImportStore = defineStore('localImport', () => {
     startAdjPolling,
     stopAdjPolling,
     requestStopAdjImport,
+    resetImportStatus,
+    resetAdjImportStatus,
     saveParams,
     loadParams,
   }

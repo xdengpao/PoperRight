@@ -68,6 +68,15 @@
 
       <span v-if="store.error" class="sync-msg error" role="status">{{ store.error }}</span>
       <span v-if="klineSuccessMsg" class="sync-msg success" role="status">{{ klineSuccessMsg }}</span>
+
+      <button
+        v-if="store.progress.status === 'completed' || store.progress.status === 'failed' || store.progress.status === 'stopped'"
+        class="btn btn-secondary"
+        @click="handleResetImport"
+        aria-label="清空导入状态"
+      >
+        清空状态
+      </button>
     </section>
 
     <!-- ── K线导入进度 ── -->
@@ -200,6 +209,15 @@
 
       <span v-if="store.adjError" class="sync-msg error" role="status">{{ store.adjError }}</span>
       <span v-if="adjSuccessMsg" class="sync-msg success" role="status">{{ adjSuccessMsg }}</span>
+
+      <button
+        v-if="store.adjResult.status === 'completed' || store.adjResult.status === 'failed' || store.adjResult.status === 'stopped'"
+        class="btn btn-secondary"
+        @click="handleResetAdjImport"
+        aria-label="清空复权因子导入状态"
+      >
+        清空状态
+      </button>
     </section>
 
     <!-- ── 复权因子导入进度 ── -->
@@ -352,6 +370,14 @@ async function handleStartAdjImport() {
   }
 }
 
+async function handleResetImport() {
+  await store.resetImportStatus()
+}
+
+async function handleResetAdjImport() {
+  await store.resetAdjImportStatus()
+}
+
 // ── K线进度计算 ───────────────────────────────────────────────────────────────
 
 const progressPct = computed(() => {
@@ -493,6 +519,8 @@ onUnmounted(() => {
 .btn-primary:hover:not(:disabled) { background: #388bfd; }
 .btn-danger { background: #da3633; color: #fff; margin-left: 8px; }
 .btn-danger:hover { background: #f85149; }
+.btn-secondary { background: #21262d; color: #c9d1d9; margin-left: 8px; border: 1px solid #30363d; }
+.btn-secondary:hover { background: #30363d; }
 
 .sync-msg {
   display: inline-block;

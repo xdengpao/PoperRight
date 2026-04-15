@@ -832,13 +832,20 @@ class LocalKlineImportService:
     # 进度追踪
     # ------------------------------------------------------------------
 
+    # 心跳超时阈值（秒）：超过此时间未更新心跳，认为任务已死亡
+    HEARTBEAT_TIMEOUT: int = 120
+
     async def update_progress(self, **kwargs) -> None:
-        """更新 Redis 中的导入进度 JSON，合并 kwargs 到现有进度。"""
+        """更新 Redis 中的导入进度 JSON，合并 kwargs 到现有进度。
+
+        每次更新自动写入 heartbeat 时间戳，用于僵尸任务检测。
+        """
         client = get_redis_client()
         try:
             raw = await client.get(self.REDIS_PROGRESS_KEY)
             progress = json.loads(raw) if raw else {}
             progress.update(kwargs)
+            progress["heartbeat"] = time.time()
             await client.set(
                 self.REDIS_PROGRESS_KEY,
                 json.dumps(progress, ensure_ascii=False),
@@ -848,14 +855,50 @@ class LocalKlineImportService:
             await client.aclose()
 
     async def is_running(self) -> bool:
-        """检查是否有导入任务正在运行（包括 pending 等待执行状态）。"""
+        """检查是否有导入任务正在运行（包括 pending 等待执行状态）。
+
+        通过心跳机制检测僵尸任务：如果 status 为 running/pending 但心跳超时
+        或缺失心跳字段（旧版数据），自动将状态标记为 failed 并返回 False。
+        """
         client = get_redis_client()
         try:
             raw = await client.get(self.REDIS_PROGRESS_KEY)
             if not raw:
                 return False
             progress = json.loads(raw)
-            return progress.get("status") in ("running", "pending")
+            status = progress.get("status")
+            if status not in ("running", "pending"):
+                return False
+            # 心跳超时检测：进程异常终止后状态卡在 running/pending
+            heartbeat = progress.get("heartbeat")
+            if heartbeat is None:
+                # 旧版数据无心跳字段，视为僵尸任务
+                logger.warning(
+                    "K线导入任务无心跳字段（旧版数据），判定为僵尸任务，自动清理状态",
+                )
+                progress["status"] = "failed"
+                progress["error"] = "任务异常终止（无心跳记录）"
+                await client.set(
+                    self.REDIS_PROGRESS_KEY,
+                    json.dumps(progress, ensure_ascii=False),
+                    ex=self.PROGRESS_TTL,
+                )
+                return False
+            elapsed = time.time() - heartbeat
+            if elapsed > self.HEARTBEAT_TIMEOUT:
+                logger.warning(
+                    "K线导入任务心跳超时（%.0f 秒），判定为僵尸任务，自动清理状态",
+                    elapsed,
+                )
+                progress["status"] = "failed"
+                progress["error"] = f"任务异常终止（心跳超时 {int(elapsed)} 秒）"
+                await client.set(
+                    self.REDIS_PROGRESS_KEY,
+                    json.dumps(progress, ensure_ascii=False),
+                    ex=self.PROGRESS_TTL,
+                )
+                return False
+            return True
         finally:
             await client.aclose()
 
@@ -1156,12 +1199,16 @@ class LocalKlineImportService:
     REDIS_ADJ_STOP_KEY: str = "import:adj_factor:stop"
 
     async def _update_adj_progress(self, **kwargs) -> None:
-        """更新复权因子导入进度到 Redis。"""
+        """更新复权因子导入进度到 Redis。
+
+        每次更新自动写入 heartbeat 时间戳，用于僵尸任务检测。
+        """
         client = get_redis_client()
         try:
             raw = await client.get(self.REDIS_ADJ_PROGRESS_KEY)
             progress = json.loads(raw) if raw else {}
             progress.update(kwargs)
+            progress["heartbeat"] = time.time()
             await client.set(
                 self.REDIS_ADJ_PROGRESS_KEY,
                 json.dumps(progress, ensure_ascii=False),

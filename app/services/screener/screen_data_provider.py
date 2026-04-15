@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.models.kline import KlineBar
 from app.models.stock import StockInfo
+from app.services.data_engine.adj_factor_repository import AdjFactorRepository
+from app.services.data_engine.forward_adjustment import adjust_kline_bars
 from app.services.data_engine.kline_repository import KlineRepository
 from app.services.screener.breakout import (
     detect_box_breakout,
@@ -94,7 +96,21 @@ class ScreenDataProvider:
         if not stocks:
             return {}
 
-        # 2. 查询 K 线数据并转换为因子字典
+        # 2. 批量查询所有股票的前复权因子
+        adj_repo = AdjFactorRepository(self._ts_session)
+        all_symbols = [s.symbol for s in stocks]
+        try:
+            batch_factors = await adj_repo.query_batch(
+                symbols=all_symbols,
+                adj_type=1,
+                start=start_date,
+                end=screen_date,
+            )
+        except Exception:
+            logger.warning("批量查询前复权因子失败，将使用原始K线数据", exc_info=True)
+            batch_factors = {}
+
+        # 3. 查询 K 线数据，应用前复权，转换为因子字典
         kline_repo = KlineRepository(self._ts_session)
         result: dict[str, dict[str, Any]] = {}
 
@@ -109,7 +125,19 @@ class ScreenDataProvider:
                 if not bars:
                     continue  # 无行情数据的股票跳过
 
+                # 前复权处理：在指标计算前调整 OHLC 价格
+                raw_close = bars[-1].close  # 保留原始收盘价
+                factors = batch_factors.get(stock.symbol, [])
+                if factors:
+                    latest_factor = factors[-1].adj_factor  # 因子按日期升序，最后一个即最新
+                    bars = adjust_kline_bars(bars, factors, latest_factor)
+                else:
+                    logger.warning(
+                        "股票 %s 无前复权因子数据，使用原始K线", stock.symbol
+                    )
+
                 factor_dict = self._build_factor_dict(stock, bars, self._strategy_config)
+                factor_dict["raw_close"] = raw_close
                 result[stock.symbol] = factor_dict
             except Exception:
                 logger.warning(
