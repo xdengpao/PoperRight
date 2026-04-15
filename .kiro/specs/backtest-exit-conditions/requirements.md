@@ -21,6 +21,9 @@
 - **Exit_Condition_Template**: 平仓条件模版，用户保存的一组命名的 Exit_Condition_Config 配置，可在后续回测中加载复用
 - **Exit_Template_API**: 平仓条件模版 REST API 端点，提供模版的增删改查操作
 - **ExitConditionTemplate**: 平仓条件模版 ORM 模型，存储于 PostgreSQL，包含模版名称、描述、平仓条件配置 JSON 和用户归属
+- **System_Template**: 系统内置平仓条件模版，预设的常用平仓策略配置，对所有用户可见且不可被修改或删除
+- **Indicator_Description**: 指标使用说明，包含指标中文名称、计算逻辑简述、可配置参数说明和典型使用场景
+- **Forward_Adjusted_Kline（前复权K线）**: 通过前复权因子调整后的价格连续K线数据，公式为 `复权价 = 原始价 × (当日复权因子 / 最新复权因子)`
 
 ## 需求
 
@@ -160,3 +163,40 @@
 8. THE Backtest_View SHALL 在模版选择下拉框旁提供模版管理功能，支持重命名和删除已保存的模版
 9. WHEN 用户删除模版时，THE Backtest_View SHALL 弹出确认对话框，确认后调用 DELETE /api/v1/backtest/exit-templates/{id} 接口删除
 10. WHEN 用户未配置任何平仓条件时，THE Backtest_View SHALL 禁用"保存为模版"按钮
+
+### 需求 11：平仓条件模版指标使用说明
+
+**用户故事：** 作为量化交易员，我希望在设置自定义平仓条件模版时能看到每个指标的使用说明，以便我能正确理解各指标的含义、参数和适用场景，减少配置错误。
+
+#### 验收标准
+
+1. THE Backtest_View SHALL 为每个可选指标提供使用说明信息，包含指标中文名称、计算逻辑简述、可配置参数说明和典型使用场景
+2. WHEN 用户在平仓条件配置面板中选择某个指标时，THE Backtest_View SHALL 在该条件行下方或旁侧显示该指标的使用说明
+3. THE Backtest_View SHALL 为以下指标提供使用说明：MA（移动平均线）、MACD_DIF（MACD 快线）、MACD_DEA（MACD 慢线）、MACD_HISTOGRAM（MACD 柱状图）、BOLL_UPPER（布林带上轨）、BOLL_MIDDLE（布林带中轨）、BOLL_LOWER（布林带下轨）、RSI（相对强弱指标）、DMA（平均线差）、AMA（平均线差均线）、CLOSE（收盘价）、VOLUME（成交量）、TURNOVER（换手率）
+4. WHEN 指标包含可配置参数时（如 MA 的周期参数、MACD 的快线/慢线/信号线周期参数），THE Backtest_View SHALL 在使用说明中列出各参数的名称、默认值和取值范围建议
+5. THE Backtest_View SHALL 在指标使用说明中包含至少一个典型平仓条件示例（如 "RSI > 80 表示超买，可作为卖出信号"）
+
+### 需求 12：内置自定义平仓条件模版
+
+**用户故事：** 作为量化交易员，我希望系统提供 5 个以上预设的自定义平仓条件模版，以便我能快速选用常见的平仓策略进行回测，降低配置门槛。
+
+#### 验收标准
+
+1. THE Exit_Template_API SHALL 提供至少 5 个系统内置平仓条件模版，这些模版对所有用户可见且不可被用户修改或删除
+2. THE Exit_Template_API SHALL 提供以下内置模版：RSI 超买平仓模版（RSI > 80 触发平仓）、MACD 死叉平仓模版（MACD_DIF cross_down MACD_DEA 触发平仓）、布林带上轨突破回落模版（收盘价从上方 cross_down BOLL_UPPER 触发平仓）、均线空头排列模版（MA5 < MA10 且 MA10 < MA20 触发平仓）、量价背离模版（收盘价创新高但成交量低于前一日触发平仓）
+3. WHEN 用户请求模版列表时，THE Exit_Template_API SHALL 将系统内置模版排列在用户自定义模版之前返回
+4. THE Backtest_View SHALL 在模版选择下拉框中以视觉标识（如"系统"标签或不同颜色）区分系统内置模版和用户自定义模版
+5. WHEN 用户选择系统内置模版时，THE Backtest_View SHALL 将模版中的平仓条件加载到配置面板，用户可在此基础上修改后另存为自定义模版
+6. THE ExitConditionTemplate SHALL 新增 is_system 布尔字段（默认 False），用于标识系统内置模版
+
+### 需求 13：回测指标使用前复权K线数据计算
+
+**用户故事：** 作为量化交易员，我希望回测引擎在计算自定义平仓条件的技术指标时使用前复权K线数据，以便指标计算结果不受除权除息事件影响，保证回测结果的准确性。
+
+#### 验收标准
+
+1. WHEN Backtest_Engine 为自定义平仓条件预计算技术指标时，THE Backtest_Engine SHALL 使用经过前复权处理的K线 OHLC 价格数据作为计算输入
+2. WHEN Exit_Condition_Evaluator 评估平仓条件中的 "close"、"volume"、"turnover" 等原始数据字段时，THE Exit_Condition_Evaluator SHALL 使用前复权后的价格数据（close 使用前复权收盘价）
+3. THE Backtest_Engine SHALL 确保自定义平仓条件的指标计算与选股引擎（ScreenDataProvider）使用相同的前复权计算逻辑，保证回测信号与选股信号的一致性
+4. WHEN 某只股票在回测期间内无前复权因子数据时，THE Backtest_Engine SHALL 使用该股票的原始K线数据计算自定义平仓条件指标，并记录警告日志
+5. FOR ALL 使用前复权K线数据计算的技术指标值，THE Backtest_Engine SHALL 保证指标值与使用相同前复权数据的选股引擎计算结果一致（跨模块一致性）

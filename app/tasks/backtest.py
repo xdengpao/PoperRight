@@ -15,6 +15,8 @@ from app.core.celery_app import celery_app
 from app.core.config import settings
 from app.core.schemas import ExitConditionConfig, StrategyConfig
 from app.models.adjustment_factor import AdjustmentFactor
+# 前复权函数与选股引擎（ScreenDataProvider）共享同一纯函数实现
+# (Requirement 13.3, 13.5)
 from app.services.data_engine.forward_adjustment import adjust_kline_bars
 from app.tasks.base import BaseTask, BacktestTask
 
@@ -212,9 +214,9 @@ def run_backtest_task(
             logger.warning("K 线数据加载失败: %s", exc)
 
         # ── 2.5 加载前复权因子并应用 ──
+        adj_factors: dict[str, list[AdjustmentFactor]] = {}
+        latest_factors: dict[str, Decimal] = {}
         try:
-            adj_factors: dict[str, list[AdjustmentFactor]] = {}
-            latest_factors: dict[str, Decimal] = {}
 
             ts_adj_engine = create_engine(_get_sync_ts_url())
             with Session(ts_adj_engine) as session:
@@ -271,12 +273,83 @@ def run_backtest_task(
         except Exception as exc:
             logger.warning("前复权因子加载失败，使用原始K线继续回测: %s", exc)
 
+        # ── 2.6 加载分钟K线数据并应用前复权（Requirement 13.1, 13.4）──
+        minute_kline_data: dict[str, dict[str, list[KlineBar]]] = {}
+        _MINUTE_FREQS = ("1min", "5min", "15min", "30min", "60min")
+        _FREQ_TO_DB = {"1min": "1m", "5min": "5m", "15min": "15m", "30min": "30m", "60min": "60m"}
+
+        # 仅在配置了分钟频率的平仓条件时才加载分钟K线
+        needed_minute_freqs: set[str] = set()
+        if exit_config and exit_config.conditions:
+            for cond in exit_config.conditions:
+                freq = cond.freq
+                if freq == "minute":
+                    freq = "1min"
+                if freq in _MINUTE_FREQS:
+                    needed_minute_freqs.add(freq)
+
+        if needed_minute_freqs:
+            try:
+                ts_min_engine = create_engine(_get_sync_ts_url())
+                with Session(ts_min_engine) as session:
+                    for mfreq in needed_minute_freqs:
+                        db_freq = _FREQ_TO_DB[mfreq]
+                        min_rows = session.execute(
+                            text("""
+                                SELECT symbol, time, open, high, low, close, volume, amount, turnover, vol_ratio
+                                FROM kline
+                                WHERE freq = :freq AND time >= :warmup_start AND time <= :end
+                                ORDER BY symbol, time
+                            """),
+                            {"freq": db_freq, "warmup_start": warmup_date.isoformat(), "end": ed.isoformat()},
+                        ).fetchall()
+
+                        freq_data: dict[str, list[KlineBar]] = {}
+                        for row in min_rows:
+                            sym = row[0]
+                            bar = KlineBar(
+                                time=row[1],
+                                symbol=sym,
+                                freq=db_freq,
+                                open=Decimal(str(row[2] or 0)),
+                                high=Decimal(str(row[3] or 0)),
+                                low=Decimal(str(row[4] or 0)),
+                                close=Decimal(str(row[5] or 0)),
+                                volume=int(row[6] or 0),
+                                amount=Decimal(str(row[7] or 0)),
+                                turnover=Decimal(str(row[8] or 0)),
+                                vol_ratio=Decimal(str(row[9] or 0)),
+                            )
+                            freq_data.setdefault(sym, []).append(bar)
+
+                        # 对分钟K线应用前复权（复用日K线阶段已加载的复权因子）
+                        min_adjusted = 0
+                        for sym, bars in freq_data.items():
+                            factors = adj_factors.get(sym, [])
+                            latest = latest_factors.get(sym)
+                            if factors and latest:
+                                freq_data[sym] = adjust_kline_bars(bars, factors, latest)
+                                min_adjusted += 1
+                            # 无复权因子时保持原始数据（日K线处理阶段已记录过警告日志）
+
+                        if freq_data:
+                            minute_kline_data[mfreq] = freq_data
+                            logger.info(
+                                "分钟K线 %s 加载完成: %d 只股票, %d 只已前复权",
+                                mfreq, len(freq_data), min_adjusted,
+                            )
+
+                ts_min_engine.dispose()
+            except Exception as exc:
+                logger.warning("分钟K线数据加载失败: %s", exc)
+
         # ── 3. 执行回测 ──
         engine = BacktestEngine()
         result = engine.run_backtest(
             config=config,
             kline_data=kline_data,
             index_data=index_data if enable_market_risk else None,
+            minute_kline_data=minute_kline_data if minute_kline_data else None,
         )
 
         logger.info("回测完成 run_id=%s trades=%d return=%.4f",

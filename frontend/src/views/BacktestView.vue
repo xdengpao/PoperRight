@@ -63,7 +63,16 @@
               @change="onTemplateSelect"
             >
               <option value="">无</option>
-              <option v-for="tpl in exitTemplates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
+              <template v-if="systemTemplates.length">
+                <option
+                  v-for="tpl in systemTemplates"
+                  :key="tpl.id"
+                  :value="tpl.id"
+                  class="system-template-option"
+                >[系统] {{ tpl.name }}</option>
+                <option v-if="userTemplates.length" disabled class="template-separator">──────────</option>
+              </template>
+              <option v-for="tpl in userTemplates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
             </select>
             <span v-if="templateLoading" class="template-loading">加载中...</span>
             <button
@@ -105,8 +114,11 @@
                   <button class="btn btn-outline btn-sm" :disabled="renaming" @click="cancelRename">取消</button>
                 </div>
                 <template v-else>
-                  <span class="manage-item-name" :title="tpl.description || ''">{{ tpl.name }}</span>
-                  <div class="manage-item-actions">
+                  <span class="manage-item-name" :title="tpl.description || ''">
+                    <span v-if="tpl.is_system" class="system-tag">[系统]</span>
+                    {{ tpl.name }}
+                  </span>
+                  <div v-if="!tpl.is_system" class="manage-item-actions">
                     <button class="btn btn-outline btn-sm" @click="startRename(tpl)" aria-label="重命名模版">✏️</button>
                     <button class="btn btn-danger-ghost btn-sm" @click="confirmDeleteTemplate(tpl)" aria-label="删除模版">🗑️</button>
                   </div>
@@ -170,6 +182,22 @@
                   class="input input-sm input-narrow"
                   placeholder="20"
                 />
+              </div>
+              <div v-if="INDICATOR_DESCRIPTIONS[cond.indicator]" class="indicator-desc-card">
+                <div class="indicator-desc-header">
+                  <span class="indicator-desc-icon">📖</span>
+                  <span class="indicator-desc-name">{{ INDICATOR_DESCRIPTIONS[cond.indicator].chineseName }}</span>
+                </div>
+                <p class="indicator-desc-calc">{{ INDICATOR_DESCRIPTIONS[cond.indicator].calculationSummary }}</p>
+                <div v-if="INDICATOR_DESCRIPTIONS[cond.indicator].params.length" class="indicator-desc-params">
+                  <span class="indicator-desc-params-label">可配置参数：</span>
+                  <span
+                    v-for="p in INDICATOR_DESCRIPTIONS[cond.indicator].params"
+                    :key="p.name"
+                    class="indicator-desc-param"
+                  >{{ p.label }}（默认 {{ p.defaultValue }}，建议 {{ p.suggestedRange[0] }}–{{ p.suggestedRange[1] }}）</span>
+                </div>
+                <p class="indicator-desc-usage">💡 {{ INDICATOR_DESCRIPTIONS[cond.indicator].typicalUsage }}</p>
               </div>
             </div>
           </div>
@@ -377,7 +405,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
-import { useBacktestStore, FREQ_OPTIONS } from '@/stores/backtest'
+import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS } from '@/stores/backtest'
 import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus } from '@/stores/backtest'
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -408,6 +436,10 @@ interface StrategyItem {
 
 const strategies = ref<StrategyItem[]>([])
 const running = computed(() => store.running)
+
+// ─── 模版分类（系统 vs 用户）────────────────────────────────────────────────
+const systemTemplates = computed(() => exitTemplates.value.filter(t => t.is_system))
+const userTemplates = computed(() => exitTemplates.value.filter(t => !t.is_system))
 const optimizing = ref(false)
 const result = computed(() => store.result)
 const optimizeResults = computed(() => store.optimizeResults)
@@ -1119,6 +1151,14 @@ onUnmounted(() => {
 .template-selector select { min-width: 180px; }
 .template-loading { font-size: 12px; color: #8b949e; }
 
+/* ─── 系统模版样式 ──────────────────────────────────────────────────────────── */
+.system-template-option { color: #58a6ff; }
+.template-separator { color: #484f58; font-size: 12px; }
+.system-tag {
+  display: inline-block; color: #58a6ff; font-size: 11px; font-weight: 600;
+  margin-right: 4px;
+}
+
 /* ─── 保存模版对话框 ────────────────────────────────────────────────────────── */
 .dialog-overlay {
   position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex;
@@ -1164,4 +1204,21 @@ onUnmounted(() => {
 .manage-item-edit { display: flex; align-items: center; gap: 6px; width: 100%; }
 .manage-item-edit .input { flex: 1; min-width: 0; }
 .manage-error { font-size: 13px; color: #f85149; margin: 8px 0 0; }
+
+/* ─── 指标使用说明卡片 ──────────────────────────────────────────────────────── */
+.indicator-desc-card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 6px;
+  padding: 8px 12px; margin-top: 4px; font-size: 12px; color: #8b949e; line-height: 1.6;
+}
+.indicator-desc-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.indicator-desc-icon { font-size: 14px; }
+.indicator-desc-name { font-size: 13px; color: #e6edf3; font-weight: 500; }
+.indicator-desc-calc { margin: 0 0 4px; }
+.indicator-desc-params { margin-bottom: 4px; }
+.indicator-desc-params-label { color: #8b949e; }
+.indicator-desc-param {
+  display: inline-block; background: #21262d; border-radius: 4px;
+  padding: 1px 6px; margin: 2px 4px 2px 0; font-size: 11px; color: #c9d1d9;
+}
+.indicator-desc-usage { margin: 0; color: #8b949e; }
 </style>

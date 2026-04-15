@@ -501,19 +501,36 @@ def _precompute_exit_indicators(
     """
     为自定义平仓条件补充计算非默认参数的指标，按频率分组。
 
+    前复权数据保证（Requirements 13.1, 13.2）：
+    - kline_data 中的所有K线数据（日K线和分钟K线）均已在调用方
+      （app/tasks/backtest.py）中经过前复权处理（adjust_kline_bars）。
+    - 对日K线频率（"daily"）的指标，复用 existing_cache 中已基于
+      前复权数据计算的 closes 序列，保证指标计算一致性。
+    - 对分钟K线频率的指标，使用 kline_data[freq] 中已前复权的K线数据。
+    - 指标计算函数（calculate_ma, calculate_macd, calculate_rsi,
+      calculate_boll, calculate_dma）与选股引擎（ScreenDataProvider）
+      共享同一实现（Requirements 13.3, 13.5）。
+
     Args:
-        kline_data: 按频率和股票代码组织的K线数据
+        kline_data: 按频率和股票代码组织的K线数据（已前复权）
             格式: {freq: {symbol: [KlineBar, ...]}}
             例: {"daily": {"600519.SH": [...]}, "5min": {"600519.SH": [...]}}
         exit_config: 平仓条件配置
-        existing_cache: 现有日K线指标缓存
+        existing_cache: 现有日K线指标缓存（已基于前复权数据计算）
 
     Returns:
         {symbol: {freq: {cache_key: values}}} 格式的按频率分组补充缓存。
         cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5" 等。
 
-    Requirements: 4.1, 4.2, 4.3
+    Requirements: 4.1, 4.2, 4.3, 13.1, 13.2
     """
+    # 指标计算函数与选股引擎（ScreenDataProvider）共享同一实现，
+    # 保证回测信号与选股信号的一致性（Requirements 13.3, 13.5）。
+    # ScreenDataProvider 同样使用:
+    #   - adjust_kline_bars (app/services/data_engine/forward_adjustment.py)
+    #   - calculate_macd, calculate_boll, calculate_rsi, calculate_dma
+    #     (app/services/screener/indicators.py)
+    #   - calculate_ma (app/services/screener/ma_trend.py)
     from app.services.screener.indicators import (
         DEFAULT_MACD_FAST, DEFAULT_MACD_SLOW, DEFAULT_MACD_SIGNAL,
         DEFAULT_BOLL_PERIOD, DEFAULT_BOLL_STD_DEV,
@@ -671,7 +688,10 @@ def _precompute_exit_indicators(
         dma_p = freq_dma_param_sets.get(freq, set())
 
         if freq == "daily":
-            # Daily: reuse closes from existing_cache
+            # Daily: reuse closes from existing_cache (already forward-adjusted)
+            # existing_cache was built from forward-adjusted kline_data in
+            # _precompute_indicators(), so closes are forward-adjusted prices.
+            # (Requirement 13.2)
             for symbol, ic in existing_cache.items():
                 closes = ic.closes
                 if not closes:
@@ -683,6 +703,9 @@ def _precompute_exit_indicators(
                     result.setdefault(symbol, {})[freq] = freq_cache
         else:
             # Minute freqs: load from kline_data[freq]
+            # kline_data[freq] contains forward-adjusted minute kline bars,
+            # adjusted in app/tasks/backtest.py before being passed here.
+            # (Requirement 13.1)
             freq_klines = kline_data.get(freq, {})
             for symbol, bars in freq_klines.items():
                 if not bars:
@@ -909,6 +932,7 @@ class BacktestEngine:
         signals: list[dict] | None = None,
         kline_data: dict[str, list[KlineBar]] | None = None,
         index_data: dict[str, list[KlineBar]] | None = None,
+        minute_kline_data: dict[str, dict[str, list[KlineBar]]] | None = None,
     ) -> BacktestResult:
         """
         执行回测。
@@ -926,6 +950,11 @@ class BacktestEngine:
             全市场前复权日 K 线数据（策略驱动路径）
         index_data : dict[str, list[KlineBar]] | None
             大盘指数 K 线数据（策略驱动路径）
+        minute_kline_data : dict[str, dict[str, list[KlineBar]]] | None
+            按频率分组的前复权分钟K线数据（策略驱动路径）
+            格式: {freq: {symbol: [KlineBar, ...]}}
+            例: {"5min": {"600519.SH": [...]}}
+            (Requirement 13.1)
 
         Returns
         -------
@@ -934,7 +963,7 @@ class BacktestEngine:
         # 策略驱动路径
         if kline_data is not None:
             return self._run_backtest_strategy_driven(
-                config, kline_data, index_data,
+                config, kline_data, index_data, minute_kline_data,
             )
 
         # 旧的信号驱动路径（向后兼容）
@@ -2043,12 +2072,19 @@ class BacktestEngine:
         config: BacktestConfig,
         kline_data: dict[str, list[KlineBar]],
         index_data: dict[str, list[KlineBar]] | None = None,
+        minute_kline_data: dict[str, dict[str, list[KlineBar]]] | None = None,
     ) -> BacktestResult:
         """
         策略驱动回测主入口。
 
         逐交易日执行：解冻资金 → 处理待卖 → 检查卖出条件 → 执行卖出
         → 评估大盘风控 → 生成买入信号 → 执行买入 → 记录净值快照。
+
+        Args:
+            kline_data: 前复权日K线数据 {symbol: [KlineBar, ...]}
+            index_data: 大盘指数K线数据
+            minute_kline_data: 前复权分钟K线数据 {freq: {symbol: [KlineBar, ...]}}
+                (Requirement 13.1)
         """
         state = _BacktestState(cash=config.initial_capital)
 
@@ -2099,9 +2135,13 @@ class BacktestEngine:
             _t1 - _t0,
         )
 
-        # 自定义平仓条件指标预计算（Requirements 4.1, 4.2）
+        # 自定义平仓条件指标预计算（Requirements 4.1, 4.2, 13.1）
+        # 合并日K线和分钟K线数据，所有数据均已前复权
+        exit_kline_data: dict[str, dict[str, list[KlineBar]]] = {"daily": kline_data}
+        if minute_kline_data:
+            exit_kline_data.update(minute_kline_data)
         exit_indicator_cache = _precompute_exit_indicators(
-            {"daily": kline_data}, config.exit_conditions, indicator_cache,
+            exit_kline_data, config.exit_conditions, indicator_cache,
         )
         if exit_indicator_cache:
             logger.info(

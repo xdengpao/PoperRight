@@ -319,6 +319,154 @@
 - [x] 20. 最终检查点 - 确保所有模版功能测试通过
   - 确保所有测试通过，如有问题请向用户确认。
 
+---
+
+## 增量任务：指标使用说明、系统内置模版、前复权K线数据
+
+以下任务覆盖需求 11（指标使用说明）、需求 12（系统内置模版）和需求 13（前复权K线数据计算）所需的增量变更，构建在已完成的任务 1-20 之上。
+
+- [x] 21. 后端系统内置模版支持（ORM 模型与数据库迁移）
+  - [x] 21.1 在 `app/models/backtest.py` 的 `ExitConditionTemplate` ORM 模型中新增 `is_system` 字段
+    - 新增 `is_system: Mapped[bool] = mapped_column(Boolean, server_default=sa_text("false"), nullable=False)`
+    - 该字段用于区分系统内置模版（`True`）和用户自定义模版（`False`）
+    - _需求: 12.6_
+  - [x] 21.2 创建 Alembic 迁移文件添加 `is_system` 列和相关索引
+    - 创建迁移文件 `alembic/versions/005_add_is_system_to_exit_condition_template.py`
+    - `upgrade()`：为 `exit_condition_template` 表新增 `is_system BOOLEAN NOT NULL DEFAULT FALSE` 列
+    - 新增部分唯一索引 `idx_exit_condition_template_system_name`（`name WHERE is_system = TRUE`），保证系统模版名称全局唯一
+    - 修改现有 `idx_exit_condition_template_user_name` 唯一索引为部分索引（`user_id, name WHERE is_system = FALSE`），仅约束用户自定义模版
+    - `downgrade()`：删除新增索引和列
+    - _需求: 12.6_
+  - [x] 21.3 创建 Alembic 数据迁移文件 seed 5 个系统内置模版
+    - 创建迁移文件 `alembic/versions/006_seed_system_exit_templates.py`
+    - 使用固定系统用户 UUID `00000000-0000-0000-0000-000000000000` 作为 `user_id`
+    - 插入 5 个 `is_system=True` 的模版：RSI 超买平仓、MACD 死叉平仓、布林带上轨突破回落、均线空头排列、量价背离
+    - 使用 `ON CONFLICT DO NOTHING` 保证幂等性
+    - `downgrade()`：删除 `is_system = TRUE` 的所有记录
+    - _需求: 12.1, 12.2_
+  - [x] 21.4 编写系统内置模版 seed 数据单元测试
+    - 在 `tests/api/test_exit_template_api.py` 中新增测试：
+    - 验证数据库中存在至少 5 个 `is_system=True` 的模版
+    - 验证 5 个模版的名称和 `exit_conditions` 配置正确
+    - 验证系统模版的 `exit_conditions` 可通过 `ExitConditionConfig.from_dict()` 正确反序列化
+    - _需求: 12.1, 12.2_
+
+- [x] 22. 后端系统模版 API 保护与列表排序
+  - [x] 22.1 更新 `app/api/v1/backtest.py` 中 `ExitTemplateResponse` 新增 `is_system` 字段
+    - 在 `ExitTemplateResponse` Pydantic 模型中新增 `is_system: bool` 字段
+    - 更新 `_exit_template_to_dict()` 辅助函数，包含 `is_system` 字段
+    - _需求: 12.6_
+  - [x] 22.2 更新 `list_exit_templates` 端点，返回系统模版 + 用户模版，系统模版排在前面
+    - 修改查询条件：`WHERE is_system = TRUE OR user_id = current_user.id`
+    - 修改排序：`ORDER BY is_system DESC, updated_at DESC`（系统模版优先）
+    - _需求: 12.3_
+  - [x] 22.3 更新 `update_exit_template` 端点，拒绝修改系统模版
+    - 在所有权校验之前新增系统模版检查：`if template.is_system: raise HTTPException(403, "系统内置模版不可修改")`
+    - _需求: 12.1_
+  - [x] 22.4 更新 `delete_exit_template` 端点，拒绝删除系统模版
+    - 在所有权校验之前新增系统模版检查：`if template.is_system: raise HTTPException(403, "系统内置模版不可删除")`
+    - _需求: 12.1_
+  - [x] 22.5 编写系统模版 API 保护单元测试
+    - 在 `tests/api/test_exit_template_api.py` 中新增测试：
+    - 测试 `GET /exit-templates` 返回系统模版 + 用户模版，系统模版排在前面
+    - 测试 `PUT /exit-templates/{system_id}` 返回 403，错误信息为 "系统内置模版不可修改"
+    - 测试 `DELETE /exit-templates/{system_id}` 返回 403，错误信息为 "系统内置模版不可删除"
+    - 测试系统模版可通过 `GET /exit-templates/{id}` 正常获取
+    - _需求: 12.1, 12.3_
+
+- [x] 23. 检查点 - 确保后端系统模版功能测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
+
+- [x] 24. 后端前复权K线数据集成
+  - [x] 24.1 确保 `_precompute_exit_indicators()` 使用前复权K线数据计算指标
+    - 验证 `app/services/backtest_engine.py` 中 `_precompute_exit_indicators()` 接收的 `kline_data` 已经过前复权处理
+    - 对日K线频率（`"daily"`）的指标，确认复用 `existing_cache`（已基于前复权数据计算）
+    - 对分钟K线频率的指标，确认使用 `kline_data[freq]` 中的前复权K线数据
+    - _需求: 13.1, 13.2_
+  - [x] 24.2 在 `app/tasks/backtest.py` 中对分钟K线数据应用前复权处理
+    - 在加载分钟K线数据后，遍历每种分钟频率（`"1min"`, `"5min"`, `"15min"`, `"30min"`, `"60min"`）
+    - 对每只股票的分钟K线调用 `adjust_kline_bars(bars, factors, latest)` 应用前复权
+    - 无复权因子时保持原始数据（日K线处理阶段已记录过警告日志）
+    - _需求: 13.1, 13.4_
+  - [x] 24.3 确保与选股引擎（`ScreenDataProvider`）使用相同的前复权计算逻辑
+    - 验证回测引擎和选股引擎共享同一个 `adjust_kline_bars` 纯函数（`app/services/data_engine/forward_adjustment.py`）
+    - 验证两者使用相同的指标计算函数（`calculate_ma`, `calculate_macd`, `calculate_rsi`, `calculate_boll`, `calculate_dma`）
+    - _需求: 13.3, 13.5_
+  - [x] 24.4 编写前复权K线数据集成单元测试
+    - 在 `tests/services/test_exit_condition_integration.py` 中新增测试：
+    - 测试 `_precompute_exit_indicators` 使用前复权后的 closes 计算指标
+    - 测试 `ExitConditionEvaluator` 获取的 close 值为前复权收盘价
+    - 测试无复权因子时使用原始K线数据并记录警告日志
+    - 测试分钟K线数据同样应用前复权处理
+    - _需求: 13.1, 13.2, 13.3, 13.4_
+
+- [x] 25. 前端指标使用说明功能
+  - [x] 25.1 在 `frontend/src/stores/backtest.ts` 中新增 `INDICATOR_DESCRIPTIONS` 注册表
+    - 定义 `IndicatorParamDescription` 接口（`name`, `label`, `defaultValue`, `suggestedRange`）
+    - 定义 `IndicatorDescription` 接口（`key`, `chineseName`, `calculationSummary`, `params`, `typicalUsage`）
+    - 实现 `INDICATOR_DESCRIPTIONS: Record<string, IndicatorDescription>` 常量，覆盖全部 13 个指标
+    - 每个指标包含：中文名称、计算逻辑简述、可配置参数列表（含默认值和建议范围）、典型使用场景示例
+    - 导出 `INDICATOR_DESCRIPTIONS` 供组件使用
+    - _需求: 11.1, 11.3, 11.4, 11.5_
+  - [x] 25.2 在 `frontend/src/views/BacktestView.vue` 中实现指标说明展示
+    - 当用户在指标下拉框中选择某个指标时，在该条件行下方展示使用说明卡片
+    - 说明卡片包含：📖 图标 + 中文名称、计算逻辑简述、可配置参数（含默认值和建议范围）、典型使用场景
+    - 无参数的指标（close、volume、turnover）不显示参数区域
+    - 切换指标时自动更新说明卡片内容
+    - _需求: 11.1, 11.2, 11.4, 11.5_
+  - [x] 25.3 编写前端指标说明单元测试
+    - 测试选择指标后展示使用说明卡片
+    - 测试使用说明包含中文名称、计算逻辑、参数说明、典型场景
+    - 测试切换指标时说明卡片内容更新
+    - 测试无参数指标不显示参数区域
+    - _需求: 11.1, 11.2, 11.3, 11.4, 11.5_
+
+- [x] 26. 前端系统模版视觉区分
+  - [x] 26.1 更新 `frontend/src/stores/backtest.ts` 中 `ExitTemplate` 接口新增 `is_system` 字段
+    - 在 `ExitTemplate` 接口中新增 `is_system: boolean` 字段
+    - 更新 `fetchExitTemplates()` 解析响应时包含 `is_system` 字段
+    - _需求: 12.6_
+  - [x] 26.2 更新 `frontend/src/views/BacktestView.vue` 中模版选择下拉框，区分系统模版和用户模版
+    - 系统模版前缀 `[系统]` 标签，使用蓝色样式区分
+    - 系统模版与用户模版之间用分隔线区分
+    - 系统模版排在用户模版之前
+    - 选择系统模版后加载到配置面板，用户可修改后另存为自定义模版
+    - 系统模版不显示"重命名"和"删除"操作按钮
+    - _需求: 12.3, 12.4, 12.5_
+  - [x] 26.3 编写前端系统模版视觉区分单元测试
+    - 测试模版下拉框中系统模版带 `[系统]` 标签
+    - 测试系统模版排在用户模版之前
+    - 测试系统模版不显示重命名和删除操作
+    - 测试选择系统模版后可加载到配置面板
+    - _需求: 12.3, 12.4, 12.5_
+
+- [x] 27. 检查点 - 确保前端指标说明和系统模版功能测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
+
+- [x] 28. 属性测试（Property 10、11、12）
+  - [x] 28.1 编写指标使用说明注册表完整性属性测试
+    - **Property 10: Indicator description registry completeness**
+    - **验证: 需求 11.1, 11.3, 11.4, 11.5**
+    - 在 `frontend/src/stores/__tests__/backtest.property.test.ts` 中使用 fast-check 新增测试
+    - 对任意合法指标名称（从 `VALID_INDICATORS` 13 个指标中采样），验证 `INDICATOR_DESCRIPTIONS` 中存在对应条目
+    - 验证条目包含非空的 `chineseName`、`calculationSummary`、`typicalUsage`
+    - 对包含可配置参数的指标（ma、macd_dif、macd_dea、macd_histogram、boll_upper、boll_middle、boll_lower、rsi、dma、ama），验证 `params` 数组非空，且每个参数包含 `name`、`defaultValue`、`suggestedRange`
+  - [x] 28.2 编写系统模版在列表中排序优先属性测试
+    - **Property 11: System templates ordering priority in list**
+    - **验证: 需求 12.3**
+    - 在 `tests/properties/test_exit_condition_properties.py` 中使用 Hypothesis 新增测试
+    - 使用 Hypothesis 生成任意数量的系统模版和用户模版混合列表
+    - 模拟 API 排序逻辑（`is_system DESC, updated_at DESC`），验证排序后所有 `is_system=True` 的模版索引小于所有 `is_system=False` 的模版索引
+  - [x] 28.3 编写前复权指标计算跨模块一致性属性测试
+    - **Property 12: Forward-adjusted indicator calculation cross-module consistency**
+    - **验证: 需求 13.3, 13.5**
+    - 在 `tests/properties/test_exit_condition_properties.py` 中使用 Hypothesis 新增测试
+    - 使用 Hypothesis 生成任意有效的前复权收盘价序列（长度 ≥ 30，正浮点数）
+    - 对相同的收盘价序列，分别调用 `calculate_ma`、`calculate_macd`、`calculate_rsi`、`calculate_boll`、`calculate_dma` 两次（模拟回测引擎和选股引擎），验证两次计算结果完全一致
+
+- [x] 29. 最终检查点 - 确保所有需求 11、12、13 功能测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
+
 ## 备注
 
 - 标记 `*` 的任务为可选，可跳过以加速 MVP 交付
@@ -327,3 +475,4 @@
 - 后端属性测试使用 Hypothesis（`tests/properties/`），前端使用 fast-check
 - 任务 9-14 为 freq 扩展增量任务，构建在已完成的任务 1-8 之上
 - 任务 15-20 为模版管理增量任务，构建在已完成的任务 1-14 之上
+- 任务 21-29 为指标说明、系统内置模版和前复权K线增量任务，构建在已完成的任务 1-20 之上

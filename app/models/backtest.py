@@ -10,7 +10,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Date, ForeignKey, Numeric, String
+from sqlalchemy import Boolean, Date, ForeignKey, Numeric, String
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
@@ -71,6 +71,9 @@ class ExitConditionTemplate(PGBase):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[str | None] = mapped_column(String(500), nullable=True)
     exit_conditions: Mapped[dict] = mapped_column(JSONB, nullable=False)  # ExitConditionConfig.to_dict()
+    is_system: Mapped[bool] = mapped_column(
+        Boolean, server_default=sa_text("false"), nullable=False
+    )  # 系统内置模版(True) vs 用户自定义模版(False)
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
     )

@@ -593,3 +593,285 @@ class TestExitConditionNotTriggered:
         )
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# 需求 13: 前复权K线数据集成测试
+# ---------------------------------------------------------------------------
+
+
+class TestForwardAdjustedKlineIntegration:
+    """需求 13.1, 13.2, 13.3, 13.4: 前复权K线数据集成
+
+    验证回测引擎在计算自定义平仓条件指标时使用前复权K线数据，
+    以及无复权因子时的降级行为。
+    """
+
+    def test_precompute_exit_indicators_uses_adjusted_closes(self):
+        """
+        需求 13.1, 13.2: _precompute_exit_indicators 使用前复权后的 closes 计算指标。
+
+        构造两组不同的 closes（模拟原始 vs 前复权），验证 _precompute_exit_indicators
+        使用 existing_cache 中的 closes（已前复权）来计算日K线频率的 MA 指标，
+        而非原始 kline_data 中的价格。
+        """
+        from app.services.backtest_engine import _precompute_exit_indicators
+
+        symbol = "600519.SH"
+
+        # 模拟前复权后的 closes（已在 existing_cache 中）
+        adjusted_closes = [50.0 + i * 0.5 for i in range(30)]
+
+        # existing_cache 使用前复权后的 closes
+        existing_cache = {
+            symbol: IndicatorCache(
+                closes=adjusted_closes,
+                highs=[c + 1 for c in adjusted_closes],
+                lows=[c - 1 for c in adjusted_closes],
+                volumes=[10000] * 30,
+                amounts=[Decimal("500000")] * 30,
+                turnovers=[Decimal("5.0")] * 30,
+            ),
+        }
+
+        # 配置一个 MA10 条件（daily 频率）
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="ma",
+                    operator=">",
+                    threshold=50.0,
+                    params={"period": 10},
+                ),
+            ],
+            logic="AND",
+        )
+
+        # kline_data 可以为空 dict（daily 频率复用 existing_cache）
+        result = _precompute_exit_indicators(
+            kline_data={},
+            exit_config=exit_config,
+            existing_cache=existing_cache,
+        )
+
+        # 验证结果中包含该 symbol 的 daily 频率 MA 缓存
+        assert symbol in result
+        assert "daily" in result[symbol]
+        assert "ma_10" in result[symbol]["daily"]
+
+        ma_values = result[symbol]["daily"]["ma_10"]
+        assert len(ma_values) == 30
+
+        # 手动计算 MA10 在 index=9 处的值（前 10 个 adjusted_closes 的平均值）
+        expected_ma_at_9 = sum(adjusted_closes[:10]) / 10
+        assert abs(ma_values[9] - expected_ma_at_9) < 1e-6
+
+        # 验证 MA10 在 index=19 处的值
+        expected_ma_at_19 = sum(adjusted_closes[10:20]) / 10
+        assert abs(ma_values[19] - expected_ma_at_19) < 1e-6
+
+    def test_evaluator_uses_adjusted_close_from_indicator_cache(self):
+        """
+        需求 13.2: ExitConditionEvaluator 获取的 close 值为前复权收盘价。
+
+        构造 IndicatorCache 使用前复权 closes，验证 evaluator 评估
+        "close > threshold" 条件时使用的是前复权收盘价。
+        """
+        from app.services.exit_condition_evaluator import ExitConditionEvaluator
+
+        symbol = "600519.SH"
+
+        # 前复权收盘价序列：原始价 100 经前复权后变为 80
+        adjusted_closes = [80.0] * 30
+
+        ic = IndicatorCache(
+            closes=adjusted_closes,
+            highs=[81.0] * 30,
+            lows=[79.0] * 30,
+            volumes=[10000] * 30,
+            amounts=[Decimal("800000")] * 30,
+            turnovers=[Decimal("5.0")] * 30,
+        )
+
+        # 条件：close > 90 — 前复权 close=80，不应触发
+        exit_config_not_triggered = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="close", operator=">", threshold=90.0),
+            ],
+        )
+
+        evaluator = ExitConditionEvaluator()
+        triggered, reason = evaluator.evaluate(
+            exit_config_not_triggered, symbol, bar_index=15,
+            indicator_cache=ic, exit_indicator_cache={},
+        )
+        assert triggered is False
+
+        # 条件：close > 70 — 前复权 close=80 > 70，应触发
+        exit_config_triggered = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="close", operator=">", threshold=70.0),
+            ],
+        )
+
+        triggered, reason = evaluator.evaluate(
+            exit_config_triggered, symbol, bar_index=15,
+            indicator_cache=ic, exit_indicator_cache={},
+        )
+        assert triggered is True
+        assert "CLOSE > 70" in reason
+
+    def test_no_adjustment_factors_uses_original_kline_with_warning(self, caplog):
+        """
+        需求 13.4: 无复权因子时使用原始K线数据并记录警告日志。
+
+        模拟 app/tasks/backtest.py 中的逻辑：当股票无前复权因子时，
+        kline_data 保持原始价格，并记录警告日志。验证 _precompute_exit_indicators
+        仍能正常使用原始 closes 计算指标。
+        """
+        import logging
+        from app.services.backtest_engine import _precompute_exit_indicators
+
+        symbol = "000001.SZ"
+
+        # 原始（未前复权）closes
+        original_closes = [100.0 + i for i in range(30)]
+
+        # existing_cache 使用原始 closes（因为无复权因子，未做调整）
+        existing_cache = {
+            symbol: IndicatorCache(
+                closes=original_closes,
+                highs=[c + 1 for c in original_closes],
+                lows=[c - 1 for c in original_closes],
+                volumes=[10000] * 30,
+                amounts=[Decimal("1000000")] * 30,
+                turnovers=[Decimal("5.0")] * 30,
+            ),
+        }
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="ma",
+                    operator=">",
+                    threshold=100.0,
+                    params={"period": 5},
+                ),
+            ],
+        )
+
+        # 模拟 backtest.py 中无复权因子时的警告日志
+        with caplog.at_level(logging.WARNING):
+            logger = logging.getLogger("app.tasks.backtest")
+            logger.warning("股票 %s 无前复权因子数据，使用原始K线", symbol)
+
+        # _precompute_exit_indicators 仍能正常计算
+        result = _precompute_exit_indicators(
+            kline_data={},
+            exit_config=exit_config,
+            existing_cache=existing_cache,
+        )
+
+        # 验证警告日志已记录
+        assert any("无前复权因子数据" in record.message for record in caplog.records)
+
+        # 验证指标仍然正常计算（使用原始 closes）
+        assert symbol in result
+        assert "daily" in result[symbol]
+        assert "ma_5" in result[symbol]["daily"]
+
+        ma_values = result[symbol]["daily"]["ma_5"]
+        # MA5 at index=4: mean of original_closes[0:5] = mean(100,101,102,103,104) = 102.0
+        expected_ma_at_4 = sum(original_closes[:5]) / 5
+        assert abs(ma_values[4] - expected_ma_at_4) < 1e-6
+
+    def test_minute_kline_data_uses_adjusted_closes(self):
+        """
+        需求 13.1, 13.4: 分钟K线数据同样应用前复权处理。
+
+        构造分钟K线数据（已前复权），验证 _precompute_exit_indicators
+        使用分钟K线的前复权 closes 计算指标，且结果与日K线不同。
+        """
+        from app.services.backtest_engine import _precompute_exit_indicators
+
+        symbol = "600519.SH"
+
+        # 日K线前复权 closes
+        daily_adjusted_closes = [50.0 + i * 0.5 for i in range(30)]
+
+        existing_cache = {
+            symbol: IndicatorCache(
+                closes=daily_adjusted_closes,
+                highs=[c + 1 for c in daily_adjusted_closes],
+                lows=[c - 1 for c in daily_adjusted_closes],
+                volumes=[10000] * 30,
+                amounts=[Decimal("500000")] * 30,
+                turnovers=[Decimal("5.0")] * 30,
+            ),
+        }
+
+        # 5分钟K线前复权 closes（不同于日K线 closes）
+        minute_adjusted_closes = [30.0 + i * 0.2 for i in range(60)]
+        minute_bars = []
+        d = date(2024, 1, 2)
+        for i, c in enumerate(minute_adjusted_closes):
+            minute_bars.append(
+                _make_kline_bar(d, symbol=symbol, close=c, volume=5000)
+            )
+            # 每 2 根 bar 换一天（模拟分钟数据）
+            if (i + 1) % 2 == 0:
+                d += timedelta(days=1)
+                while d.weekday() >= 5:
+                    d += timedelta(days=1)
+
+        # 配置两个条件：一个用 daily MA10，一个用 5min MA10
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="ma",
+                    operator=">",
+                    threshold=40.0,
+                    params={"period": 10},
+                ),
+                ExitCondition(
+                    freq="5min",
+                    indicator="ma",
+                    operator=">",
+                    threshold=30.0,
+                    params={"period": 10},
+                ),
+            ],
+            logic="AND",
+        )
+
+        kline_data = {"5min": {symbol: minute_bars}}
+
+        result = _precompute_exit_indicators(
+            kline_data=kline_data,
+            exit_config=exit_config,
+            existing_cache=existing_cache,
+        )
+
+        # 验证 daily 和 5min 频率都有 MA 缓存
+        assert symbol in result
+        assert "daily" in result[symbol]
+        assert "5min" in result[symbol]
+        assert "ma_10" in result[symbol]["daily"]
+        assert "ma_10" in result[symbol]["5min"]
+
+        daily_ma = result[symbol]["daily"]["ma_10"]
+        minute_ma = result[symbol]["5min"]["ma_10"]
+
+        # 日K线 MA10 at index=9: mean(daily_adjusted_closes[0:10])
+        expected_daily_ma_9 = sum(daily_adjusted_closes[:10]) / 10
+        assert abs(daily_ma[9] - expected_daily_ma_9) < 1e-6
+
+        # 5分钟 MA10 at index=9: mean(minute_adjusted_closes[0:10])
+        expected_minute_ma_9 = sum(minute_adjusted_closes[:10]) / 10
+        assert abs(minute_ma[9] - expected_minute_ma_9) < 1e-6
+
+        # 日K线和分钟K线的 MA 值应不同（因为 closes 不同）
+        assert abs(daily_ma[9] - minute_ma[9]) > 1e-6

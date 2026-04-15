@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import get_current_user
@@ -81,6 +81,7 @@ class ExitTemplateResponse(BaseModel):
     name: str
     description: str | None
     exit_conditions: dict
+    is_system: bool
     created_at: str
     updated_at: str
 
@@ -203,6 +204,7 @@ def _exit_template_to_dict(t: ExitConditionTemplate) -> dict:
         "name": t.name,
         "description": t.description,
         "exit_conditions": t.exit_conditions or {},
+        "is_system": t.is_system,
         "created_at": t.created_at.isoformat() if t.created_at else "",
         "updated_at": t.updated_at.isoformat() if t.updated_at else "",
     }
@@ -271,11 +273,19 @@ async def list_exit_templates(
     current_user: AppUser = Depends(get_current_user),
     pg_session: AsyncSession = Depends(get_pg_session),
 ) -> list:
-    """列出当前用户所有平仓条件模版，按 updated_at 降序。"""
+    """列出系统模版和当前用户平仓条件模版，系统模版排在前面。"""
     stmt = (
         select(ExitConditionTemplate)
-        .where(ExitConditionTemplate.user_id == current_user.id)
-        .order_by(ExitConditionTemplate.updated_at.desc())
+        .where(
+            or_(
+                ExitConditionTemplate.is_system == True,
+                ExitConditionTemplate.user_id == current_user.id,
+            )
+        )
+        .order_by(
+            ExitConditionTemplate.is_system.desc(),
+            ExitConditionTemplate.updated_at.desc(),
+        )
     )
     result = await pg_session.execute(stmt)
     return [_exit_template_to_dict(t) for t in result.scalars().all()]
@@ -301,6 +311,10 @@ async def update_exit_template(
 ) -> dict:
     """更新指定平仓条件模版。"""
     template = await _get_template_or_404(template_id, pg_session)
+
+    # 系统模版保护
+    if template.is_system:
+        raise HTTPException(status_code=403, detail="系统内置模版不可修改")
 
     # 所有权校验
     if template.user_id != current_user.id:
@@ -337,6 +351,10 @@ async def delete_exit_template(
 ) -> dict:
     """删除指定平仓条件模版。"""
     template = await _get_template_or_404(template_id, pg_session)
+
+    # 系统模版保护
+    if template.is_system:
+        raise HTTPException(status_code=403, detail="系统内置模版不可删除")
 
     # 所有权校验
     if template.user_id != current_user.id:

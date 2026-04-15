@@ -11,6 +11,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import * as fc from 'fast-check'
+import { INDICATOR_DESCRIPTIONS } from '@/stores/backtest'
 
 // ─── 类型定义（与 backtest.ts 中 ExitConditionForm 一致）────────────────────
 
@@ -185,6 +186,118 @@ describe('ExitConditionConfig JSON 序列化往返属性测试', () => {
 
         expect(restored).toEqual(config)
       }),
+      { numRuns: 100 },
+    )
+  })
+})
+
+
+// ─── Property 10: 指标使用说明注册表完整性 ─────────────────────────────────────
+
+/**
+ * Feature: backtest-exit-conditions, Property 10: Indicator description registry completeness
+ *
+ * 对任意合法指标名称（从 VALID_INDICATORS 13 个指标中采样），
+ * 验证 INDICATOR_DESCRIPTIONS 中存在对应条目，且条目包含完整的说明信息。
+ *
+ * **Validates: Requirements 11.1, 11.3, 11.4, 11.5**
+ */
+describe('指标使用说明注册表完整性属性测试', () => {
+  const INDICATORS_WITH_PARAMS = [
+    'ma', 'macd_dif', 'macd_dea', 'macd_histogram',
+    'boll_upper', 'boll_middle', 'boll_lower',
+    'rsi', 'dma', 'ama',
+  ] as const
+
+  const INDICATORS_WITHOUT_PARAMS = ['close', 'volume', 'turnover'] as const
+
+  const allIndicatorArb = fc.constantFrom(...VALID_INDICATORS)
+  const paramIndicatorArb = fc.constantFrom(...INDICATORS_WITH_PARAMS)
+
+  /**
+   * 对任意合法指标名称，INDICATOR_DESCRIPTIONS 中存在对应条目，
+   * 且包含非空的 chineseName、calculationSummary、typicalUsage
+   * Validates: Requirements 11.1, 11.3, 11.5
+   */
+  it('任意合法指标名称在 INDICATOR_DESCRIPTIONS 中存在且包含完整基本信息', () => {
+    fc.assert(
+      fc.property(allIndicatorArb, (indicator) => {
+        const desc = INDICATOR_DESCRIPTIONS[indicator]
+
+        // 条目存在
+        expect(desc).toBeDefined()
+
+        // chineseName 非空
+        expect(desc.chineseName).toBeDefined()
+        expect(typeof desc.chineseName).toBe('string')
+        expect(desc.chineseName.length).toBeGreaterThan(0)
+
+        // calculationSummary 非空
+        expect(desc.calculationSummary).toBeDefined()
+        expect(typeof desc.calculationSummary).toBe('string')
+        expect(desc.calculationSummary.length).toBeGreaterThan(0)
+
+        // typicalUsage 非空
+        expect(desc.typicalUsage).toBeDefined()
+        expect(typeof desc.typicalUsage).toBe('string')
+        expect(desc.typicalUsage.length).toBeGreaterThan(0)
+      }),
+      { numRuns: 100 },
+    )
+  })
+
+  /**
+   * 对包含可配置参数的指标，params 数组非空，
+   * 且每个参数包含 name、defaultValue、suggestedRange
+   * Validates: Requirements 11.4
+   */
+  it('可配置参数指标的 params 数组非空且每个参数包含必要字段', () => {
+    fc.assert(
+      fc.property(paramIndicatorArb, (indicator) => {
+        const desc = INDICATOR_DESCRIPTIONS[indicator]
+
+        expect(desc).toBeDefined()
+        expect(Array.isArray(desc.params)).toBe(true)
+        expect(desc.params.length).toBeGreaterThan(0)
+
+        for (const param of desc.params) {
+          // name 非空
+          expect(param.name).toBeDefined()
+          expect(typeof param.name).toBe('string')
+          expect(param.name.length).toBeGreaterThan(0)
+
+          // defaultValue 存在且为数值
+          expect(param.defaultValue).toBeDefined()
+          expect(typeof param.defaultValue).toBe('number')
+
+          // suggestedRange 存在且为包含两个数值的数组
+          expect(param.suggestedRange).toBeDefined()
+          expect(Array.isArray(param.suggestedRange)).toBe(true)
+          expect(param.suggestedRange).toHaveLength(2)
+          expect(typeof param.suggestedRange[0]).toBe('number')
+          expect(typeof param.suggestedRange[1]).toBe('number')
+        }
+      }),
+      { numRuns: 100 },
+    )
+  })
+
+  /**
+   * 无参数指标（close、volume、turnover）的 params 数组为空
+   * Validates: Requirements 11.3
+   */
+  it('无参数指标的 params 数组为空', () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...INDICATORS_WITHOUT_PARAMS),
+        (indicator) => {
+          const desc = INDICATOR_DESCRIPTIONS[indicator]
+
+          expect(desc).toBeDefined()
+          expect(Array.isArray(desc.params)).toBe(true)
+          expect(desc.params.length).toBe(0)
+        },
+      ),
       { numRuns: 100 },
     )
   })

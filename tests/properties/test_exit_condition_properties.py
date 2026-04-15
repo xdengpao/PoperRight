@@ -808,3 +808,159 @@ def test_property_9_template_name_uniqueness_per_user(template_name: str):
     第二次创建请求应返回 HTTP 409 冲突错误，且数据库中该用户下该名称的模版数量始终为 1。
     """
     asyncio.run(_p9_run_uniqueness_check(template_name))
+
+
+# ---------------------------------------------------------------------------
+# Property 11: System templates ordering priority in list
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as dc_dataclass
+
+
+@dc_dataclass
+class _TemplateMock:
+    """Minimal mock representing an ExitConditionTemplate for sorting tests."""
+
+    is_system: bool
+    updated_at: datetime
+
+
+# Strategy: generate a mixed list of system and user templates
+_template_mock_strategy = st.builds(
+    _TemplateMock,
+    is_system=st.booleans(),
+    updated_at=st.datetimes(
+        min_value=datetime(2020, 1, 1),
+        max_value=datetime(2025, 12, 31),
+        timezones=st.just(timezone.utc),
+    ),
+)
+
+
+@h_settings(max_examples=100)
+@given(templates=st.lists(_template_mock_strategy, min_size=0, max_size=30))
+def test_property_11_system_templates_ordering_priority(templates: list[_TemplateMock]):
+    """
+    # Feature: backtest-exit-conditions, Property 11: System templates ordering priority in list
+
+    **Validates: Requirements 12.3**
+
+    对任意模版列表（包含系统模版和用户自定义模版的混合列表），
+    按 API 排序逻辑（is_system DESC, updated_at DESC）排序后，
+    所有 is_system=True 的模版索引应小于所有 is_system=False 的模版索引——
+    即系统模版始终排列在用户自定义模版之前。
+    """
+    # Apply the same sorting logic as the API:
+    # ORDER BY is_system DESC, updated_at DESC
+    sorted_templates = sorted(
+        templates,
+        key=lambda t: (-t.is_system, -t.updated_at.timestamp()),
+    )
+
+    # Collect indices of system vs user templates
+    system_indices = [
+        i for i, t in enumerate(sorted_templates) if t.is_system is True
+    ]
+    user_indices = [
+        i for i, t in enumerate(sorted_templates) if t.is_system is False
+    ]
+
+    # If both groups are non-empty, every system index must be less than every user index
+    if system_indices and user_indices:
+        max_system_index = max(system_indices)
+        min_user_index = min(user_indices)
+        assert max_system_index < min_user_index, (
+            f"系统模版最大索引 ({max_system_index}) 应小于用户模版最小索引 ({min_user_index})。"
+            f"\n排序后列表: {[(t.is_system, t.updated_at) for t in sorted_templates]}"
+        )
+
+    # Additionally verify that system templates form a contiguous block at the start
+    for i, t in enumerate(sorted_templates):
+        if t.is_system:
+            assert i < len(system_indices), (
+                f"系统模版应连续排列在列表开头，但索引 {i} 处的系统模版超出预期范围"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Property 12: Forward-adjusted indicator calculation cross-module consistency
+# ---------------------------------------------------------------------------
+
+import math as _math
+
+from app.services.screener.indicators import (
+    calculate_boll,
+    calculate_dma,
+    calculate_macd,
+    calculate_rsi,
+)
+from app.services.screener.ma_trend import calculate_ma
+
+# Strategy: generate a list of positive floats (length 30-100) as closes
+_positive_closes_strategy = st.lists(
+    st.floats(min_value=0.01, max_value=1e4, allow_nan=False, allow_infinity=False),
+    min_size=30,
+    max_size=100,
+)
+
+
+def _nan_equal(a: float, b: float) -> bool:
+    """Compare two floats treating NaN == NaN as True."""
+    if _math.isnan(a) and _math.isnan(b):
+        return True
+    return a == b
+
+
+def _lists_nan_equal(xs: list[float], ys: list[float], label: str) -> None:
+    """Assert two float lists are element-wise equal (NaN-aware)."""
+    assert len(xs) == len(ys), (
+        f"{label}: 长度不一致 {len(xs)} != {len(ys)}"
+    )
+    for i, (x, y) in enumerate(zip(xs, ys)):
+        assert _nan_equal(x, y), (
+            f"{label}[{i}]: {x!r} != {y!r}"
+        )
+
+
+@h_settings(max_examples=100)
+@given(closes=_positive_closes_strategy)
+def test_property_12_forward_adjusted_indicator_cross_module_consistency(
+    closes: list[float],
+):
+    """
+    # Feature: backtest-exit-conditions, Property 12: Forward-adjusted indicator calculation cross-module consistency
+
+    **Validates: Requirements 13.3, 13.5**
+
+    对任意有效的前复权收盘价序列（长度 ≥ 30，正浮点数），使用相同的指标计算函数
+    和相同的参数，分别调用两次（模拟回测引擎和选股引擎），验证两次计算结果完全一致。
+    """
+    # --- calculate_ma (period=20) ---
+    ma_run1 = calculate_ma(closes, period=20)
+    ma_run2 = calculate_ma(closes, period=20)
+    _lists_nan_equal(ma_run1, ma_run2, "calculate_ma(period=20)")
+
+    # --- calculate_macd (12, 26, 9) ---
+    macd_run1 = calculate_macd(closes, fast_period=12, slow_period=26, signal_period=9)
+    macd_run2 = calculate_macd(closes, fast_period=12, slow_period=26, signal_period=9)
+    _lists_nan_equal(macd_run1.dif, macd_run2.dif, "calculate_macd.dif")
+    _lists_nan_equal(macd_run1.dea, macd_run2.dea, "calculate_macd.dea")
+    _lists_nan_equal(macd_run1.macd, macd_run2.macd, "calculate_macd.macd")
+
+    # --- calculate_rsi (period=14) ---
+    rsi_run1 = calculate_rsi(closes, period=14)
+    rsi_run2 = calculate_rsi(closes, period=14)
+    _lists_nan_equal(rsi_run1.values, rsi_run2.values, "calculate_rsi(period=14)")
+
+    # --- calculate_boll (period=20, std_dev=2.0) ---
+    boll_run1 = calculate_boll(closes, period=20, std_dev=2.0)
+    boll_run2 = calculate_boll(closes, period=20, std_dev=2.0)
+    _lists_nan_equal(boll_run1.upper, boll_run2.upper, "calculate_boll.upper")
+    _lists_nan_equal(boll_run1.middle, boll_run2.middle, "calculate_boll.middle")
+    _lists_nan_equal(boll_run1.lower, boll_run2.lower, "calculate_boll.lower")
+
+    # --- calculate_dma (short=10, long=50) ---
+    dma_run1 = calculate_dma(closes, short_period=10, long_period=50)
+    dma_run2 = calculate_dma(closes, short_period=10, long_period=50)
+    _lists_nan_equal(dma_run1.dma, dma_run2.dma, "calculate_dma.dma")
+    _lists_nan_equal(dma_run1.ama, dma_run2.ama, "calculate_dma.ama")

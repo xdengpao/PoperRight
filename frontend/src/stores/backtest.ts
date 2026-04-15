@@ -77,8 +77,151 @@ export interface ExitTemplate {
     }>
     logic: 'AND' | 'OR'
   }
+  is_system: boolean
   created_at: string
   updated_at: string
+}
+
+// ─── 指标使用说明注册表 ──────────────────────────────────────────────────────
+
+export interface IndicatorParamDescription {
+  name: string
+  label: string
+  defaultValue: number
+  suggestedRange: [number, number]
+}
+
+export interface IndicatorDescription {
+  key: string
+  chineseName: string
+  calculationSummary: string
+  params: IndicatorParamDescription[]
+  typicalUsage: string
+}
+
+export const INDICATOR_DESCRIPTIONS: Record<string, IndicatorDescription> = {
+  ma: {
+    key: 'ma',
+    chineseName: '移动平均线 (MA)',
+    calculationSummary: '计算过去N个交易日收盘价的算术平均值',
+    params: [
+      { name: 'period', label: '均线周期', defaultValue: 20, suggestedRange: [5, 250] },
+    ],
+    typicalUsage: 'MA5 < MA10 表示短期均线跌破中期均线，可作为趋势转弱的卖出信号',
+  },
+  macd_dif: {
+    key: 'macd_dif',
+    chineseName: 'MACD快线 (DIF)',
+    calculationSummary: '短期EMA与长期EMA的差值',
+    params: [
+      { name: 'macd_fast', label: '快线周期', defaultValue: 12, suggestedRange: [5, 20] },
+      { name: 'macd_slow', label: '慢线周期', defaultValue: 26, suggestedRange: [20, 40] },
+      { name: 'macd_signal', label: '信号线周期', defaultValue: 9, suggestedRange: [5, 15] },
+    ],
+    typicalUsage: 'DIF cross_down DEA 形成死叉，可作为趋势反转的卖出信号',
+  },
+  macd_dea: {
+    key: 'macd_dea',
+    chineseName: 'MACD慢线 (DEA)',
+    calculationSummary: 'DIF的N日指数移动平均',
+    params: [
+      { name: 'macd_fast', label: '快线周期', defaultValue: 12, suggestedRange: [5, 20] },
+      { name: 'macd_slow', label: '慢线周期', defaultValue: 26, suggestedRange: [20, 40] },
+      { name: 'macd_signal', label: '信号线周期', defaultValue: 9, suggestedRange: [5, 15] },
+    ],
+    typicalUsage: 'DEA < 0 表示中期趋势偏空',
+  },
+  macd_histogram: {
+    key: 'macd_histogram',
+    chineseName: 'MACD柱状图',
+    calculationSummary: '(DIF - DEA) × 2',
+    params: [
+      { name: 'macd_fast', label: '快线周期', defaultValue: 12, suggestedRange: [5, 20] },
+      { name: 'macd_slow', label: '慢线周期', defaultValue: 26, suggestedRange: [20, 40] },
+      { name: 'macd_signal', label: '信号线周期', defaultValue: 9, suggestedRange: [5, 15] },
+    ],
+    typicalUsage: 'MACD柱状图由正转负，表示多头动能减弱',
+  },
+  boll_upper: {
+    key: 'boll_upper',
+    chineseName: '布林带上轨',
+    calculationSummary: '中轨 + N倍标准差',
+    params: [
+      { name: 'boll_period', label: '布林带周期', defaultValue: 20, suggestedRange: [10, 50] },
+      { name: 'boll_std_dev', label: '标准差倍数', defaultValue: 2.0, suggestedRange: [1.0, 3.0] },
+    ],
+    typicalUsage: '收盘价 cross_down 布林带上轨，表示价格冲高回落',
+  },
+  boll_middle: {
+    key: 'boll_middle',
+    chineseName: '布林带中轨',
+    calculationSummary: 'N日移动平均线',
+    params: [
+      { name: 'boll_period', label: '布林带周期', defaultValue: 20, suggestedRange: [10, 50] },
+      { name: 'boll_std_dev', label: '标准差倍数', defaultValue: 2.0, suggestedRange: [1.0, 3.0] },
+    ],
+    typicalUsage: '收盘价跌破布林带中轨，表示中期趋势转弱',
+  },
+  boll_lower: {
+    key: 'boll_lower',
+    chineseName: '布林带下轨',
+    calculationSummary: '中轨 - N倍标准差',
+    params: [
+      { name: 'boll_period', label: '布林带周期', defaultValue: 20, suggestedRange: [10, 50] },
+      { name: 'boll_std_dev', label: '标准差倍数', defaultValue: 2.0, suggestedRange: [1.0, 3.0] },
+    ],
+    typicalUsage: '收盘价接近布林带下轨，可能出现超卖反弹',
+  },
+  rsi: {
+    key: 'rsi',
+    chineseName: '相对强弱指标 (RSI)',
+    calculationSummary: '衡量价格变动速度和幅度的动量指标，范围0-100',
+    params: [
+      { name: 'rsi_period', label: 'RSI周期', defaultValue: 14, suggestedRange: [6, 24] },
+    ],
+    typicalUsage: 'RSI > 80 表示超买，可作为卖出信号',
+  },
+  dma: {
+    key: 'dma',
+    chineseName: '平均线差 (DMA)',
+    calculationSummary: '短期均线与长期均线的差值',
+    params: [
+      { name: 'dma_short', label: '短期均线周期', defaultValue: 10, suggestedRange: [5, 20] },
+      { name: 'dma_long', label: '长期均线周期', defaultValue: 50, suggestedRange: [30, 120] },
+    ],
+    typicalUsage: 'DMA < 0 表示短期均线低于长期均线，趋势偏空',
+  },
+  ama: {
+    key: 'ama',
+    chineseName: '平均线差均线 (AMA)',
+    calculationSummary: 'DMA的移动平均线',
+    params: [
+      { name: 'dma_short', label: '短期均线周期', defaultValue: 10, suggestedRange: [5, 20] },
+      { name: 'dma_long', label: '长期均线周期', defaultValue: 50, suggestedRange: [30, 120] },
+    ],
+    typicalUsage: 'DMA cross_down AMA 表示均线差趋势转弱',
+  },
+  close: {
+    key: 'close',
+    chineseName: '收盘价',
+    calculationSummary: '当日收盘价（前复权）',
+    params: [],
+    typicalUsage: '收盘价跌破特定价位可作为止损信号',
+  },
+  volume: {
+    key: 'volume',
+    chineseName: '成交量',
+    calculationSummary: '当日成交量（手）',
+    params: [],
+    typicalUsage: '成交量大幅萎缩可能预示趋势即将反转',
+  },
+  turnover: {
+    key: 'turnover',
+    chineseName: '换手率',
+    calculationSummary: '当日换手率（%）',
+    params: [],
+    typicalUsage: '换手率异常放大可能预示主力出货',
+  },
 }
 
 export type RunStatus = 'idle' | 'pending' | 'running' | 'success' | 'failed'

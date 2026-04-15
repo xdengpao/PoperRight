@@ -1,7 +1,7 @@
 """
 Unit tests for _precompute_exit_indicators() in backtest_engine.py.
 
-Tests Requirements: 4.1, 4.2, 4.3, 4.4, 4.5
+Tests Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 13.1, 13.2
 """
 
 from __future__ import annotations
@@ -55,6 +55,13 @@ def _make_indicator_cache(closes: list[float]) -> IndicatorCache:
     )
 
 
+def _daily_kline_data(
+    closes: list[float], symbol: str = "000001.SZ",
+) -> dict[str, dict[str, list[KlineBar]]]:
+    """Build freq-grouped kline_data with daily bars for a single symbol."""
+    return {"daily": {symbol: [_make_kline_bar(c, symbol) for c in closes]}}
+
+
 SYMBOL = "000001.SZ"
 # Generate 60 bars of close prices for sufficient indicator data
 CLOSES = [10.0 + 0.1 * i for i in range(60)]
@@ -71,7 +78,7 @@ class TestPrecomputeExitIndicatorsNone:
     def test_none_config(self):
         ic = _make_indicator_cache(CLOSES)
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             None,
             {SYMBOL: ic},
         )
@@ -81,7 +88,7 @@ class TestPrecomputeExitIndicatorsNone:
         ic = _make_indicator_cache(CLOSES)
         config = ExitConditionConfig(conditions=[], logic="AND")
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
@@ -105,13 +112,14 @@ class TestPrecomputeMA:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
         assert SYMBOL in result
-        assert "ma_10" in result[SYMBOL]
-        values = result[SYMBOL]["ma_10"]
+        assert "daily" in result[SYMBOL]
+        assert "ma_10" in result[SYMBOL]["daily"]
+        values = result[SYMBOL]["daily"]["ma_10"]
         assert len(values) == len(CLOSES)
         # First 9 values should be NaN
         for i in range(9):
@@ -135,12 +143,13 @@ class TestPrecomputeMA:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        assert "ma_5" in result[SYMBOL]
-        assert "ma_20" in result[SYMBOL]
+        sym_daily = result[SYMBOL]["daily"]
+        assert "ma_5" in sym_daily
+        assert "ma_20" in sym_daily
 
 
 class TestPrecomputeMACD:
@@ -157,11 +166,11 @@ class TestPrecomputeMACD:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         # Default params: should have both suffixed and unsuffixed keys
         assert "macd_dif_12_26_9" in sym
         assert "macd_dif" in sym
@@ -183,11 +192,11 @@ class TestPrecomputeMACD:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "macd_dif_8_21_5" in sym
         assert "macd_dea_8_21_5" in sym
         assert "macd_histogram_8_21_5" in sym
@@ -210,11 +219,11 @@ class TestPrecomputeBOLL:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "boll_upper_20_2.0" in sym
         assert "boll_upper" in sym
         assert "boll_middle_20_2.0" in sym
@@ -234,11 +243,11 @@ class TestPrecomputeBOLL:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "boll_lower_15_1.5" in sym
         # Default also included
         assert "boll_lower_20_2.0" in sym
@@ -260,11 +269,11 @@ class TestPrecomputeRSI:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "rsi_7" in sym
         # Default also included
         assert "rsi_14" in sym
@@ -282,11 +291,11 @@ class TestPrecomputeRSI:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "rsi_14" in sym
         assert "rsi" in sym
 
@@ -306,11 +315,11 @@ class TestPrecomputeDMA:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "dma_5_30" in sym
         assert "ama_5_30" in sym
         # Default also included
@@ -330,11 +339,11 @@ class TestPrecomputeDMA:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         assert "dma_10_50" in sym
         assert "ama_10_50" in sym
         assert "dma" in sym
@@ -358,11 +367,11 @@ class TestPrecomputeCrossTarget:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
-        sym = result[SYMBOL]
+        sym = result[SYMBOL]["daily"]
         # Both dif and dea should be precomputed with custom params
         assert "macd_dif_8_21_5" in sym
         assert "macd_dea_8_21_5" in sym
@@ -388,18 +397,20 @@ class TestPrecomputeMultipleSymbols:
         )
         result = _precompute_exit_indicators(
             {
-                sym1: [_make_kline_bar(c, sym1) for c in closes1],
-                sym2: [_make_kline_bar(c, sym2) for c in closes2],
+                "daily": {
+                    sym1: [_make_kline_bar(c, sym1) for c in closes1],
+                    sym2: [_make_kline_bar(c, sym2) for c in closes2],
+                },
             },
             config,
             {sym1: ic1, sym2: ic2},
         )
         assert sym1 in result
         assert sym2 in result
-        assert "rsi_7" in result[sym1]
-        assert "rsi_7" in result[sym2]
+        assert "rsi_7" in result[sym1]["daily"]
+        assert "rsi_7" in result[sym2]["daily"]
         # Values should differ between symbols
-        assert result[sym1]["rsi_7"] != result[sym2]["rsi_7"]
+        assert result[sym1]["daily"]["rsi_7"] != result[sym2]["daily"]["rsi_7"]
 
 
 class TestPrecomputeNonIndicatorConditions:
@@ -416,10 +427,65 @@ class TestPrecomputeNonIndicatorConditions:
             ],
         )
         result = _precompute_exit_indicators(
-            {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+            _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
         # close/volume/turnover are read directly from IndicatorCache,
         # no exit_indicator_cache entries needed
         assert result == {}
+
+
+class TestPrecomputeMinuteFreq:
+    """Minute frequency kline data should use kline_data[freq] (Req 13.1)."""
+
+    def test_5min_freq_uses_minute_kline_data(self):
+        """5min freq conditions should compute from kline_data['5min']."""
+        ic = _make_indicator_cache(CLOSES)
+        min_closes = [10.0 + 0.05 * i for i in range(120)]
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="5min", indicator="rsi", operator=">",
+                    threshold=80.0,
+                ),
+            ],
+        )
+        result = _precompute_exit_indicators(
+            {
+                "daily": {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+                "5min": {SYMBOL: [_make_kline_bar(c) for c in min_closes]},
+            },
+            config,
+            {SYMBOL: ic},
+        )
+        assert SYMBOL in result
+        assert "5min" in result[SYMBOL]
+        assert "rsi_14" in result[SYMBOL]["5min"]
+        assert "rsi" in result[SYMBOL]["5min"]
+        # Length should match minute data, not daily
+        assert len(result[SYMBOL]["5min"]["rsi_14"]) == len(min_closes)
+
+    def test_minute_freq_migration(self):
+        """Legacy 'minute' freq should be mapped to '1min'."""
+        ic = _make_indicator_cache(CLOSES)
+        min_closes = [10.0 + 0.05 * i for i in range(120)]
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="1min", indicator="ma", operator=">",
+                    threshold=10.0, params={"period": 5},
+                ),
+            ],
+        )
+        result = _precompute_exit_indicators(
+            {
+                "daily": {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
+                "1min": {SYMBOL: [_make_kline_bar(c) for c in min_closes]},
+            },
+            config,
+            {SYMBOL: ic},
+        )
+        assert SYMBOL in result
+        assert "1min" in result[SYMBOL]
+        assert "ma_5" in result[SYMBOL]["1min"]

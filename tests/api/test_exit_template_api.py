@@ -59,6 +59,7 @@ def _make_template(
     name: str = "tpl-1",
     description: str | None = "desc",
     template_id: UUID | None = None,
+    is_system: bool = False,
 ) -> ExitConditionTemplate:
     t = MagicMock(spec=ExitConditionTemplate)
     t.id = template_id or uuid4()
@@ -66,6 +67,7 @@ def _make_template(
     t.name = name
     t.description = description
     t.exit_conditions = _VALID_EXIT_CONDITIONS
+    t.is_system = is_system
     t.created_at = datetime.now(timezone.utc)
     t.updated_at = datetime.now(timezone.utc)
     return t
@@ -571,3 +573,303 @@ class TestDeleteExitTemplate:
         resp = await client.delete(f"/api/v1/backtest/exit-templates/{fake_id}")
         assert resp.status_code == 404
         assert "模版不存在" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# 系统模版 API 保护
+# ---------------------------------------------------------------------------
+
+
+class TestSystemTemplateProtection:
+    """Validates: Requirements 12.1, 12.3
+
+    验证系统内置模版的 API 保护行为：
+    - 列表接口返回系统模版 + 用户模版，系统模版排在前面
+    - PUT 系统模版返回 403
+    - DELETE 系统模版返回 403
+    - GET 系统模版正常返回
+    """
+
+    @pytest.mark.anyio
+    async def test_list_returns_system_templates_before_user_templates(
+        self, client: AsyncClient
+    ):
+        """GET /exit-templates 返回系统模版 + 用户模版，系统模版排在前面。"""
+        user = _make_user()
+        sys_tpl = _make_template(
+            user_id=uuid4(), name="RSI 超买平仓", is_system=True
+        )
+        user_tpl = _make_template(
+            user_id=user.id, name="我的模版", is_system=False
+        )
+        # Return system template first (matching the ORDER BY is_system DESC)
+        ordered_list = [sys_tpl, user_tpl]
+
+        async def mock_execute(stmt):
+            return _MockScalar(ordered_list)
+
+        session = AsyncMock()
+        session.execute = mock_execute
+
+        app.dependency_overrides[get_current_user] = _override_auth(user)
+        app.dependency_overrides[get_pg_session] = _override_pg(session)
+
+        resp = await client.get("/api/v1/backtest/exit-templates")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 2
+        # System template comes first
+        assert data[0]["is_system"] is True
+        assert data[0]["name"] == "RSI 超买平仓"
+        # User template comes second
+        assert data[1]["is_system"] is False
+        assert data[1]["name"] == "我的模版"
+
+    @pytest.mark.anyio
+    async def test_update_system_template_returns_403(self, client: AsyncClient):
+        """PUT /exit-templates/{system_id} 返回 403，错误信息为 '系统内置模版不可修改'。"""
+        user = _make_user()
+        sys_tpl = _make_template(
+            user_id=uuid4(), name="MACD 死叉平仓", is_system=True
+        )
+
+        async def mock_execute(stmt):
+            return _MockScalar(sys_tpl)
+
+        session = AsyncMock()
+        session.execute = mock_execute
+
+        app.dependency_overrides[get_current_user] = _override_auth(user)
+        app.dependency_overrides[get_pg_session] = _override_pg(session)
+
+        resp = await client.put(
+            f"/api/v1/backtest/exit-templates/{sys_tpl.id}",
+            json={"name": "hijacked-name"},
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "系统内置模版不可修改"
+
+    @pytest.mark.anyio
+    async def test_delete_system_template_returns_403(self, client: AsyncClient):
+        """DELETE /exit-templates/{system_id} 返回 403，错误信息为 '系统内置模版不可删除'。"""
+        user = _make_user()
+        sys_tpl = _make_template(
+            user_id=uuid4(), name="布林带上轨突破回落", is_system=True
+        )
+
+        async def mock_execute(stmt):
+            return _MockScalar(sys_tpl)
+
+        session = AsyncMock()
+        session.execute = mock_execute
+
+        app.dependency_overrides[get_current_user] = _override_auth(user)
+        app.dependency_overrides[get_pg_session] = _override_pg(session)
+
+        resp = await client.delete(
+            f"/api/v1/backtest/exit-templates/{sys_tpl.id}"
+        )
+        assert resp.status_code == 403
+        assert resp.json()["detail"] == "系统内置模版不可删除"
+
+    @pytest.mark.anyio
+    async def test_get_system_template_returns_200(self, client: AsyncClient):
+        """系统模版可通过 GET /exit-templates/{id} 正常获取。"""
+        user = _make_user()
+        sys_tpl = _make_template(
+            user_id=uuid4(), name="均线空头排列", is_system=True
+        )
+
+        async def mock_execute(stmt):
+            return _MockScalar(sys_tpl)
+
+        session = AsyncMock()
+        session.execute = mock_execute
+
+        app.dependency_overrides[get_current_user] = _override_auth(user)
+        app.dependency_overrides[get_pg_session] = _override_pg(session)
+
+        resp = await client.get(
+            f"/api/v1/backtest/exit-templates/{sys_tpl.id}"
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == str(sys_tpl.id)
+        assert data["name"] == "均线空头排列"
+        assert data["is_system"] is True
+
+
+# ---------------------------------------------------------------------------
+# 系统内置模版 seed 数据验证
+# ---------------------------------------------------------------------------
+
+
+def _load_system_templates():
+    """Load SYSTEM_TEMPLATES from the alembic migration file (numeric prefix)."""
+    import importlib.util
+    from pathlib import Path
+
+    migration_path = Path("alembic/versions/007_seed_system_exit_templates.py")
+    spec = importlib.util.spec_from_file_location(
+        "seed_system_exit_templates_007", migration_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.SYSTEM_TEMPLATES
+
+
+class TestSystemTemplateSeedData:
+    """Validates: Requirements 12.1, 12.2
+
+    验证 alembic migration 007 中定义的 5 个系统内置平仓条件模版
+    的数据结构正确性，无需实际数据库连接。
+    """
+
+    def test_seed_data_contains_at_least_5_system_templates(self):
+        """数据库 seed 中存在至少 5 个 is_system=True 的模版定义。"""
+        templates = _load_system_templates()
+        assert len(templates) >= 5
+
+    def test_seed_template_names_are_correct(self):
+        """5 个系统模版的名称与预期一致。"""
+        templates = _load_system_templates()
+        expected_names = {
+            "RSI 超买平仓",
+            "MACD 死叉平仓",
+            "布林带上轨突破回落",
+            "均线空头排列",
+            "量价背离",
+        }
+        actual_names = {tpl["name"] for tpl in templates}
+        assert expected_names == actual_names
+
+    def test_seed_template_exit_conditions_structure(self):
+        """每个系统模版的 exit_conditions 包含 conditions 列表和 logic 字段。"""
+        templates = _load_system_templates()
+        for tpl in templates:
+            ec = tpl["exit_conditions"]
+            assert "conditions" in ec, f"模版 '{tpl['name']}' 缺少 conditions 字段"
+            assert "logic" in ec, f"模版 '{tpl['name']}' 缺少 logic 字段"
+            assert isinstance(ec["conditions"], list)
+            assert len(ec["conditions"]) > 0, f"模版 '{tpl['name']}' 的 conditions 为空"
+            assert ec["logic"] in ("AND", "OR")
+
+    def test_seed_template_exit_conditions_deserialize(self):
+        """系统模版的 exit_conditions 可通过 ExitConditionConfig.from_dict() 正确反序列化。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        for tpl in templates:
+            config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+            assert isinstance(config, ExitConditionConfig), (
+                f"模版 '{tpl['name']}' 反序列化失败"
+            )
+            assert len(config.conditions) == len(tpl["exit_conditions"]["conditions"])
+            assert config.logic == tpl["exit_conditions"]["logic"]
+
+    def test_seed_template_conditions_have_valid_fields(self):
+        """反序列化后的每条 ExitCondition 字段值合法。"""
+        from app.core.schemas import (
+            ExitConditionConfig,
+            VALID_FREQS,
+            VALID_INDICATORS,
+            VALID_OPERATORS,
+        )
+
+        templates = _load_system_templates()
+        for tpl in templates:
+            config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+            for cond in config.conditions:
+                assert cond.freq in VALID_FREQS, (
+                    f"模版 '{tpl['name']}' 条件 freq='{cond.freq}' 不合法"
+                )
+                assert cond.indicator in VALID_INDICATORS, (
+                    f"模版 '{tpl['name']}' 条件 indicator='{cond.indicator}' 不合法"
+                )
+                assert cond.operator in VALID_OPERATORS, (
+                    f"模版 '{tpl['name']}' 条件 operator='{cond.operator}' 不合法"
+                )
+
+    def test_seed_template_rsi_overbought(self):
+        """RSI 超买平仓模版配置正确：RSI > 80。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        tpl = next(t for t in templates if t["name"] == "RSI 超买平仓")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.indicator == "rsi"
+        assert c.operator == ">"
+        assert c.threshold == 80.0
+
+    def test_seed_template_macd_death_cross(self):
+        """MACD 死叉平仓模版配置正确：MACD_DIF cross_down MACD_DEA。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        tpl = next(t for t in templates if t["name"] == "MACD 死叉平仓")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.indicator == "macd_dif"
+        assert c.operator == "cross_down"
+        assert c.cross_target == "macd_dea"
+
+    def test_seed_template_boll_upper_pullback(self):
+        """布林带上轨突破回落模版配置正确：close cross_down boll_upper。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        tpl = next(t for t in templates if t["name"] == "布林带上轨突破回落")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.indicator == "close"
+        assert c.operator == "cross_down"
+        assert c.cross_target == "boll_upper"
+
+    def test_seed_template_ma_bearish_alignment(self):
+        """均线空头排列模版配置正确：MA5 cross_down MA10 AND MA10 cross_down MA20。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        tpl = next(t for t in templates if t["name"] == "均线空头排列")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 2
+        assert config.logic == "AND"
+        # First condition: MA5 cross_down MA10
+        c0 = config.conditions[0]
+        assert c0.indicator == "ma"
+        assert c0.operator == "cross_down"
+        assert c0.cross_target == "ma"
+        assert c0.params.get("period") == 5
+        assert c0.params.get("cross_period") == 10
+        # Second condition: MA10 cross_down MA20
+        c1 = config.conditions[1]
+        assert c1.indicator == "ma"
+        assert c1.operator == "cross_down"
+        assert c1.cross_target == "ma"
+        assert c1.params.get("period") == 10
+        assert c1.params.get("cross_period") == 20
+
+    def test_seed_template_volume_price_divergence(self):
+        """量价背离模版配置正确：close cross_down MA5 AND RSI > 70。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_system_templates()
+        tpl = next(t for t in templates if t["name"] == "量价背离")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 2
+        assert config.logic == "AND"
+        # First condition: close cross_down ma (period=5)
+        c0 = config.conditions[0]
+        assert c0.indicator == "close"
+        assert c0.operator == "cross_down"
+        assert c0.cross_target == "ma"
+        assert c0.params.get("period") == 5
+        # Second condition: RSI > 70
+        c1 = config.conditions[1]
+        assert c1.indicator == "rsi"
+        assert c1.operator == ">"
+        assert c1.threshold == 70.0
