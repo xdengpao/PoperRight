@@ -1,0 +1,151 @@
+# Implementation Plan
+
+## Overview
+
+修复分钟频率平仓条件评估中 `bar_index` 索引错位的 bug。核心变更：在 `_precompute_exit_indicators()` 中构建 `minute_day_ranges` 映射，在 `ExitConditionEvaluator` 中新增日内扫描逻辑，将分钟频率条件从单 `bar_index` 查找改为遍历该交易日内所有分钟 bar。日频条件保持不变。
+
+## Task List
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Minute-frequency index misalignment
+  - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the bug exists
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases — minute-frequency conditions where `bar_index` (daily index) is used to directly index minute cache
+  - Create test file `tests/properties/test_minute_index_alignment_properties.py`
+  - Test scenario 1 (numeric): Configure `freq="5min"`, `rsi > 80`. Build minute cache where day 5's minute bars (indices 240–287) have RSI=85, but index 5 has RSI=50. Assert evaluator triggers for day 5 (from Bug Condition: `resolved_freq ∈ {"1min", "5min", "15min", "30min", "60min"}`)
+  - Test scenario 2 (cross): Configure `freq="5min"`, MACD DIF `cross_down` DEA. Build minute cache where day 3's bars show a crossover at indices 144–145, but indices 2–3 show no crossover. Assert evaluator triggers for day 3
+  - Test scenario 3 (mixed AND): Configure daily RSI > 80 AND 5min close < 95. Daily RSI at `bar_index=10` is 85 (satisfied). 5min close at index 10 is 100 (not satisfied), but day 10's minute bars include close=90 (satisfied). Assert AND combination triggers
+  - The test assertions match the Expected Behavior Properties from design: for minute-frequency conditions, the evaluator SHALL scan all minute bars within that day's range
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves the bug exists because the evaluator uses `bar_index` directly instead of scanning the day's minute bar range)
+  - Document counterexamples found to understand root cause
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.3, 2.4, 2.5_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Daily-frequency evaluation unchanged
+  - **IMPORTANT**: Follow observation-first methodology
+  - Observe behavior on UNFIXED code for daily-frequency conditions (cases where `isBugCondition` returns false: `resolved_freq = "daily"`)
+  - Observe: `ExitConditionEvaluator.evaluate()` with `freq="daily"`, numeric operators (`>`, `<`, `>=`, `<=`), and `bar_index` produces `(triggered, reason)` based on single-value lookup
+  - Observe: `ExitConditionEvaluator.evaluate()` with `freq="daily"`, cross operators (`cross_up`, `cross_down`), and `bar_index` produces correct cross detection
+  - Observe: `ExitConditionConfig(conditions=[])` returns `(False, None)`
+  - Observe: AND/OR logic for daily-only configs produces correct combination results
+  - Write property-based tests in `tests/properties/test_minute_index_alignment_properties.py`:
+    - Property: For any daily-frequency exit condition with arbitrary indicator values and thresholds, the evaluator produces the same `(triggered, reason)` result regardless of whether `minute_day_ranges` is passed (from Preservation Requirements in design)
+    - Property: For any daily-frequency cross condition with arbitrary consecutive indicator/target pairs, cross detection is unchanged
+    - Property: Empty conditions always return `(False, None)`
+    - Property: AND/OR logic for daily-only configs produces identical results with or without `minute_day_ranges`
+  - Verify tests pass on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
+
+- [ ] 3. Build `minute_day_ranges` mapping in `_precompute_exit_indicators()`
+  - [x] 3.1 Add `_build_minute_day_ranges()` helper function in `app/services/backtest_engine.py`
+    - Accept `kline_data: dict[str, dict[str, list[KlineBar]]]` and `existing_cache: dict[str, IndicatorCache]`
+    - For each minute frequency (non-"daily") in `kline_data`, group minute bars by `time.date()` to determine day boundaries
+    - Build mapping `{symbol: {freq: [(start_idx, end_idx), ...]}}` where each tuple maps a trading day (by its position in the daily sorted_dates list) to start/end indices in the minute cache (closed interval)
+    - Align day indices with the daily K-line date order from `existing_cache` symbols' sorted dates
+    - Return the mapping
+    - _Bug_Condition: isBugCondition(input) where resolved_freq ∈ {"1min", "5min", "15min", "30min", "60min"}_
+    - _Expected_Behavior: minute_day_ranges[freq][bar_index] = (start_idx, end_idx) for the trading day_
+    - _Preservation: Daily-frequency conditions unaffected — no minute_day_ranges needed_
+    - _Requirements: 2.2_
+  - [x] 3.2 Call `_build_minute_day_ranges()` from `_precompute_exit_indicators()` and return alongside cache
+    - Modify `_precompute_exit_indicators()` to also return `minute_day_ranges` (change return type to a tuple or add a second return value)
+    - Build `minute_day_ranges` from the minute kline data passed to the function
+    - _Requirements: 2.2, 2.3_
+  - [x] 3.3 Write unit tests for `_build_minute_day_ranges()` in `tests/services/test_precompute_exit_indicators.py`
+    - Test with varying bars per day (e.g., 48 bars/day for 5min, 240 bars/day for 1min)
+    - Test with multiple trading days and verify ranges are contiguous, non-overlapping, and cover all bars
+    - Test with single-bar days and empty data
+    - Test alignment with daily K-line date order
+    - _Requirements: 2.2_
+
+- [ ] 4. Implement intra-day scanning in `ExitConditionEvaluator`
+  - [x] 4.1 Add `minute_day_ranges` parameter to `evaluate()` in `app/services/exit_condition_evaluator.py`
+    - Add optional parameter `minute_day_ranges: dict[str, list[tuple[int, int]]] | None = None` (keyed by resolved freq)
+    - In the per-condition loop, after resolving `freq`, check if `freq != "daily"` and `minute_day_ranges` is available
+    - If so, look up `day_range = minute_day_ranges[freq][bar_index]` and route to `_evaluate_single_minute_scanning()`
+    - If `bar_index` is out of range for `minute_day_ranges`, log WARNING and return `(False, "")`
+    - If `minute_day_ranges` is None for a minute freq, fall back to existing daily cache behavior (unchanged)
+    - _Bug_Condition: isBugCondition(input) where resolved_freq ∈ {"1min", "5min", "15min", "30min", "60min"}_
+    - _Expected_Behavior: Route minute-frequency conditions to intra-day scanning_
+    - _Preservation: Daily-frequency conditions continue to use _evaluate_single() with bar_index_
+    - _Requirements: 2.1, 2.3, 2.5, 2.6, 3.1_
+  - [x] 4.2 Implement `_evaluate_single_minute_scanning()` method
+    - For numeric operators (`>`, `<`, `>=`, `<=`): iterate `range(start_idx, end_idx + 1)`, return `(True, reason)` if ANY bar satisfies the condition
+    - For cross operators (`cross_up`, `cross_down`): iterate `range(start_idx + 1, end_idx + 1)`, check each consecutive pair `(bar_idx - 1, bar_idx)` for crossover, return `(True, reason)` if ANY pair shows a cross
+    - Handle NaN values gracefully (skip bar, continue scanning)
+    - Handle missing day range (log WARNING, return `(False, "")`)
+    - Reason format matches daily conditions (e.g., `"RSI > 80.0"`, `"MACD_DIF cross_down MACD_DEA"`)
+    - _Bug_Condition: isBugCondition(input) where resolved_freq ∈ {"1min", "5min", "15min", "30min", "60min"}_
+    - _Expected_Behavior: Scan all minute bars in day range, trigger if ANY satisfies condition_
+    - _Requirements: 2.1, 2.3, 2.4, 2.7_
+  - [x] 4.3 Write unit tests for `_evaluate_single_minute_scanning()` in `tests/services/test_exit_condition_evaluator.py`
+    - Test numeric condition with known day range where one bar satisfies threshold
+    - Test numeric condition where no bar satisfies threshold
+    - Test cross condition with known day range where one pair shows crossover
+    - Test cross condition where no pair shows crossover
+    - Test edge cases: single-bar day range, NaN values in minute cache, empty day range
+    - Test that daily-frequency conditions are NOT affected by `minute_day_ranges`
+    - _Requirements: 2.1, 2.3, 2.4, 2.6, 3.1_
+
+- [ ] 5. Wire up the pipeline
+  - [x] 5.1 Update `_check_sell_conditions()` in `app/services/backtest_engine.py`
+    - Accept new parameter `minute_day_ranges`
+    - Pass `minute_day_ranges` (scoped to the position's symbol) to `evaluator.evaluate()`
+    - _Bug_Condition: isBugCondition(input) where resolved_freq ∈ {"1min", "5min", "15min", "30min", "60min"}_
+    - _Expected_Behavior: evaluator receives minute_day_ranges to resolve daily bar_index to minute ranges_
+    - _Preservation: When minute_day_ranges is None, behavior identical to before_
+    - _Requirements: 2.1, 2.3, 2.5, 3.1, 3.2_
+  - [x] 5.2 Update `_run_backtest_strategy_driven()` in `app/services/backtest_engine.py`
+    - Capture `minute_day_ranges` from the updated `_precompute_exit_indicators()` return value
+    - Pass `minute_day_ranges` to `_check_sell_conditions()` in the per-day loop
+    - _Requirements: 2.1, 2.3, 3.1_
+  - [x] 5.3 Write unit test verifying `_check_sell_conditions()` passes `minute_day_ranges` to evaluator
+    - In `tests/services/test_exit_condition_integration.py`, add test that configures a minute-frequency condition and verifies the evaluator receives `minute_day_ranges`
+    - _Requirements: 2.1, 2.3_
+
+- [ ] 6. Fix checking tests — verify the fix works
+  - [x] 6.1 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Minute-frequency intra-day scanning triggers correctly
+    - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Run bug condition exploration test from step 1
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
+    - _Requirements: 2.1, 2.3, 2.4, 2.5_
+  - [x] 6.2 Verify preservation tests still pass
+    - **Property 2: Preservation** - Daily-frequency evaluation unchanged
+    - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
+    - Run preservation property tests from step 2
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix (no regressions)
+  - [x] 6.3 Write additional fix-checking tests for minute-frequency conditions
+    - In `tests/services/test_exit_condition_evaluator.py`, add tests:
+    - Test 5min RSI numeric condition triggers when any minute bar in day range satisfies threshold
+    - Test 5min MACD cross_down triggers when any consecutive pair in day range shows crossover
+    - Test minute condition does NOT trigger when no bar in day range satisfies condition
+    - Test out-of-range `bar_index` for `minute_day_ranges` logs warning and returns False
+    - Test missing minute data for a trading day skips gracefully
+    - _Requirements: 2.1, 2.3, 2.4, 2.6, 2.7_
+
+- [ ] 7. Write integration tests for the full pipeline
+  - [x] 7.1 Add integration tests in `tests/services/test_exit_condition_integration.py`
+    - Test full `_check_sell_conditions()` flow with minute-frequency conditions and real-shaped minute kline data (e.g., 48 bars/day for 5min)
+    - Test that risk conditions (stop-loss, trend break, trailing stop, max holding days) still take priority over minute-frequency exit conditions
+    - Test mixed daily + minute conditions with AND/OR logic produce correct combined results
+    - Test backward compatibility: existing daily-only exit condition tests continue to pass without modification
+    - Test `exit_conditions=None` produces no EXIT_CONDITION signals (unchanged)
+    - _Requirements: 2.1, 2.5, 3.1, 3.2, 3.4, 3.5, 3.7_
+
+- [x] 8. Checkpoint — Ensure all tests pass
+  - Run `pytest tests/properties/test_minute_index_alignment_properties.py` — all property tests pass
+  - Run `pytest tests/services/test_exit_condition_evaluator.py` — all evaluator tests pass
+  - Run `pytest tests/services/test_exit_condition_integration.py` — all integration tests pass
+  - Run `pytest tests/services/test_precompute_exit_indicators.py` — all precompute tests pass
+  - Run `pytest tests/properties/test_exit_condition_properties.py` — existing property tests still pass
+  - Ensure all tests pass, ask the user if questions arise.

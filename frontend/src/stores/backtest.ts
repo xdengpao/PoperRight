@@ -507,3 +507,34 @@ export const useBacktestStore = defineStore('backtest', () => {
     deleteExitTemplate,
   }
 })
+
+// ─── 频率标签辅助函数 ──────────────────────────────────────────────────────
+
+const FREQ_LABEL_MAP: Record<string, string> = {
+  '1min': '1分钟',
+  '5min': '5分钟',
+  '15min': '15分钟',
+  '30min': '30分钟',
+  '60min': '60分钟',
+}
+
+/** 从模版条件中提取主要频率标签 */
+export function getTemplateFreqLabel(template: ExitTemplate): string | null {
+  const conditions = template.exit_conditions?.conditions ?? []
+  if (!conditions.length) return null
+
+  const minuteFreqs = new Set(
+    conditions
+      .map(c => c.freq)
+      .filter(f => f !== 'daily')
+  )
+
+  if (minuteFreqs.size === 1) {
+    const freq = [...minuteFreqs][0]
+    return FREQ_LABEL_MAP[freq] ?? null
+  }
+  if (minuteFreqs.size > 1) {
+    return '多频率'
+  }
+  return null
+}

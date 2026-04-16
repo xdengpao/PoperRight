@@ -497,7 +497,7 @@ def _precompute_exit_indicators(
     kline_data: dict[str, dict[str, list[KlineBar]]],
     exit_config: ExitConditionConfig | None,
     existing_cache: dict[str, IndicatorCache],
-) -> dict[str, dict[str, dict[str, list[float]]]]:
+) -> tuple[dict[str, dict[str, dict[str, list[float]]]], dict[str, dict[str, list[tuple[int, int]]]]]:
     """
     为自定义平仓条件补充计算非默认参数的指标，按频率分组。
 
@@ -519,10 +519,13 @@ def _precompute_exit_indicators(
         existing_cache: 现有日K线指标缓存（已基于前复权数据计算）
 
     Returns:
-        {symbol: {freq: {cache_key: values}}} 格式的按频率分组补充缓存。
-        cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5" 等。
+        A tuple of ``(exit_indicator_cache, minute_day_ranges)``:
+        - ``exit_indicator_cache``: ``{symbol: {freq: {cache_key: values}}}`` 格式的
+          按频率分组补充缓存。cache_key 格式如 "ma_10", "rsi_7", "macd_dif_8_21_5" 等。
+        - ``minute_day_ranges``: ``{symbol: {freq: [(start_idx, end_idx), ...]}}`` 格式的
+          分钟K线日内索引范围映射，由 ``_build_minute_day_ranges()`` 构建。
 
-    Requirements: 4.1, 4.2, 4.3, 13.1, 13.2
+    Requirements: 4.1, 4.2, 4.3, 13.1, 13.2, 2.2
     """
     # 指标计算函数与选股引擎（ScreenDataProvider）共享同一实现，
     # 保证回测信号与选股信号的一致性（Requirements 13.3, 13.5）。
@@ -543,7 +546,7 @@ def _precompute_exit_indicators(
     _FREQ_MIGRATION: dict[str, str] = {"minute": "1min"}
 
     if not exit_config or not exit_config.conditions:
-        return {}
+        return {}, {}
 
     # ------------------------------------------------------------------
     # Step 1: Collect all (freq, indicator, params) combos per frequency
@@ -618,7 +621,7 @@ def _precompute_exit_indicators(
             all_freqs.add(freq)
 
     if not all_freqs:
-        return {}
+        return {}, {}
 
     # ------------------------------------------------------------------
     # Helper: compute indicators for a list of closes
@@ -717,7 +720,11 @@ def _precompute_exit_indicators(
                 if freq_cache:
                     result.setdefault(symbol, {})[freq] = freq_cache
 
-    return result
+    # Build minute_day_ranges mapping for minute-frequency conditions
+    # (Requirements 2.2, 2.3)
+    minute_day_ranges = _build_minute_day_ranges(kline_data, existing_cache)
+
+    return result, minute_day_ranges
 
 
 def _collect_indicator_params(
@@ -761,6 +768,91 @@ def _collect_indicator_params(
         short_p = params.get("dma_short", DEFAULT_DMA_SHORT)
         long_p = params.get("dma_long", DEFAULT_DMA_LONG)
         dma_param_sets.add((int(short_p), int(long_p)))
+
+
+# ---------------------------------------------------------------------------
+# 分钟K线日内索引范围映射（需求 2.2：minute_day_ranges）
+# ---------------------------------------------------------------------------
+
+def _build_minute_day_ranges(
+    kline_data: dict[str, dict[str, list[KlineBar]]],
+    existing_cache: dict[str, IndicatorCache],
+) -> dict[str, dict[str, list[tuple[int, int]]]]:
+    """
+    为分钟频率K线数据构建"交易日 → 分钟 bar 索引范围"映射。
+
+    对每个分钟频率（非 "daily"），将分钟 bar 按 ``time.date()`` 分组，
+    然后与日K线的日期顺序对齐，生成每个交易日在分钟缓存中的起止索引（闭区间）。
+
+    Args:
+        kline_data: 按频率和股票代码组织的K线数据
+            格式: {freq: {symbol: [KlineBar, ...]}}
+        existing_cache: 现有日K线指标缓存（用于获取日K线日期顺序）
+
+    Returns:
+        ``{symbol: {freq: [(start_idx, end_idx), ...]}}``
+        列表长度等于该股票日K线的交易日数量。
+        若某个交易日在分钟数据中无对应 bar，则该位置为 ``(-1, -1)``。
+
+    Requirements: 2.2
+    """
+    # Step 1: Build daily sorted dates per symbol from kline_data["daily"]
+    daily_klines = kline_data.get("daily", {})
+    # symbol → sorted list of trading dates (from daily bars)
+    daily_sorted_dates: dict[str, list[date]] = {}
+    for symbol, bars in daily_klines.items():
+        date_set: dict[date, int] = {}
+        for bar in bars:
+            d = bar.time.date()
+            date_set[d] = 0  # just collecting unique dates
+        daily_sorted_dates[symbol] = sorted(date_set.keys())
+
+    # Fallback: if a symbol is in existing_cache but not in daily_klines,
+    # we cannot determine dates (existing_cache only has numeric arrays).
+    # In practice, daily_klines should always be present.
+
+    result: dict[str, dict[str, list[tuple[int, int]]]] = {}
+
+    for freq, freq_symbols in kline_data.items():
+        if freq == "daily":
+            continue  # Only process minute frequencies
+
+        for symbol, bars in freq_symbols.items():
+            if not bars:
+                continue
+
+            sorted_dates = daily_sorted_dates.get(symbol)
+            if not sorted_dates:
+                logger.warning(
+                    "No daily kline dates for symbol %s, skipping minute_day_ranges for freq=%s",
+                    symbol, freq,
+                )
+                continue
+
+            # Step 2: Group minute bars by date, recording (start_idx, end_idx)
+            # Minute bars are assumed to be in chronological order.
+            minute_date_ranges: dict[date, tuple[int, int]] = {}
+            for idx, bar in enumerate(bars):
+                d = bar.time.date()
+                if d not in minute_date_ranges:
+                    minute_date_ranges[d] = (idx, idx)
+                else:
+                    existing_start, _ = minute_date_ranges[d]
+                    minute_date_ranges[d] = (existing_start, idx)
+
+            # Step 3: Align with daily sorted dates
+            # For each daily trading day (by position), look up the minute range
+            day_ranges: list[tuple[int, int]] = []
+            for d in sorted_dates:
+                if d in minute_date_ranges:
+                    day_ranges.append(minute_date_ranges[d])
+                else:
+                    # No minute data for this trading day
+                    day_ranges.append((-1, -1))
+
+            result.setdefault(symbol, {})[freq] = day_ranges
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1614,6 +1706,7 @@ class BacktestEngine:
         date_index: dict[str, KlineDateIndex] | None = None,
         indicator_cache: dict[str, IndicatorCache] | None = None,
         exit_indicator_cache: dict[str, dict[str, dict[str, list[float]]]] | None = None,
+        minute_day_ranges: dict[str, dict[str, list[tuple[int, int]]]] | None = None,
     ) -> _SellSignal | None:
         """
         检查单只持仓标的的卖出条件。
@@ -1731,12 +1824,19 @@ class BacktestEngine:
                             bar_index = -1
 
                     if bar_index >= 0:
+                        # Scope minute_day_ranges to this symbol
+                        sym_minute_day_ranges = (
+                            minute_day_ranges.get(position.symbol)
+                            if minute_day_ranges
+                            else None
+                        )
                         triggered, reason = evaluator.evaluate(
                             config.exit_conditions,
                             position.symbol,
                             bar_index,
                             sym_ic,
                             sym_exit_cache,
+                            minute_day_ranges=sym_minute_day_ranges,
                         )
                         if triggered:
                             sell_reason = "EXIT_CONDITION"
@@ -2140,7 +2240,7 @@ class BacktestEngine:
         exit_kline_data: dict[str, dict[str, list[KlineBar]]] = {"daily": kline_data}
         if minute_kline_data:
             exit_kline_data.update(minute_kline_data)
-        exit_indicator_cache = _precompute_exit_indicators(
+        exit_indicator_cache, minute_day_ranges = _precompute_exit_indicators(
             exit_kline_data, config.exit_conditions, indicator_cache,
         )
         if exit_indicator_cache:
@@ -2178,6 +2278,7 @@ class BacktestEngine:
                     position, trade_date, kline_data, config, date_index,
                     indicator_cache=indicator_cache,
                     exit_indicator_cache=exit_indicator_cache,
+                    minute_day_ranges=minute_day_ranges,
                 )
                 if signal is not None:
                     sell_signals.append(signal)

@@ -68,8 +68,9 @@
                   v-for="tpl in systemTemplates"
                   :key="tpl.id"
                   :value="tpl.id"
+                  :title="tpl.description || ''"
                   class="system-template-option"
-                >[系统] {{ tpl.name }}</option>
+                >[系统{{ freqLabel(tpl) ? '·' + freqLabel(tpl) : '' }}] {{ tpl.name }}</option>
                 <option v-if="userTemplates.length" disabled class="template-separator">──────────</option>
               </template>
               <option v-for="tpl in userTemplates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
@@ -405,8 +406,8 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
-import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS } from '@/stores/backtest'
-import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus } from '@/stores/backtest'
+import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS, getTemplateFreqLabel } from '@/stores/backtest'
+import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus, ExitTemplate } from '@/stores/backtest'
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
@@ -440,6 +441,11 @@ const running = computed(() => store.running)
 // ─── 模版分类（系统 vs 用户）────────────────────────────────────────────────
 const systemTemplates = computed(() => exitTemplates.value.filter(t => t.is_system))
 const userTemplates = computed(() => exitTemplates.value.filter(t => !t.is_system))
+
+/** 获取模版频率标签，用于模版选择器显示 */
+function freqLabel(tpl: ExitTemplate): string | null {
+  return getTemplateFreqLabel(tpl)
+}
 const optimizing = ref(false)
 const result = computed(() => store.result)
 const optimizeResults = computed(() => store.optimizeResults)

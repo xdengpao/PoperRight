@@ -649,7 +649,7 @@ class TestForwardAdjustedKlineIntegration:
         )
 
         # kline_data 可以为空 dict（daily 频率复用 existing_cache）
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             kline_data={},
             exit_config=exit_config,
             existing_cache=existing_cache,
@@ -768,7 +768,7 @@ class TestForwardAdjustedKlineIntegration:
             logger.warning("股票 %s 无前复权因子数据，使用原始K线", symbol)
 
         # _precompute_exit_indicators 仍能正常计算
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             kline_data={},
             exit_config=exit_config,
             existing_cache=existing_cache,
@@ -849,7 +849,7 @@ class TestForwardAdjustedKlineIntegration:
 
         kline_data = {"5min": {symbol: minute_bars}}
 
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             kline_data=kline_data,
             exit_config=exit_config,
             existing_cache=existing_cache,
@@ -875,3 +875,945 @@ class TestForwardAdjustedKlineIntegration:
 
         # 日K线和分钟K线的 MA 值应不同（因为 closes 不同）
         assert abs(daily_ma[9] - minute_ma[9]) > 1e-6
+
+
+# ---------------------------------------------------------------------------
+# 需求 2.1, 2.3: _check_sell_conditions 传递 minute_day_ranges 到评估器
+# ---------------------------------------------------------------------------
+
+
+class TestCheckSellConditionsPassesMinuteDayRanges:
+    """需求 2.1, 2.3: _check_sell_conditions() 将 minute_day_ranges 传递给评估器，
+    使分钟频率条件通过日内扫描正确触发。
+
+    验证完整管道：_check_sell_conditions → evaluator.evaluate(minute_day_ranges=...)
+    → _evaluate_single_minute_scanning() 扫描日内分钟 bar 范围。
+    """
+
+    def test_minute_condition_triggers_via_minute_day_ranges(self):
+        """
+        配置 5min RSI > 80 条件。日K线 bar_index=5 对应的分钟缓存 index 5
+        的 RSI=50（不满足），但 minute_day_ranges 将 day 5 映射到分钟缓存
+        索引范围 (240, 287)，其中 index 250 的 RSI=85（满足）。
+
+        验证 _check_sell_conditions 正确传递 minute_day_ranges，使评估器
+        扫描日内范围并触发条件。
+        """
+        symbol = "600519.SH"
+
+        # 生成 30 根日K线（稳定上涨，不触发任何风控）
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # 5min RSI > 80 条件
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="5min", indicator="rsi", operator=">", threshold=80.0,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        # 构建 5min RSI 缓存：300 根分钟 bar（模拟 ~6 天 × 48 根/天）
+        # index 5 的 RSI=50（旧代码会读这个值，不触发）
+        # index 240~287 对应 day 5 的分钟 bar，其中 index 250 的 RSI=85
+        rsi_values = [50.0] * 300
+        rsi_values[250] = 85.0  # day 5 内的某根 bar 满足 RSI > 80
+
+        exit_ic = {
+            symbol: {
+                "5min": {"rsi": rsi_values},
+            },
+        }
+
+        # minute_day_ranges: day 5 → (240, 287)
+        # 构建 30 天的映射（与日K线天数对齐）
+        day_ranges_5min: list[tuple[int, int]] = []
+        for day_idx in range(30):
+            start = day_idx * 48
+            end = start + 47
+            day_ranges_5min.append((start, end))
+
+        minute_day_ranges = {
+            symbol: {"5min": day_ranges_5min},
+        }
+
+        # 使用 bar_index=5 对应的交易日
+        trade_date = bars[5].time.date()
+
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+        assert "RSI > 80" in result.reason
+
+    def test_minute_condition_not_triggered_when_no_bar_satisfies(self):
+        """
+        配置 5min RSI > 80 条件，但 day 5 的所有分钟 bar RSI 均为 50。
+        验证条件不触发（返回 None）。
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="5min", indicator="rsi", operator=">", threshold=80.0,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        # 所有 RSI 值均为 50（不满足 > 80）
+        rsi_values = [50.0] * 300
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+
+        day_ranges_5min = [(day_idx * 48, day_idx * 48 + 47) for day_idx in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges_5min}}
+
+        trade_date = bars[5].time.date()
+
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is None
+
+    def test_minute_day_ranges_none_falls_back_to_daily_behavior(self):
+        """
+        当 minute_day_ranges 为 None 时，分钟频率条件回退到使用
+        bar_index 直接索引（向后兼容）。
+
+        验证 _check_sell_conditions 在 minute_day_ranges=None 时
+        不会崩溃，且行为与旧代码一致。
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # 5min RSI > 80 条件，但不提供 minute_day_ranges
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="5min", indicator="rsi", operator=">", threshold=80.0,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        # RSI 缓存中 index 5 的值为 85（直接索引会触发）
+        rsi_values = [50.0] * 30
+        rsi_values[5] = 85.0
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+
+        trade_date = bars[5].time.date()
+
+        # minute_day_ranges=None → 回退到直接 bar_index 索引
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=None,
+        )
+
+        # 回退行为：bar_index=5 直接索引 5min 缓存，RSI=85 > 80 → 触发
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Task 7.1: Full pipeline integration tests for minute-frequency conditions
+# Requirements: 2.1, 2.5, 3.1, 3.2, 3.4, 3.5, 3.7
+# ---------------------------------------------------------------------------
+
+
+def _make_minute_bars(
+    symbol: str = "600519.SH",
+    start_date: date = date(2024, 1, 2),
+    n_days: int = 30,
+    bars_per_day: int = 48,
+    base_close: float = 100.0,
+    freq: str = "5min",
+) -> list[KlineBar]:
+    """Generate minute-frequency KlineBars with `bars_per_day` bars per trading day.
+
+    Each bar gets a unique intra-day timestamp (minute offset) so that
+    ``bar.time.date()`` groups correctly by trading day.
+    """
+    bars: list[KlineBar] = []
+    d = start_date
+    for day_idx in range(n_days):
+        for bar_idx in range(bars_per_day):
+            c = base_close + day_idx * 0.5 + bar_idx * 0.01
+            # Distribute bars across trading hours (09:30 – ~15:00)
+            total_minutes = 30 + bar_idx * 5  # 5-min intervals from 09:30
+            hour = 9 + total_minutes // 60
+            minute = total_minutes % 60
+            t = datetime.combine(d, datetime.min.time()).replace(
+                hour=hour, minute=minute,
+            )
+            bars.append(
+                KlineBar(
+                    time=t,
+                    symbol=symbol,
+                    freq=freq,
+                    open=Decimal(str(c)),
+                    high=Decimal(str(c + 0.5)),
+                    low=Decimal(str(c - 0.5)),
+                    close=Decimal(str(c)),
+                    volume=5000,
+                    amount=Decimal(str(c * 5000)),
+                    turnover=Decimal("3.0"),
+                    vol_ratio=Decimal("1.0"),
+                )
+            )
+        # Advance to next weekday
+        d += timedelta(days=1)
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+    return bars
+
+
+class TestFullPipelineMinuteFrequencyIntegration:
+    """Task 7.1: Full pipeline integration tests for minute-frequency exit conditions.
+
+    Validates: Requirements 2.1, 2.5, 3.1, 3.2, 3.4, 3.5, 3.7
+    """
+
+    def test_full_pipeline_with_real_shaped_5min_data(self):
+        """
+        End-to-end: 5min RSI > 80 condition with 48 bars/day.
+
+        Build minute_day_ranges via _build_minute_day_ranges(), construct
+        real-shaped 5min kline data, and verify the full _check_sell_conditions
+        pipeline triggers when a minute bar within the target day satisfies
+        the condition.
+
+        Validates: Requirements 2.1, 3.7
+        """
+        from app.services.backtest_engine import _build_minute_day_ranges
+
+        symbol = "600519.SH"
+        n_days = 10
+        bars_per_day = 48
+
+        # Daily bars
+        daily_closes = [100.0 + i * 0.3 for i in range(n_days)]
+        daily_bars = _make_bars(symbol=symbol, closes=daily_closes)
+        kline_data_daily = {symbol: daily_bars}
+        date_index = _build_date_index(kline_data_daily)
+        ic = _make_indicator_cache(daily_bars)
+        indicator_cache = {symbol: ic}
+
+        # Minute bars (5min, 48 bars/day)
+        minute_bars = _make_minute_bars(
+            symbol=symbol,
+            start_date=daily_bars[0].time.date(),
+            n_days=n_days,
+            bars_per_day=bars_per_day,
+        )
+
+        # Build minute_day_ranges using the real helper
+        kline_data_for_ranges = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        minute_day_ranges = _build_minute_day_ranges(
+            kline_data_for_ranges, {symbol: ic},
+        )
+
+        # Verify mapping shape
+        assert symbol in minute_day_ranges
+        assert "5min" in minute_day_ranges[symbol]
+        assert len(minute_day_ranges[symbol]["5min"]) == n_days
+
+        # Build RSI cache: all 50.0 except one bar in day 5 has RSI=85
+        total_minute_bars = n_days * bars_per_day
+        rsi_values = [50.0] * total_minute_bars
+        # Day 5 range
+        day5_start, day5_end = minute_day_ranges[symbol]["5min"][5]
+        target_bar = day5_start + 10  # arbitrary bar within day 5
+        rsi_values[target_bar] = 85.0
+
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=daily_bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = daily_bars[5].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data_daily,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+        assert "RSI > 80" in result.reason
+
+    def test_risk_stop_loss_takes_priority_over_minute_exit_condition(self):
+        """
+        Risk condition (stop-loss, priority=1) fires before minute-frequency
+        exit condition evaluation is reached.
+
+        Validates: Requirements 3.2, 3.5
+        """
+        symbol = "600519.SH"
+
+        # Price drops: cost=100, close=90 → 10% loss > 8% stop_loss
+        closes = [100.0] * 5 + [90.0] * 10
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # Minute condition that would also trigger
+        rsi_values = [85.0] * (15 * 48)
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(15)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.08,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            highest_close=100.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[10].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.reason == "STOP_LOSS"
+        assert result.priority == 1
+
+    def test_risk_trend_break_takes_priority_over_minute_exit_condition(self):
+        """
+        TREND_BREAK (priority=2) fires before minute-frequency exit condition.
+
+        Validates: Requirements 3.2, 3.5
+        """
+        symbol = "600519.SH"
+
+        closes = [110.0] * 20 + [100.0] * 10
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        rsi_values = [85.0] * (30 * 48)
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=20,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=90.0,
+            highest_close=110.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[24].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.reason == "TREND_BREAK"
+        assert result.priority == 2
+
+    def test_risk_trailing_stop_takes_priority_over_minute_exit_condition(self):
+        """
+        TRAILING_STOP (priority=3) fires before minute-frequency exit condition.
+
+        Validates: Requirements 3.2, 3.5
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i for i in range(25)] + [115.0] * 5
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        rsi_values = [85.0] * (30 * 48)
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.05,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        # highest_close=125, close=115 → drawdown=8% > 5%
+        position = _make_position(
+            symbol=symbol,
+            cost_price=90.0,
+            highest_close=125.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[28].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.reason == "TRAILING_STOP"
+        assert result.priority == 3
+
+    def test_risk_max_holding_days_takes_priority_over_minute_exit_condition(self):
+        """
+        MAX_HOLDING_DAYS (priority=4) fires before minute-frequency exit condition.
+
+        Validates: Requirements 3.2, 3.5
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        rsi_values = [85.0] * (30 * 48)
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=5,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 10  # 10 - 0 = 10 > 5
+
+        trade_date = bars[20].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.reason == "MAX_HOLDING_DAYS"
+        assert result.priority == 4
+
+    def test_mixed_daily_and_minute_conditions_and_logic(self):
+        """
+        Mixed daily + minute conditions with AND logic.
+
+        Daily close > 105 (satisfied at bar_index=17) AND 5min RSI > 80
+        (satisfied via minute scanning). Both must be true for AND to trigger.
+
+        Validates: Requirements 2.5, 3.1
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # 5min RSI: day 17 has one bar with RSI=85
+        total_bars = 30 * 48
+        rsi_values = [50.0] * total_bars
+        day17_start = 17 * 48
+        rsi_values[day17_start + 20] = 85.0
+
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        # AND: daily close > 105 AND 5min RSI > 80
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="close", operator=">", threshold=105.0),
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+            logic="AND",
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        # bar 17: close = 100 + 17*0.3 = 105.1 > 105 ✓
+        trade_date = bars[17].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+    def test_mixed_daily_and_minute_conditions_and_logic_not_triggered(self):
+        """
+        Mixed daily + minute AND: daily condition satisfied but minute condition
+        NOT satisfied → AND fails, no signal.
+
+        Validates: Requirements 2.5, 3.1
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # All RSI values are 50 (below threshold)
+        rsi_values = [50.0] * (30 * 48)
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="close", operator=">", threshold=105.0),
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+            logic="AND",
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[17].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is None
+
+    def test_mixed_daily_and_minute_conditions_or_logic(self):
+        """
+        Mixed daily + minute conditions with OR logic.
+
+        Daily close > 200 (NOT satisfied) OR 5min RSI > 80 (satisfied via
+        minute scanning). OR means either one triggers.
+
+        Validates: Requirements 2.5, 3.1
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        total_bars = 30 * 48
+        rsi_values = [50.0] * total_bars
+        day10_start = 10 * 48
+        rsi_values[day10_start + 5] = 85.0
+
+        exit_ic = {symbol: {"5min": {"rsi": rsi_values}}}
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="close", operator=">", threshold=200.0),
+                ExitCondition(freq="5min", indicator="rsi", operator=">", threshold=80.0),
+            ],
+            logic="OR",
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[10].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+    def test_exit_conditions_none_produces_no_signal(self):
+        """
+        When exit_conditions=None, no EXIT_CONDITION signal is produced
+        even when minute_day_ranges is provided.
+
+        Validates: Requirements 3.4, 3.5
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        config = _make_config(
+            exit_conditions=None,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[10].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=None,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is None
+
+    def test_backward_compat_daily_only_conditions_unaffected(self):
+        """
+        Existing daily-only exit conditions continue to work identically
+        when minute_day_ranges is provided (but contains no daily entry).
+
+        Validates: Requirements 3.1, 3.4
+        """
+        symbol = "600519.SH"
+
+        closes = [100.0 + i * 0.5 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        # Daily RSI > 80 — provide RSI values in exit_indicator_cache
+        exit_ic = {symbol: {"daily": {"rsi": [85.0] * 30}}}
+
+        # Provide minute_day_ranges (should be ignored for daily conditions)
+        day_ranges = [(d * 48, d * 48 + 47) for d in range(30)]
+        minute_day_ranges = {symbol: {"5min": day_ranges}}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(freq="daily", indicator="rsi", operator=">", threshold=80.0),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[15].time.date()
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=exit_ic,
+            minute_day_ranges=minute_day_ranges,
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert result.reason == "EXIT_CONDITION: RSI > 80.0"

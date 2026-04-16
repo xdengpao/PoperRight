@@ -5,8 +5,10 @@
  * - 条件面板的展开/折叠
  * - 添加/删除条件行
  * - 运算符切换时输入框变化
+ * - 频率标签显示（分钟级模版 vs 日K线模版）
+ * - 模版描述 tooltip 显示
  *
- * 需求: 6.1, 6.2, 6.3, 6.4, 6.7
+ * 需求: 5.1, 5.3, 6.1, 6.2, 6.3, 6.4, 6.7
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -18,10 +20,14 @@ import BacktestView from '../BacktestView.vue'
 
 const mockGet = vi.fn()
 const mockPost = vi.fn()
+const mockPut = vi.fn()
+const mockDelete = vi.fn()
 vi.mock('@/api', () => ({
   apiClient: {
     get: (...args: unknown[]) => mockGet(...args),
     post: (...args: unknown[]) => mockPost(...args),
+    put: (...args: unknown[]) => mockPut(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
   },
 }))
 
@@ -53,6 +59,8 @@ describe('BacktestView - 自定义平仓条件面板', () => {
     setActivePinia(createPinia())
     mockGet.mockReset()
     mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
     // 默认 mock：策略列表和风控配置
     mockGet.mockResolvedValue({ data: [] })
   })
@@ -175,5 +183,128 @@ describe('BacktestView - 自定义平仓条件面板', () => {
     // 应恢复阈值输入框
     expect(wrapper.find('[aria-label="条件1阈值"]').exists()).toBe(true)
     expect(wrapper.find('[aria-label="条件1交叉目标"]').exists()).toBe(false)
+  })
+})
+
+// ─── 需求 5.1, 5.3: 频率标签与 tooltip 显示 ──────────────────────────────────
+
+describe('BacktestView - 模版频率标签与 tooltip 显示', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+    mockGet.mockResolvedValue({ data: [] })
+  })
+
+  /** 构造一个系统模版对象 */
+  function makeSystemTemplate(overrides: Partial<{
+    id: string
+    name: string
+    description: string | null
+    freq: string
+    is_system: boolean
+  }> = {}) {
+    return {
+      id: overrides.id ?? 'tpl-1',
+      name: overrides.name ?? '5分钟RSI超买平仓',
+      description: overrides.description ?? '5分钟RSI超过80时触发',
+      exit_conditions: {
+        conditions: [
+          {
+            freq: overrides.freq ?? '5min',
+            indicator: 'rsi',
+            operator: '>',
+            threshold: 80,
+            cross_target: null,
+            params: {},
+          },
+        ],
+        logic: 'AND' as const,
+      },
+      is_system: overrides.is_system ?? true,
+      created_at: '2024-01-01T00:00:00Z',
+      updated_at: '2024-01-01T00:00:00Z',
+    }
+  }
+
+  // ─── 需求 5.1: 分钟级系统模版显示频率标签 ────────────────────────────────
+
+  it('分钟级系统模版选项显示 [系统·5分钟] 频率标签', async () => {
+    const minuteTemplate = makeSystemTemplate({
+      id: 'tpl-5min',
+      name: '5分钟RSI超买平仓',
+      freq: '5min',
+    })
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/backtest/exit-templates') {
+        return Promise.resolve({ data: [minuteTemplate] })
+      }
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountBacktestView()
+    await wrapper.find('.panel-toggle').trigger('click')
+    await flushPromises()
+
+    const systemOptions = wrapper.findAll('.system-template-option')
+    expect(systemOptions.length).toBe(1)
+    expect(systemOptions[0].text()).toContain('[系统·5分钟]')
+    expect(systemOptions[0].text()).toContain('5分钟RSI超买平仓')
+  })
+
+  // ─── 需求 5.1: 日K线系统模版显示 [系统] 无频率标签 ────────────────────────
+
+  it('日K线系统模版选项显示 [系统] 无频率标签', async () => {
+    const dailyTemplate = makeSystemTemplate({
+      id: 'tpl-daily',
+      name: 'RSI超买平仓',
+      freq: 'daily',
+    })
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/backtest/exit-templates') {
+        return Promise.resolve({ data: [dailyTemplate] })
+      }
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountBacktestView()
+    await wrapper.find('.panel-toggle').trigger('click')
+    await flushPromises()
+
+    const systemOptions = wrapper.findAll('.system-template-option')
+    expect(systemOptions.length).toBe(1)
+    expect(systemOptions[0].text()).toContain('[系统]')
+    expect(systemOptions[0].text()).not.toContain('·')
+    expect(systemOptions[0].text()).toContain('RSI超买平仓')
+  })
+
+  // ─── 需求 5.3: 模版描述作为 tooltip 显示 ─────────────────────────────────
+
+  it('系统模版选项的 title 属性显示模版描述', async () => {
+    const template = makeSystemTemplate({
+      id: 'tpl-tooltip',
+      name: '15分钟MACD死叉平仓',
+      description: '15分钟MACD快线下穿慢线，中短线趋势转弱',
+      freq: '15min',
+    })
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/backtest/exit-templates') {
+        return Promise.resolve({ data: [template] })
+      }
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountBacktestView()
+    await wrapper.find('.panel-toggle').trigger('click')
+    await flushPromises()
+
+    const systemOptions = wrapper.findAll('.system-template-option')
+    expect(systemOptions.length).toBe(1)
+    expect(systemOptions[0].attributes('title')).toBe('15分钟MACD快线下穿慢线，中短线趋势转弱')
   })
 })

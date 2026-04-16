@@ -77,22 +77,24 @@ class TestPrecomputeExitIndicatorsNone:
 
     def test_none_config(self):
         ic = _make_indicator_cache(CLOSES)
-        result = _precompute_exit_indicators(
+        result, minute_day_ranges = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             None,
             {SYMBOL: ic},
         )
         assert result == {}
+        assert minute_day_ranges == {}
 
     def test_empty_conditions(self):
         ic = _make_indicator_cache(CLOSES)
         config = ExitConditionConfig(conditions=[], logic="AND")
-        result = _precompute_exit_indicators(
+        result, minute_day_ranges = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
         )
         assert result == {}
+        assert minute_day_ranges == {}
 
 
 class TestPrecomputeMA:
@@ -111,7 +113,7 @@ class TestPrecomputeMA:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -142,7 +144,7 @@ class TestPrecomputeMA:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -165,7 +167,7 @@ class TestPrecomputeMACD:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -191,7 +193,7 @@ class TestPrecomputeMACD:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -218,7 +220,7 @@ class TestPrecomputeBOLL:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -242,7 +244,7 @@ class TestPrecomputeBOLL:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -268,7 +270,7 @@ class TestPrecomputeRSI:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -290,7 +292,7 @@ class TestPrecomputeRSI:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -314,7 +316,7 @@ class TestPrecomputeDMA:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -338,7 +340,7 @@ class TestPrecomputeDMA:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -366,7 +368,7 @@ class TestPrecomputeCrossTarget:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -395,7 +397,7 @@ class TestPrecomputeMultipleSymbols:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             {
                 "daily": {
                     sym1: [_make_kline_bar(c, sym1) for c in closes1],
@@ -426,7 +428,7 @@ class TestPrecomputeNonIndicatorConditions:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             _daily_kline_data(CLOSES),
             config,
             {SYMBOL: ic},
@@ -451,7 +453,7 @@ class TestPrecomputeMinuteFreq:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             {
                 "daily": {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
                 "5min": {SYMBOL: [_make_kline_bar(c) for c in min_closes]},
@@ -478,7 +480,7 @@ class TestPrecomputeMinuteFreq:
                 ),
             ],
         )
-        result = _precompute_exit_indicators(
+        result, _ = _precompute_exit_indicators(
             {
                 "daily": {SYMBOL: [_make_kline_bar(c) for c in CLOSES]},
                 "1min": {SYMBOL: [_make_kline_bar(c) for c in min_closes]},
@@ -489,3 +491,383 @@ class TestPrecomputeMinuteFreq:
         assert SYMBOL in result
         assert "1min" in result[SYMBOL]
         assert "ma_5" in result[SYMBOL]["1min"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_minute_day_ranges()
+# ---------------------------------------------------------------------------
+
+from app.services.backtest_engine import _build_minute_day_ranges
+from datetime import date, timedelta
+
+
+def _make_minute_bar(
+    dt: datetime,
+    close: float,
+    symbol: str = "000001.SZ",
+    freq: str = "5min",
+) -> KlineBar:
+    """Create a minute KlineBar with a specific datetime."""
+    return KlineBar(
+        time=dt,
+        symbol=symbol,
+        freq=freq,
+        open=Decimal(str(close)),
+        high=Decimal(str(close * 1.02)),
+        low=Decimal(str(close * 0.98)),
+        close=Decimal(str(close)),
+        volume=100000,
+        amount=Decimal("1000000"),
+        turnover=Decimal("3.5"),
+        vol_ratio=Decimal("1.2"),
+    )
+
+
+def _make_daily_bar(
+    d: date,
+    close: float,
+    symbol: str = "000001.SZ",
+) -> KlineBar:
+    """Create a daily KlineBar for a specific date."""
+    return KlineBar(
+        time=datetime(d.year, d.month, d.day, 15, 0, 0),
+        symbol=symbol,
+        freq="daily",
+        open=Decimal(str(close)),
+        high=Decimal(str(close * 1.02)),
+        low=Decimal(str(close * 0.98)),
+        close=Decimal(str(close)),
+        volume=100000,
+        amount=Decimal("1000000"),
+        turnover=Decimal("3.5"),
+        vol_ratio=Decimal("1.2"),
+    )
+
+
+class TestBuildMinuteDayRanges:
+    """Unit tests for _build_minute_day_ranges() helper function."""
+
+    def test_basic_5min_two_days(self):
+        """Two trading days with 48 bars each (5min frequency)."""
+        d1 = date(2024, 1, 2)
+        d2 = date(2024, 1, 3)
+        symbol = SYMBOL
+
+        # Daily bars
+        daily_bars = [
+            _make_daily_bar(d1, 10.0, symbol),
+            _make_daily_bar(d2, 11.0, symbol),
+        ]
+
+        # 5min bars: 48 per day (9:30-15:00, 4 hours = 240 min / 5 = 48)
+        minute_bars = []
+        for day_idx, d in enumerate([d1, d2]):
+            for i in range(48):
+                hour = 9 + (30 + i * 5) // 60
+                minute = (30 + i * 5) % 60
+                dt = datetime(d.year, d.month, d.day, hour, minute, 0)
+                minute_bars.append(
+                    _make_minute_bar(dt, 10.0 + day_idx + i * 0.01, symbol, "5min")
+                )
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0, 11.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+
+        assert symbol in result
+        assert "5min" in result[symbol]
+        ranges = result[symbol]["5min"]
+        assert len(ranges) == 2  # Two trading days
+        assert ranges[0] == (0, 47)   # Day 1: indices 0-47
+        assert ranges[1] == (48, 95)  # Day 2: indices 48-95
+
+    def test_varying_bars_per_day(self):
+        """Days with different numbers of minute bars."""
+        d1 = date(2024, 1, 2)
+        d2 = date(2024, 1, 3)
+        d3 = date(2024, 1, 4)
+        symbol = SYMBOL
+
+        daily_bars = [
+            _make_daily_bar(d1, 10.0, symbol),
+            _make_daily_bar(d2, 11.0, symbol),
+            _make_daily_bar(d3, 12.0, symbol),
+        ]
+
+        # Day 1: 10 bars, Day 2: 5 bars, Day 3: 8 bars
+        minute_bars = []
+        for i in range(10):
+            total_min = 30 + i * 5
+            dt = datetime(2024, 1, 2, 9 + total_min // 60, total_min % 60, 0)
+            minute_bars.append(_make_minute_bar(dt, 10.0, symbol))
+        for i in range(5):
+            total_min = 30 + i * 5
+            dt = datetime(2024, 1, 3, 9 + total_min // 60, total_min % 60, 0)
+            minute_bars.append(_make_minute_bar(dt, 11.0, symbol))
+        for i in range(8):
+            total_min = 30 + i * 5
+            dt = datetime(2024, 1, 4, 9 + total_min // 60, total_min % 60, 0)
+            minute_bars.append(_make_minute_bar(dt, 12.0, symbol))
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0, 11.0, 12.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        ranges = result[symbol]["5min"]
+
+        assert len(ranges) == 3
+        assert ranges[0] == (0, 9)    # Day 1: 10 bars
+        assert ranges[1] == (10, 14)  # Day 2: 5 bars
+        assert ranges[2] == (15, 22)  # Day 3: 8 bars
+
+    def test_missing_minute_data_for_some_days(self):
+        """Some trading days have no minute data (e.g., suspension)."""
+        d1 = date(2024, 1, 2)
+        d2 = date(2024, 1, 3)  # No minute data
+        d3 = date(2024, 1, 4)
+        symbol = SYMBOL
+
+        daily_bars = [
+            _make_daily_bar(d1, 10.0, symbol),
+            _make_daily_bar(d2, 11.0, symbol),
+            _make_daily_bar(d3, 12.0, symbol),
+        ]
+
+        # Only day 1 and day 3 have minute bars
+        minute_bars = []
+        for i in range(5):
+            dt = datetime(2024, 1, 2, 9, 30 + i * 5, 0)
+            minute_bars.append(_make_minute_bar(dt, 10.0, symbol))
+        for i in range(5):
+            dt = datetime(2024, 1, 4, 9, 30 + i * 5, 0)
+            minute_bars.append(_make_minute_bar(dt, 12.0, symbol))
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0, 11.0, 12.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        ranges = result[symbol]["5min"]
+
+        assert len(ranges) == 3
+        assert ranges[0] == (0, 4)     # Day 1: 5 bars
+        assert ranges[1] == (-1, -1)   # Day 2: no minute data
+        assert ranges[2] == (5, 9)     # Day 3: 5 bars
+
+    def test_single_bar_day(self):
+        """A trading day with only one minute bar."""
+        d1 = date(2024, 1, 2)
+        symbol = SYMBOL
+
+        daily_bars = [_make_daily_bar(d1, 10.0, symbol)]
+        minute_bars = [
+            _make_minute_bar(datetime(2024, 1, 2, 9, 30, 0), 10.0, symbol),
+        ]
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        ranges = result[symbol]["5min"]
+
+        assert len(ranges) == 1
+        assert ranges[0] == (0, 0)  # Single bar: start == end
+
+    def test_empty_minute_data(self):
+        """Empty minute bar list produces no ranges."""
+        symbol = SYMBOL
+        daily_bars = [_make_daily_bar(date(2024, 1, 2), 10.0, symbol)]
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: []},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        # Empty bars → symbol not in result
+        assert symbol not in result
+
+    def test_no_daily_data_for_symbol(self):
+        """Symbol has minute data but no daily data → skipped with warning."""
+        symbol = SYMBOL
+        minute_bars = [
+            _make_minute_bar(datetime(2024, 1, 2, 9, 30, 0), 10.0, symbol),
+        ]
+
+        kline_data = {
+            "daily": {},  # No daily data
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        assert symbol not in result
+
+    def test_multiple_minute_frequencies(self):
+        """Both 1min and 5min frequencies produce separate ranges."""
+        d1 = date(2024, 1, 2)
+        symbol = SYMBOL
+
+        daily_bars = [_make_daily_bar(d1, 10.0, symbol)]
+
+        # 5min: 3 bars
+        bars_5min = []
+        for i in range(3):
+            dt = datetime(2024, 1, 2, 9, 30 + i * 5, 0)
+            bars_5min.append(_make_minute_bar(dt, 10.0, symbol, "5min"))
+
+        # 1min: 10 bars
+        bars_1min = []
+        for i in range(10):
+            dt = datetime(2024, 1, 2, 9, 30 + i, 0)
+            bars_1min.append(_make_minute_bar(dt, 10.0, symbol, "1min"))
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: bars_5min},
+            "1min": {symbol: bars_1min},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+
+        assert "5min" in result[symbol]
+        assert "1min" in result[symbol]
+        assert result[symbol]["5min"] == [(0, 2)]
+        assert result[symbol]["1min"] == [(0, 9)]
+
+    def test_multiple_symbols(self):
+        """Multiple symbols each get their own ranges."""
+        d1 = date(2024, 1, 2)
+        sym1 = "000001.SZ"
+        sym2 = "600519.SH"
+
+        daily_bars_1 = [_make_daily_bar(d1, 10.0, sym1)]
+        daily_bars_2 = [_make_daily_bar(d1, 20.0, sym2)]
+
+        minute_bars_1 = [
+            _make_minute_bar(datetime(2024, 1, 2, 9, 30 + i * 5, 0), 10.0, sym1)
+            for i in range(4)
+        ]
+        minute_bars_2 = [
+            _make_minute_bar(datetime(2024, 1, 2, 9, 30 + i * 5, 0), 20.0, sym2)
+            for i in range(6)
+        ]
+
+        kline_data = {
+            "daily": {sym1: daily_bars_1, sym2: daily_bars_2},
+            "5min": {sym1: minute_bars_1, sym2: minute_bars_2},
+        }
+        existing_cache = {
+            sym1: _make_indicator_cache([10.0]),
+            sym2: _make_indicator_cache([20.0]),
+        }
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+
+        assert result[sym1]["5min"] == [(0, 3)]
+        assert result[sym2]["5min"] == [(0, 5)]
+
+    def test_daily_only_returns_empty(self):
+        """When kline_data has only 'daily' freq, result is empty."""
+        symbol = SYMBOL
+        daily_bars = [_make_daily_bar(date(2024, 1, 2), 10.0, symbol)]
+
+        kline_data = {"daily": {symbol: daily_bars}}
+        existing_cache = {symbol: _make_indicator_cache([10.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        assert result == {}
+
+    def test_ranges_are_contiguous_and_non_overlapping(self):
+        """Ranges for consecutive days are contiguous and non-overlapping."""
+        d1 = date(2024, 1, 2)
+        d2 = date(2024, 1, 3)
+        d3 = date(2024, 1, 4)
+        symbol = SYMBOL
+
+        daily_bars = [
+            _make_daily_bar(d, 10.0 + i, symbol)
+            for i, d in enumerate([d1, d2, d3])
+        ]
+
+        # 20 bars per day
+        minute_bars = []
+        for d in [d1, d2, d3]:
+            for i in range(20):
+                dt = datetime(d.year, d.month, d.day, 9, 30 + i, 0)
+                minute_bars.append(_make_minute_bar(dt, 10.0, symbol, "1min"))
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "1min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0, 11.0, 12.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        ranges = result[symbol]["1min"]
+
+        assert len(ranges) == 3
+        # Check contiguous: end of day i + 1 == start of day i+1
+        for i in range(len(ranges) - 1):
+            assert ranges[i][1] + 1 == ranges[i + 1][0], (
+                f"Ranges not contiguous: {ranges[i]} and {ranges[i + 1]}"
+            )
+        # Check non-overlapping: start <= end for each
+        for start, end in ranges:
+            assert start <= end
+        # Check total coverage
+        total_bars = sum(end - start + 1 for start, end in ranges)
+        assert total_bars == 60  # 3 days × 20 bars
+
+    def test_alignment_with_daily_date_order(self):
+        """Minute ranges align with daily K-line date order, not minute data order."""
+        # Daily has dates: Jan 2, Jan 3, Jan 4
+        # Minute data only has Jan 2 and Jan 4 (Jan 3 missing)
+        d1 = date(2024, 1, 2)
+        d2 = date(2024, 1, 3)
+        d3 = date(2024, 1, 4)
+        symbol = SYMBOL
+
+        daily_bars = [
+            _make_daily_bar(d1, 10.0, symbol),
+            _make_daily_bar(d2, 11.0, symbol),
+            _make_daily_bar(d3, 12.0, symbol),
+        ]
+
+        minute_bars = []
+        for i in range(5):
+            dt = datetime(2024, 1, 2, 9, 30 + i * 5, 0)
+            minute_bars.append(_make_minute_bar(dt, 10.0, symbol))
+        for i in range(5):
+            dt = datetime(2024, 1, 4, 9, 30 + i * 5, 0)
+            minute_bars.append(_make_minute_bar(dt, 12.0, symbol))
+
+        kline_data = {
+            "daily": {symbol: daily_bars},
+            "5min": {symbol: minute_bars},
+        }
+        existing_cache = {symbol: _make_indicator_cache([10.0, 11.0, 12.0])}
+
+        result = _build_minute_day_ranges(kline_data, existing_cache)
+        ranges = result[symbol]["5min"]
+
+        # bar_index=0 (Jan 2) → (0, 4)
+        # bar_index=1 (Jan 3) → (-1, -1) missing
+        # bar_index=2 (Jan 4) → (5, 9)
+        assert ranges[0] == (0, 4)
+        assert ranges[1] == (-1, -1)
+        assert ranges[2] == (5, 9)

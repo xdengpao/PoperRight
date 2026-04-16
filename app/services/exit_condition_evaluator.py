@@ -46,6 +46,9 @@ _NUMERIC_OPS = {
 class ExitConditionEvaluator:
     """自定义平仓条件评估器"""
 
+    # 分钟频率集合
+    _MINUTE_FREQS = {"1min", "5min", "15min", "30min", "60min"}
+
     def evaluate(
         self,
         config: ExitConditionConfig,
@@ -53,6 +56,7 @@ class ExitConditionEvaluator:
         bar_index: int,
         indicator_cache: IndicatorCache,
         exit_indicator_cache: dict[str, dict[str, list[float]]] | None = None,
+        minute_day_ranges: dict[str, list[tuple[int, int]]] | None = None,
     ) -> tuple[bool, str | None]:
         """
         评估单只持仓的自定义平仓条件。
@@ -65,6 +69,11 @@ class ExitConditionEvaluator:
             exit_indicator_cache: 按频率分组的补充缓存
                 格式: {freq: {cache_key: values}}
                 例: {"daily": {"ma_10": [...]}, "5min": {"rsi_14": [...]}}
+            minute_day_ranges: 分钟频率日内 bar 索引范围映射（可选）
+                格式: {freq: [(start_idx, end_idx), ...]}
+                每个元组对应一个交易日在分钟缓存中的起止索引（闭区间）。
+                当提供此参数时，分钟频率条件将使用日内扫描逻辑。
+                为 None 时回退到现有行为（向后兼容）。
 
         Returns:
             (triggered, reason) - triggered 为 True 时 reason 包含触发条件描述
@@ -88,6 +97,42 @@ class ExitConditionEvaluator:
                         )
                         freq_cache = exit_indicator_cache.get("daily")
 
+                # 分钟频率条件：当 minute_day_ranges 可用时，路由到日内扫描
+                if (
+                    freq in self._MINUTE_FREQS
+                    and minute_day_ranges is not None
+                    and freq in minute_day_ranges
+                ):
+                    freq_ranges = minute_day_ranges[freq]
+                    # bar_index 越界检查
+                    if bar_index < 0 or bar_index >= len(freq_ranges):
+                        logger.warning(
+                            "bar_index=%d out of range for minute_day_ranges[%s] "
+                            "(length=%d, symbol=%s), skipping condition",
+                            bar_index, freq, len(freq_ranges), symbol,
+                        )
+                        results.append((False, ""))
+                        continue
+
+                    day_range = freq_ranges[bar_index]
+
+                    # 哨兵值 (-1, -1) 表示该交易日无分钟数据
+                    if day_range == (-1, -1):
+                        logger.warning(
+                            "No minute data for trading day bar_index=%d "
+                            "(freq=%s, symbol=%s), skipping condition",
+                            bar_index, freq, symbol,
+                        )
+                        results.append((False, ""))
+                        continue
+
+                    triggered, reason = self._evaluate_single_minute_scanning(
+                        cond, day_range, indicator_cache, freq_cache,
+                    )
+                    results.append((triggered, reason))
+                    continue
+
+                # 日频条件或 minute_day_ranges 不可用时：使用原有单 bar_index 评估
                 triggered, reason = self._evaluate_single(
                     cond, bar_index, indicator_cache, freq_cache,
                 )
@@ -122,6 +167,90 @@ class ExitConditionEvaluator:
     def _resolve_freq(freq: str) -> str:
         """将旧版频率值映射为新版，如 'minute' → '1min'。"""
         return _FREQ_MIGRATION.get(freq, freq)
+
+    def _evaluate_single_minute_scanning(
+        self,
+        condition: ExitCondition,
+        day_range: tuple[int, int],
+        indicator_cache: IndicatorCache,
+        exit_indicator_cache: dict[str, list[float]] | None,
+    ) -> tuple[bool, str]:
+        """
+        日内扫描评估分钟频率条件。
+
+        遍历该交易日内每一根分钟 bar 的指标值，任意一根满足条件即触发。
+
+        Args:
+            condition: 平仓条件
+            day_range: (start_idx, end_idx) 闭区间，该交易日在分钟缓存中的起止索引
+            indicator_cache: 日K线预计算指标缓存
+            exit_indicator_cache: 该频率的指标缓存 {cache_key: values}
+
+        Returns:
+            (triggered, reason_description)
+
+        Note:
+            Full implementation in Task 4.2. This stub routes correctly
+            but returns (False, "") until the scanning logic is implemented.
+        """
+        # Stub — will be fully implemented in Task 4.2
+        start_idx, end_idx = day_range
+        operator = condition.operator
+
+        if operator in ("cross_up", "cross_down"):
+            # Cross scanning: check consecutive pairs within day range
+            if not condition.cross_target:
+                logger.warning(
+                    "Skipping minute cross condition: cross_target not specified for %s",
+                    condition.indicator,
+                )
+                return False, ""
+
+            direction = "up" if operator == "cross_up" else "down"
+            for bar_idx in range(start_idx + 1, end_idx + 1):
+                triggered = self._check_cross(
+                    condition.indicator,
+                    condition.cross_target,
+                    bar_idx,
+                    indicator_cache,
+                    exit_indicator_cache,
+                    direction,
+                    condition.params,
+                )
+                if triggered:
+                    if direction == "up":
+                        reason = f"{condition.indicator.upper()} cross_up {condition.cross_target.upper()}"
+                    else:
+                        reason = f"{condition.indicator.upper()} cross_down {condition.cross_target.upper()}"
+                    return True, reason
+            return False, ""
+
+        # Numeric comparison: scan all bars in day range
+        op_fn = _NUMERIC_OPS.get(operator)
+        if op_fn is None:
+            logger.error("Invalid operator: %s", operator)
+            return False, ""
+
+        if condition.threshold is None:
+            logger.warning(
+                "Skipping minute exit condition: threshold is None for %s %s",
+                condition.indicator, operator,
+            )
+            return False, ""
+
+        for bar_idx in range(start_idx, end_idx + 1):
+            value = self._get_indicator_value(
+                condition.indicator, bar_idx, indicator_cache,
+                exit_indicator_cache, condition.params,
+            )
+            if value is None or math.isnan(value):
+                continue  # Skip NaN/None, continue scanning
+
+            if op_fn(value, condition.threshold):
+                reason = f"{condition.indicator.upper()} {operator} {condition.threshold}"
+                return True, reason
+
+        return False, ""
 
     def _evaluate_single(
         self,
