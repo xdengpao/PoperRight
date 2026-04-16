@@ -23,7 +23,7 @@ from app.core.config import settings
 # ---------------------------------------------------------------------------
 pg_engine = create_async_engine(
     settings.database_url,
-    echo=settings.app_debug,
+    echo=False,
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,
@@ -43,7 +43,7 @@ AsyncSessionPG: async_sessionmaker[AsyncSession] = async_sessionmaker(
 # ---------------------------------------------------------------------------
 ts_engine = create_async_engine(
     settings.timescale_url,
-    echo=settings.app_debug,
+    echo=False,
     pool_size=10,
     max_overflow=20,
     pool_pre_ping=True,

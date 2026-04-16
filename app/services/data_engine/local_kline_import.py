@@ -1075,36 +1075,110 @@ class LocalKlineImportService:
                     )
                     continue
 
-            # 解压解析（market 已知，无需 freq_filter）
+            # 解压解析 + 流式写入（逐 CSV 处理，避免内存溢出）
             try:
-                bars, parsed, skipped = self.extract_and_parse_zip(
-                    zip_path, market=market,
-                )
-            except Exception as exc:
-                logger.error("处理 ZIP 文件异常: %s error=%s", zip_path, exc)
+                parsed_for_file = 0
+                skipped_for_file = 0
+                inserted_for_file = 0
+
+                result_infer = self.infer_symbol_and_freq(zip_path)
+                if result_infer is None:
+                    logger.warning("跳过无法推断 symbol/freq 的文件: %s", zip_path)
+                    skipped_files += 1
+                    await self.update_progress(
+                        skipped_files=skipped_files,
+                        processed_files=idx + 1,
+                        elapsed_seconds=round(time.time() - start_time, 2),
+                    )
+                    continue
+
+                path_symbol, freq_val = result_infer
+
+                with open(zip_path, "rb") as f:
+                    zip_bytes = f.read()
+
+                with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                    _stop_requested = False
+                    for name in zf.namelist():
+                        # 每个 CSV 文件处理前检查停止信号
+                        if await self._check_stop_signal():
+                            _stop_requested = True
+                            break
+
+                        if name.endswith("/"):
+                            continue
+
+                        csv_symbol = self.infer_symbol_from_csv_name(name, market)
+                        if csv_symbol is None:
+                            csv_symbol = path_symbol if path_symbol != "__from_csv__" else None
+                        if csv_symbol is None or csv_symbol == "__from_csv__":
+                            continue
+
+                        csv_bytes = zf.read(name)
+                        try:
+                            csv_text = csv_bytes.decode("utf-8")
+                        except UnicodeDecodeError:
+                            csv_text = csv_bytes.decode("gbk", errors="replace")
+                        del csv_bytes  # 释放内存
+
+                        bars, skipped = self.parse_csv_content(csv_text, csv_symbol, freq_val, market)
+                        del csv_text  # 释放内存
+
+                        valid_bars = [b for b in bars if self.validate_bar(b)]
+                        del bars  # 释放内存
+
+                        parsed_for_file += len(valid_bars) + skipped
+                        skipped_for_file += skipped + (len(valid_bars) - len(valid_bars))
+
+                        # 立即分批写入 DB
+                        for i in range(0, len(valid_bars), self.BATCH_SIZE):
+                            batch = valid_bars[i : i + self.BATCH_SIZE]
+                            inserted = await repo.bulk_insert(batch)
+                            inserted_for_file += inserted
+                        del valid_bars  # 释放内存
+
+                del zip_bytes  # 释放内存
+
+                # 如果在 ZIP 内部收到停止信号，跳出文件循环
+                if _stop_requested:
+                    logger.info("收到停止信号，终止K线导入（ZIP 内部）")
+                    await self._clear_stop_signal()
+                    elapsed = round(time.time() - start_time, 2)
+                    await self.update_progress(status="stopped", processed_files=idx + 1, elapsed_seconds=elapsed)
+                    result = {
+                        "status": "stopped",
+                        "total_files": len(scan_results),
+                        "success_files": success_files,
+                        "failed_files": failed_files,
+                        "total_parsed": total_parsed,
+                        "total_inserted": total_inserted,
+                        "total_skipped": total_skipped,
+                        "elapsed_seconds": elapsed,
+                        "skipped_files": skipped_files,
+                        "failed_details": failed_details,
+                        "market_stats": market_stats,
+                    }
+                    client = get_redis_client()
+                    try:
+                        await client.set(self.REDIS_RESULT_KEY, json.dumps(result, ensure_ascii=False), ex=self.PROGRESS_TTL)
+                    finally:
+                        await client.aclose()
+                    return result
+
+                total_parsed += parsed_for_file
+                total_skipped += skipped_for_file
+
+            except zipfile.BadZipFile:
+                logger.error("ZIP 文件损坏，跳过: %s", zip_path)
                 failed_files += 1
-                failed_details.append({"path": str(zip_path), "error": str(exc)})
+                failed_details.append({"path": str(zip_path), "error": "ZIP 文件损坏"})
                 await self.update_progress(
                     failed_files=failed_files,
                     failed_details=failed_details,
                 )
                 continue
-
-            # 校验并过滤
-            valid_bars = [b for b in bars if self.validate_bar(b)]
-            validation_skipped = len(bars) - len(valid_bars)
-            total_parsed += parsed
-            total_skipped += skipped + validation_skipped
-
-            # 分批写入
-            inserted_for_file = 0
-            try:
-                for i in range(0, len(valid_bars), self.BATCH_SIZE):
-                    batch = valid_bars[i : i + self.BATCH_SIZE]
-                    inserted = await repo.bulk_insert(batch)
-                    inserted_for_file += inserted
             except Exception as exc:
-                logger.error("数据库写入异常: %s error=%s", zip_path, exc)
+                logger.error("处理 ZIP 文件异常: %s error=%s", zip_path, exc)
                 failed_files += 1
                 failed_details.append({"path": str(zip_path), "error": str(exc)})
                 await self.update_progress(
@@ -1121,7 +1195,7 @@ class LocalKlineImportService:
             market_stats[market]["inserted"] += inserted_for_file
 
             # 只有实际解析到数据时才标记为已导入，避免空解析污染增量缓存
-            if parsed > 0:
+            if parsed_for_file > 0:
                 try:
                     await self.mark_imported(zip_path)
                 except Exception as exc:
@@ -1129,7 +1203,7 @@ class LocalKlineImportService:
 
             logger.info(
                 "文件导入完成: %s market=%s parsed=%d inserted=%d",
-                zip_path, market, parsed, inserted_for_file,
+                zip_path, market, parsed_for_file, inserted_for_file,
             )
 
             # 更新进度

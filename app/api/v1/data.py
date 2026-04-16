@@ -979,7 +979,7 @@ async def get_local_kline_import_status() -> LocalKlineImportStatusResponse:
     # 心跳超时检测：前端轮询时自动发现僵尸任务
     if data.get("status") in ("running", "pending"):
         heartbeat = data.get("heartbeat")
-        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 600
         if is_zombie:
             if heartbeat is None:
                 data["status"] = "failed"
@@ -1114,7 +1114,7 @@ async def start_adj_factor_import(
                         json.dumps(progress, ensure_ascii=False),
                         ex=86400,
                     )
-                elif (_time.time() - heartbeat) > 120:
+                elif (_time.time() - heartbeat) > 600:
                     # 僵尸任务，自动清理状态
                     elapsed = _time.time() - heartbeat
                     logger.warning(
@@ -1168,7 +1168,7 @@ async def get_adj_factor_import_status() -> AdjFactorImportStatusResponse:
     # 心跳超时检测：前端轮询时自动发现僵尸任务
     if data.get("status") == "running":
         heartbeat = data.get("heartbeat")
-        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 600
         if is_zombie:
             if heartbeat is None:
                 data["status"] = "failed"
@@ -1223,7 +1223,7 @@ async def stop_adj_factor_import() -> dict:
 
         # 心跳超时检测：如果任务已死，直接清理状态
         heartbeat = progress.get("heartbeat")
-        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 120
+        is_zombie = heartbeat is None or (_time.time() - heartbeat) > 600
         if is_zombie:
             progress["status"] = "failed"
             progress["error"] = "任务异常终止，已自动清理" if heartbeat is None else f"任务异常终止（心跳超时），已自动清理"

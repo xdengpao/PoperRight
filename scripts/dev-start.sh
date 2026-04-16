@@ -266,7 +266,7 @@ if ! $NEED_CELERY_RESTART && check_service_alive "celery-worker"; then
 else
   stop_old_process "celery-worker"
   celery -A app.core.celery_app worker \
-    --loglevel=debug \
+    --loglevel=info \
     -Q data_sync,screening,backtest,review \
     --concurrency=2 \
     > "$LOG_DIR/celery-worker.log" 2>&1 &
@@ -282,7 +282,7 @@ if ! $NEED_CELERY_RESTART && check_service_alive "celery-beat"; then
 else
   stop_old_process "celery-beat"
   celery -A app.core.celery_app beat \
-    --loglevel=debug \
+    --loglevel=info \
     > "$LOG_DIR/celery-beat.log" 2>&1 &
   save_pid "celery-beat" $!
   echo -e "${GREEN}  ✓ Beat     PID=$!  日志: logs/celery-beat.log${NC}"
