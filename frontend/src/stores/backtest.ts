@@ -51,7 +51,35 @@ export interface ExitConditionForm {
   threshold: number | null
   crossTarget: string | null
   params: Record<string, number>
+  thresholdMode: 'absolute' | 'relative'
+  baseField: string | null
+  factor: number | null
 }
+
+export const BASE_FIELD_OPTIONS = [
+  { group: '持仓相关', options: [
+    { value: 'entry_price', label: '买入价' },
+    { value: 'highest_price', label: '持仓最高价' },
+    { value: 'lowest_price', label: '持仓最低价' },
+  ]},
+  { group: '前一日行情', options: [
+    { value: 'prev_close', label: '前一日收盘价' },
+    { value: 'prev_high', label: '前一日最高价' },
+    { value: 'prev_low', label: '前一日最低价' },
+  ]},
+  { group: '当日行情', options: [
+    { value: 'today_open', label: '今日开盘价' },
+  ]},
+  { group: '上一根K线', options: [
+    { value: 'prev_bar_open', label: '上一根K线开盘价' },
+    { value: 'prev_bar_high', label: '上一根K线最高价' },
+    { value: 'prev_bar_low', label: '上一根K线最低价' },
+    { value: 'prev_bar_close', label: '上一根K线收盘价' },
+  ]},
+  { group: '成交量', options: [
+    { value: 'ma_volume', label: 'N日均量' },
+  ]},
+] as const
 
 export const FREQ_OPTIONS = [
   { value: 'daily', label: '日K' },
@@ -74,6 +102,9 @@ export interface ExitTemplate {
       threshold: number | null
       cross_target: string | null
       params: Record<string, number>
+      threshold_mode?: string
+      base_field?: string | null
+      factor?: number | null
     }>
     logic: 'AND' | 'OR'
   }
@@ -315,6 +346,9 @@ export const useBacktestStore = defineStore('backtest', () => {
                 threshold: c.threshold,
                 cross_target: c.crossTarget,
                 params: c.params,
+                threshold_mode: c.thresholdMode,
+                base_field: c.baseField,
+                factor: c.factor,
               })),
               logic: exitConds.logic,
             }
@@ -437,6 +471,9 @@ export const useBacktestStore = defineStore('backtest', () => {
           threshold: c.threshold,
           cross_target: c.crossTarget,
           params: c.params,
+          threshold_mode: c.thresholdMode,
+          base_field: c.baseField,
+          factor: c.factor,
         })),
         logic: exitConds.logic,
       },
@@ -461,6 +498,9 @@ export const useBacktestStore = defineStore('backtest', () => {
           threshold: c.threshold ?? null,
           crossTarget: c.cross_target ?? null,
           params: c.params ?? {},
+          thresholdMode: (c.threshold_mode ?? 'absolute') as 'absolute' | 'relative',
+          baseField: c.base_field ?? null,
+          factor: c.factor ?? null,
         })),
         logic: (tpl.exit_conditions.logic ?? 'AND') as 'AND' | 'OR',
       }

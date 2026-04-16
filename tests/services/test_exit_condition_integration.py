@@ -1817,3 +1817,767 @@ class TestFullPipelineMinuteFrequencyIntegration:
         assert result is not None
         assert result.priority == 5
         assert result.reason == "EXIT_CONDITION: RSI > 80.0"
+
+
+# ---------------------------------------------------------------------------
+# Task 6.4: BacktestEngine 集成单元测试 — 相对值阈值持仓上下文
+# Requirements: 2.1, 2.2, 9.1
+# ---------------------------------------------------------------------------
+
+
+class TestLowestCloseTracking:
+    """需求 2.2: lowest_close 正确跟踪持仓期间最低收盘价"""
+
+    def test_lowest_close_initialized_to_buy_price(self):
+        """创建 _BacktestPosition 时 lowest_close 应初始化为买入价。"""
+        position = _BacktestPosition(
+            symbol="600519.SH",
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=date(2024, 1, 2),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("100.0"),
+        )
+        assert position.lowest_close == Decimal("100.0")
+
+    def test_lowest_close_default_sentinel_value(self):
+        """未显式设置 lowest_close 时，默认为哨兵值 999999999。"""
+        position = _BacktestPosition(
+            symbol="600519.SH",
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=date(2024, 1, 2),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+        )
+        assert position.lowest_close == Decimal("999999999")
+
+    def test_lowest_close_updated_on_lower_close(self):
+        """_check_sell_conditions 应在收盘价低于 lowest_close 时更新。"""
+        symbol = "600519.SH"
+        # 价格先涨后跌：100, 105, 110, 95, 98
+        closes = [100.0, 105.0, 110.0, 95.0, 98.0]
+        bars = _make_bars(symbol=symbol, closes=closes, n=5)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        config = _make_config(
+            exit_conditions=None,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("100.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 1
+
+        # Day 1: close=105 → lowest_close stays 100
+        engine._check_sell_conditions(
+            position=position,
+            trade_date=bars[1].time.date(),
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=None,
+        )
+        assert position.lowest_close == Decimal("100.0")
+
+        # Day 2: close=110 → lowest_close stays 100
+        engine._current_trade_day_index = 2
+        engine._check_sell_conditions(
+            position=position,
+            trade_date=bars[2].time.date(),
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=None,
+        )
+        assert position.lowest_close == Decimal("100.0")
+
+        # Day 3: close=95 → lowest_close updates to 95
+        engine._current_trade_day_index = 3
+        engine._check_sell_conditions(
+            position=position,
+            trade_date=bars[3].time.date(),
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=None,
+        )
+        assert position.lowest_close == Decimal("95.0")
+
+        # Day 4: close=98 → lowest_close stays 95
+        engine._current_trade_day_index = 4
+        engine._check_sell_conditions(
+            position=position,
+            trade_date=bars[4].time.date(),
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache=None,
+        )
+        assert position.lowest_close == Decimal("95.0")
+
+
+class TestHoldingContextConstruction:
+    """需求 2.1: HoldingContext 正确构建并传递给 evaluator"""
+
+    def test_holding_context_passed_to_evaluator(self):
+        """
+        验证 _check_sell_conditions 构建的 HoldingContext 包含正确的字段值，
+        并传递给 evaluator.evaluate()。
+
+        通过配置一个 relative 条件（close < entry_price × 0.95），
+        当 close 低于 entry_price × 0.95 时应触发，证明 HoldingContext
+        被正确构建和传递。
+        """
+        symbol = "600519.SH"
+        # 买入价 100，当前 close=94（< 100 × 0.95 = 95）
+        closes = [100.0] * 5 + [94.0] * 5
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="entry_price",
+                    factor=0.95,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("94.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[7].time.date()  # close=94
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        # close=94 < entry_price(100) × 0.95 = 95 → should trigger
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+    def test_holding_context_highest_price_reflects_position(self):
+        """
+        验证 HoldingContext.highest_price 反映 position.highest_close。
+
+        配置 close < highest_price × 0.90（回撤止损），
+        当 close 从最高价回撤超过 10% 时应触发。
+        """
+        symbol = "600519.SH"
+        # 价格先涨到 120，然后跌到 106（< 120 × 0.90 = 108）
+        closes = [100.0, 105.0, 110.0, 115.0, 120.0, 118.0, 115.0, 110.0, 106.0, 106.0]
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="highest_price",
+                    factor=0.90,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("120.0"),
+            lowest_close=Decimal("100.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[8].time.date()  # close=106
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        # close=106 < highest_price(120) × 0.90 = 108 → should trigger
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+    def test_holding_context_lowest_price_reflects_position(self):
+        """
+        验证 HoldingContext.lowest_price 反映 position.lowest_close。
+
+        配置 close > lowest_price × 1.10（从最低价反弹 10% 触发），
+        当 close 高于 lowest_price × 1.10 时应触发。
+        """
+        symbol = "600519.SH"
+        # 价格先跌到 90，然后涨到 100（> 90 × 1.10 = 99）
+        closes = [100.0, 95.0, 90.0, 92.0, 95.0, 98.0, 100.0, 100.0, 100.0, 100.0]
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator=">",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="lowest_price",
+                    factor=1.10,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("90.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[6].time.date()  # close=100
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        # close=100 > lowest_price(90) × 1.10 = 99 → should trigger
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+
+
+class TestRelativeConditionTriggersInBacktest:
+    """需求 2.1, 9.1: 相对值条件在回测中正确触发"""
+
+    def test_close_below_entry_price_times_factor_triggers_sell(self):
+        """
+        close < entry_price × 0.95 应在 close 跌破买入价 95% 时触发卖出。
+        """
+        symbol = "600519.SH"
+        closes = [100.0] * 5 + [94.0] * 5
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="entry_price",
+                    factor=0.95,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("94.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[6].time.date()  # close=94
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+        # Verify the resolved threshold (100 × 0.95 = 95.0) appears in reason
+        assert "95.0000" in result.reason
+        assert "entry_price×0.95" in result.reason
+
+    def test_close_above_entry_price_times_factor_does_not_trigger(self):
+        """
+        close < entry_price × 0.95 不应在 close 高于阈值时触发。
+        """
+        symbol = "600519.SH"
+        closes = [100.0] * 5 + [96.0] * 5
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="entry_price",
+                    factor=0.95,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("96.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[6].time.date()  # close=96 > 95
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        # close=96 is NOT < 95 → should not trigger
+        assert result is None
+
+    def test_close_below_highest_price_times_factor_triggers_sell(self):
+        """
+        close < highest_price × 0.90 应在回撤超过 10% 时触发。
+        """
+        symbol = "600519.SH"
+        closes = [100.0, 110.0, 120.0, 115.0, 110.0, 107.0, 107.0, 107.0, 107.0, 107.0]
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="highest_price",
+                    factor=0.90,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("120.0"),
+            lowest_close=Decimal("100.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[5].time.date()  # close=107
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        # close=107 < highest_price(120) × 0.90 = 108 → should trigger
+        assert result is not None
+        assert result.priority == 5
+        assert "EXIT_CONDITION" in result.reason
+        assert "108.0000" in result.reason
+        assert "highest_price×0.9" in result.reason
+
+
+class TestSellReasonRelativeInfo:
+    """需求 9.1: 交易流水 sell_reason 包含相对值解析信息"""
+
+    def test_sell_reason_contains_resolved_threshold_and_base_info(self):
+        """
+        sell_reason 格式应为:
+        EXIT_CONDITION: CLOSE < 95.0000（entry_price×0.95）
+        """
+        symbol = "600519.SH"
+        closes = [100.0] * 5 + [94.0] * 5
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="entry_price",
+                    factor=0.95,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("100.0"),
+            lowest_close=Decimal("94.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[7].time.date()  # close=94
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        assert result is not None
+        # Verify full reason format
+        assert result.reason == "EXIT_CONDITION: CLOSE < 95.0000（entry_price×0.95）"
+
+    def test_sell_reason_absolute_mode_does_not_contain_base_info(self):
+        """
+        absolute 模式的 sell_reason 不应包含 base_field 和 factor 信息。
+        """
+        symbol = "600519.SH"
+        closes = [100.0 + i * 0.3 for i in range(30)]
+        bars = _make_bars(symbol=symbol, closes=closes)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = _make_indicator_cache(bars)
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator=">",
+                    threshold=105.0,
+                    threshold_mode="absolute",
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _make_position(
+            symbol=symbol,
+            cost_price=100.0,
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=120.0,
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 5
+
+        trade_date = bars[17].time.date()  # close = 100 + 17*0.3 = 105.1
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        assert result is not None
+        assert result.reason == "EXIT_CONDITION: CLOSE > 105.0"
+        # Should NOT contain relative info markers
+        assert "（" not in result.reason
+        assert "×" not in result.reason
+
+    def test_sell_reason_with_highest_price_base_field(self):
+        """
+        highest_price 基准字段的 sell_reason 格式验证。
+        """
+        symbol = "600519.SH"
+        closes = [100.0, 110.0, 120.0, 115.0, 107.0, 107.0, 107.0, 107.0, 107.0, 107.0]
+        bars = _make_bars(symbol=symbol, closes=closes, n=10)
+        kline_data = {symbol: bars}
+        date_index = _build_date_index(kline_data)
+        ic = IndicatorCache(
+            closes=[float(b.close) for b in bars],
+            highs=[float(b.high) for b in bars],
+            lows=[float(b.low) for b in bars],
+            volumes=[b.volume for b in bars],
+            amounts=[b.amount for b in bars],
+            turnovers=[b.turnover for b in bars],
+            opens=[float(b.open) for b in bars],
+        )
+        indicator_cache = {symbol: ic}
+
+        exit_config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily",
+                    indicator="close",
+                    operator="<",
+                    threshold=None,
+                    threshold_mode="relative",
+                    base_field="highest_price",
+                    factor=0.90,
+                ),
+            ],
+        )
+        config = _make_config(
+            exit_conditions=exit_config,
+            stop_loss_pct=0.50,
+            trailing_stop_pct=0.50,
+            max_holding_days=100,
+            trend_stop_ma=200,
+        )
+
+        position = _BacktestPosition(
+            symbol=symbol,
+            quantity=100,
+            cost_price=Decimal("100.0"),
+            buy_date=bars[0].time.date(),
+            buy_trade_day_index=0,
+            highest_close=Decimal("120.0"),
+            lowest_close=Decimal("100.0"),
+        )
+
+        engine = BacktestEngine()
+        engine._current_trade_day_index = 3
+
+        trade_date = bars[4].time.date()  # close=107
+        result = engine._check_sell_conditions(
+            position=position,
+            trade_date=trade_date,
+            kline_data=kline_data,
+            config=config,
+            date_index=date_index,
+            indicator_cache=indicator_cache,
+            exit_indicator_cache={symbol: {}},
+        )
+
+        assert result is not None
+        # 120 × 0.90 = 108.0, close=107 < 108 → triggered
+        assert result.reason == "EXIT_CONDITION: CLOSE < 108.0000（highest_price×0.9）"

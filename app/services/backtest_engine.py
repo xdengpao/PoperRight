@@ -24,6 +24,7 @@ from typing import Any
 from app.core.schemas import (
     BacktestConfig, BacktestResult, KlineBar, ScreenItem,
     ScreenResult, StrategyConfig, RiskLevel, ExitConditionConfig,
+    HoldingContext,
 )
 from app.services.screener.screen_executor import ScreenExecutor
 
@@ -74,6 +75,7 @@ class _BacktestPosition:
     buy_date: date
     buy_trade_day_index: int          # 买入时的交易日序号
     highest_close: Decimal            # 持仓期间最高收盘价（用于移动止盈）
+    lowest_close: Decimal = Decimal("999999999")  # 持仓期间最低收盘价（用于相对值阈值）
     sector: str = ""                  # 所属板块（用于板块仓位限制）
     pending_sell: _SellSignal | None = None  # 跌停延迟卖出信号
 
@@ -146,6 +148,7 @@ class IndicatorCache:
     volumes: list[int]
     amounts: list[Decimal]
     turnovers: list[Decimal]
+    opens: list[float] = field(default_factory=list)
 
     # 以下字段仅在对应因子被激活时填充
     ma_trend_scores: list[float] | None = None
@@ -215,6 +218,7 @@ def _precompute_indicators(
         closes = [float(b.close) for b in bars]
         highs = [float(b.high) for b in bars]
         lows = [float(b.low) for b in bars]
+        opens = [float(b.open) for b in bars]
         volumes = [b.volume for b in bars]
         amounts = [b.amount for b in bars]
         turnovers = [b.turnover for b in bars]
@@ -226,6 +230,7 @@ def _precompute_indicators(
             volumes=volumes,
             amounts=amounts,
             turnovers=turnovers,
+            opens=opens,
         )
 
         # ----------------------------------------------------------
@@ -1746,6 +1751,10 @@ class BacktestEngine:
         elif close > position.highest_close:
             position.highest_close = close
 
+        # 更新最低收盘价
+        if close < position.lowest_close:
+            position.lowest_close = close
+
         cost_price = position.cost_price
 
         # 1. 固定止损
@@ -1830,6 +1839,12 @@ class BacktestEngine:
                             if minute_day_ranges
                             else None
                         )
+                        holding_context = HoldingContext(
+                            entry_price=float(position.cost_price),
+                            highest_price=float(position.highest_close),
+                            lowest_price=float(position.lowest_close),
+                            entry_bar_index=position.buy_trade_day_index,
+                        )
                         triggered, reason = evaluator.evaluate(
                             config.exit_conditions,
                             position.symbol,
@@ -1837,6 +1852,7 @@ class BacktestEngine:
                             sym_ic,
                             sym_exit_cache,
                             minute_day_ranges=sym_minute_day_ranges,
+                            holding_context=holding_context,
                         )
                         if triggered:
                             sell_reason = "EXIT_CONDITION"
@@ -2050,6 +2066,7 @@ class BacktestEngine:
                 buy_date=next_day_bar.time.date(),
                 buy_trade_day_index=state.trade_day_index,
                 highest_close=open_price,
+                lowest_close=open_price,
                 sector=sector,
             )
 

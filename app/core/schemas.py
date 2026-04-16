@@ -621,6 +621,14 @@ VALID_INDICATORS = {
 
 VALID_OPERATORS = {">", "<", ">=", "<=", "cross_up", "cross_down"}
 
+VALID_BASE_FIELDS = {
+    "entry_price", "highest_price", "lowest_price",
+    "prev_close", "prev_high", "prev_low",
+    "today_open",
+    "prev_bar_open", "prev_bar_high", "prev_bar_low", "prev_bar_close",
+    "ma_volume",
+}
+
 
 @dataclass
 class ExitCondition:
@@ -631,6 +639,9 @@ class ExitCondition:
     threshold: float | None = None     # 数值阈值（数值比较时使用）
     cross_target: str | None = None    # 交叉目标指标（cross_up/cross_down 时使用）
     params: dict = field(default_factory=dict)  # 指标参数（如 {"period": 10}）
+    threshold_mode: str = "absolute"   # 阈值模式："absolute" | "relative"
+    base_field: str | None = None      # 相对值基准字段（relative 模式时使用）
+    factor: float | None = None        # 乘数因子（relative 模式时使用）
 
     def to_dict(self) -> dict:
         return {
@@ -640,6 +651,9 @@ class ExitCondition:
             "threshold": self.threshold,
             "cross_target": self.cross_target,
             "params": self.params,
+            "threshold_mode": self.threshold_mode,
+            "base_field": self.base_field,
+            "factor": self.factor,
         }
 
     @classmethod
@@ -655,6 +669,9 @@ class ExitCondition:
             threshold=data.get("threshold"),
             cross_target=data.get("cross_target"),
             params=data.get("params", {}),
+            threshold_mode=data.get("threshold_mode", "absolute"),
+            base_field=data.get("base_field"),
+            factor=data.get("factor"),
         )
 
 
@@ -680,3 +697,12 @@ class ExitConditionConfig:
             conditions=conditions,
             logic=data.get("logic", "AND"),
         )
+
+
+@dataclass
+class HoldingContext:
+    """持仓上下文，用于相对值阈值的动态解析。"""
+    entry_price: float          # 买入价
+    highest_price: float        # 买入后至当前交易日的最高收盘价
+    lowest_price: float         # 买入后至当前交易日的最低收盘价
+    entry_bar_index: int        # 买入时的 bar 索引

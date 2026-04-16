@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.auth import get_current_user
 from app.core.database import get_pg_session
-from app.core.schemas import VALID_FREQS, VALID_INDICATORS, VALID_OPERATORS
+from app.core.schemas import VALID_BASE_FIELDS, VALID_FREQS, VALID_INDICATORS, VALID_OPERATORS
 from app.models.backtest import ExitConditionTemplate
 from app.models.user import AppUser
 
@@ -38,6 +38,9 @@ class ExitConditionSchema(BaseModel):
     threshold: float | None = None
     cross_target: str | None = None
     params: dict = Field(default_factory=dict)
+    threshold_mode: str = "absolute"
+    base_field: str | None = None
+    factor: float | None = None
 
     @model_validator(mode="after")
     def validate_condition(self) -> "ExitConditionSchema":
@@ -54,8 +57,24 @@ class ExitConditionSchema(BaseModel):
             raise ValueError(f"无效的比较运算符: {self.operator}")
         if self.operator in ("cross_up", "cross_down") and not self.cross_target:
             raise ValueError("交叉运算符需要指定 cross_target")
-        if self.operator not in ("cross_up", "cross_down") and self.threshold is None:
-            raise ValueError("数值比较运算符需要指定 threshold")
+
+        # 阈值模式验证
+        if self.threshold_mode not in ("absolute", "relative"):
+            raise ValueError(
+                f"无效的 threshold_mode: {self.threshold_mode}，支持: absolute, relative"
+            )
+
+        if self.threshold_mode == "relative":
+            if not self.base_field or self.base_field not in VALID_BASE_FIELDS:
+                raise ValueError(
+                    f"相对值模式需要有效的 base_field，支持: {', '.join(sorted(VALID_BASE_FIELDS))}"
+                )
+            if self.factor is None or self.factor <= 0:
+                raise ValueError("相对值模式需要正数 factor")
+        elif self.threshold_mode == "absolute":
+            if self.operator not in ("cross_up", "cross_down") and self.threshold is None:
+                raise ValueError("数值比较运算符需要指定 threshold")
+
         return self
 
 

@@ -114,10 +114,10 @@ describe('BacktestView - 自定义平仓条件面板', () => {
     const rows = wrapper.findAll('.condition-row')
     expect(rows.length).toBe(1)
 
-    // 条件行应包含频率、指标、运算符选择框和阈值输入框
+    // 条件行应包含频率、指标、运算符、阈值模式选择框和阈值输入框
     const fields = rows[0].find('.condition-fields')
     const selects = fields.findAll('select')
-    expect(selects.length).toBe(3) // freq, indicator, operator
+    expect(selects.length).toBe(4) // freq, indicator, operator, thresholdMode
     const inputs = fields.findAll('input[type="number"]')
     expect(inputs.length).toBe(1) // threshold
   })
@@ -306,5 +306,134 @@ describe('BacktestView - 模版频率标签与 tooltip 显示', () => {
     const systemOptions = wrapper.findAll('.system-template-option')
     expect(systemOptions.length).toBe(1)
     expect(systemOptions[0].attributes('title')).toBe('15分钟MACD快线下穿慢线，中短线趋势转弱')
+  })
+})
+
+
+// ─── 需求 6.1~6.8: 相对值阈值 UI 配置面板 ─────────────────────────────────────
+
+describe('BacktestView - 相对值阈值 UI 配置', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+    mockGet.mockResolvedValue({ data: [] })
+  })
+
+  // ─── 需求 6.1: 数值比较运算符显示阈值模式切换控件 ────────────────────────
+
+  it('数值比较运算符时显示阈值模式切换控件', async () => {
+    const wrapper = mountBacktestView()
+
+    await wrapper.find('.panel-toggle').trigger('click')
+    await wrapper.find('[aria-label="添加平仓条件"]').trigger('click')
+
+    // 默认运算符为 ">"（数值比较），应显示阈值模式选择框
+    const modeSelect = wrapper.find('[aria-label="条件1阈值模式"]')
+    expect(modeSelect.exists()).toBe(true)
+
+    // 应有 "绝对值" 和 "相对值" 两个选项
+    const options = modeSelect.findAll('option')
+    expect(options.length).toBe(2)
+    expect(options[0].text()).toBe('绝对值')
+    expect(options[1].text()).toBe('相对值')
+  })
+
+  // ─── 需求 6.8: 交叉运算符隐藏阈值模式切换控件 ────────────────────────────
+
+  it('交叉运算符时隐藏阈值模式切换控件', async () => {
+    const wrapper = mountBacktestView()
+
+    await wrapper.find('.panel-toggle').trigger('click')
+    await wrapper.find('[aria-label="添加平仓条件"]').trigger('click')
+
+    // 切换到 cross_up
+    const operatorSelect = wrapper.find('[aria-label="条件1运算符"]')
+    await operatorSelect.setValue('cross_up')
+
+    // 阈值模式选择框应不存在
+    expect(wrapper.find('[aria-label="条件1阈值模式"]').exists()).toBe(false)
+  })
+
+  // ─── 需求 6.3: 切换到相对值模式显示基准字段下拉框和乘数因子输入框 ────────
+
+  it('切换到相对值模式时显示基准字段下拉框和乘数因子输入框', async () => {
+    const wrapper = mountBacktestView()
+
+    await wrapper.find('.panel-toggle').trigger('click')
+    await wrapper.find('[aria-label="添加平仓条件"]').trigger('click')
+
+    // 默认为绝对值模式，应显示阈值输入框
+    expect(wrapper.find('[aria-label="条件1阈值"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="条件1基准字段"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="条件1乘数因子"]').exists()).toBe(false)
+
+    // 切换到相对值模式
+    const modeSelect = wrapper.find('[aria-label="条件1阈值模式"]')
+    await modeSelect.setValue('relative')
+
+    // 应隐藏阈值输入框，显示基准字段下拉框和乘数因子输入框
+    expect(wrapper.find('[aria-label="条件1阈值"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="条件1基准字段"]').exists()).toBe(true)
+    expect(wrapper.find('[aria-label="条件1乘数因子"]').exists()).toBe(true)
+  })
+
+  // ─── 需求 6.5: 选择 ma_volume 时显示均量周期输入框 ────────────────────────
+
+  it('选择 ma_volume 基准字段时显示均量周期输入框', async () => {
+    const wrapper = mountBacktestView()
+
+    await wrapper.find('.panel-toggle').trigger('click')
+    await wrapper.find('[aria-label="添加平仓条件"]').trigger('click')
+
+    // 切换到相对值模式
+    const modeSelect = wrapper.find('[aria-label="条件1阈值模式"]')
+    await modeSelect.setValue('relative')
+
+    // 默认不显示均量周期输入框
+    expect(wrapper.find('#ma-vol-period-0').exists()).toBe(false)
+
+    // 选择 ma_volume 基准字段
+    const baseFieldSelect = wrapper.find('[aria-label="条件1基准字段"]')
+    await baseFieldSelect.setValue('ma_volume')
+
+    // 应显示均量周期输入框
+    expect(wrapper.find('#ma-vol-period-0').exists()).toBe(true)
+  })
+
+  // ─── 需求 6.7: 模式切换清空对立字段 ──────────────────────────────────────
+
+  it('模式切换时清空对立字段', async () => {
+    const wrapper = mountBacktestView()
+    const { useBacktestStore } = await import('@/stores/backtest')
+    const store = useBacktestStore()
+
+    await wrapper.find('.panel-toggle').trigger('click')
+    await wrapper.find('[aria-label="添加平仓条件"]').trigger('click')
+
+    const cond = store.form.exitConditions.conditions[0]
+
+    // 设置绝对值模式的阈值
+    cond.threshold = 42
+
+    // 切换到相对值模式
+    const modeSelect = wrapper.find('[aria-label="条件1阈值模式"]')
+    await modeSelect.setValue('relative')
+
+    // threshold 应被清空
+    expect(cond.threshold).toBeNull()
+
+    // 设置相对值模式的字段
+    cond.baseField = 'entry_price'
+    cond.factor = 0.95
+
+    // 切换回绝对值模式
+    await modeSelect.setValue('absolute')
+
+    // baseField 和 factor 应被清空
+    expect(cond.baseField).toBeNull()
+    expect(cond.factor).toBeNull()
   })
 })

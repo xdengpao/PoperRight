@@ -162,7 +162,7 @@ MINUTE_TEMPLATES = [
     },
     {
         "name": "1分钟放量下跌",
-        "description": "1分钟收盘价跌破布林带下轨或成交量异常放大时触发平仓（任一条件满足即触发），适用于极端行情下的快速止损",
+        "description": "1分钟收盘价跌破布林带下轨或成交量超过5日均量3倍时触发平仓（任一条件满足即触发），适用于极端行情下的快速止损",
         "exit_conditions": {
             "conditions": [
                 {
@@ -177,9 +177,12 @@ MINUTE_TEMPLATES = [
                     "freq": "1min",
                     "indicator": "volume",
                     "operator": ">",
-                    "threshold": 1000000.0,
+                    "threshold": None,
                     "cross_target": None,
-                    "params": {},
+                    "params": {"ma_volume_period": 5},
+                    "threshold_mode": "relative",
+                    "base_field": "ma_volume",
+                    "factor": 3.0,
                 },
             ],
             "logic": "OR",

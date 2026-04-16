@@ -19,8 +19,10 @@ import logging
 import math
 from typing import TYPE_CHECKING
 
+from app.services.threshold_resolver import resolve_threshold
+
 if TYPE_CHECKING:
-    from app.core.schemas import ExitCondition, ExitConditionConfig
+    from app.core.schemas import ExitCondition, ExitConditionConfig, HoldingContext
     from app.services.backtest_engine import IndicatorCache
 
 logger = logging.getLogger(__name__)
@@ -57,6 +59,7 @@ class ExitConditionEvaluator:
         indicator_cache: IndicatorCache,
         exit_indicator_cache: dict[str, dict[str, list[float]]] | None = None,
         minute_day_ranges: dict[str, list[tuple[int, int]]] | None = None,
+        holding_context: HoldingContext | None = None,
     ) -> tuple[bool, str | None]:
         """
         评估单只持仓的自定义平仓条件。
@@ -74,6 +77,7 @@ class ExitConditionEvaluator:
                 每个元组对应一个交易日在分钟缓存中的起止索引（闭区间）。
                 当提供此参数时，分钟频率条件将使用日内扫描逻辑。
                 为 None 时回退到现有行为（向后兼容）。
+            holding_context: 持仓上下文（可选），用于相对值阈值的动态解析
 
         Returns:
             (triggered, reason) - triggered 为 True 时 reason 包含触发条件描述
@@ -128,6 +132,7 @@ class ExitConditionEvaluator:
 
                     triggered, reason = self._evaluate_single_minute_scanning(
                         cond, day_range, indicator_cache, freq_cache,
+                        holding_context,
                     )
                     results.append((triggered, reason))
                     continue
@@ -135,6 +140,7 @@ class ExitConditionEvaluator:
                 # 日频条件或 minute_day_ranges 不可用时：使用原有单 bar_index 评估
                 triggered, reason = self._evaluate_single(
                     cond, bar_index, indicator_cache, freq_cache,
+                    holding_context,
                 )
                 results.append((triggered, reason))
             except Exception:
@@ -174,6 +180,7 @@ class ExitConditionEvaluator:
         day_range: tuple[int, int],
         indicator_cache: IndicatorCache,
         exit_indicator_cache: dict[str, list[float]] | None,
+        holding_context: HoldingContext | None = None,
     ) -> tuple[bool, str]:
         """
         日内扫描评估分钟频率条件。
@@ -185,15 +192,11 @@ class ExitConditionEvaluator:
             day_range: (start_idx, end_idx) 闭区间，该交易日在分钟缓存中的起止索引
             indicator_cache: 日K线预计算指标缓存
             exit_indicator_cache: 该频率的指标缓存 {cache_key: values}
+            holding_context: 持仓上下文（可选），用于相对值阈值的动态解析
 
         Returns:
             (triggered, reason_description)
-
-        Note:
-            Full implementation in Task 4.2. This stub routes correctly
-            but returns (False, "") until the scanning logic is implemented.
         """
-        # Stub — will be fully implemented in Task 4.2
         start_idx, end_idx = day_range
         operator = condition.operator
 
@@ -231,10 +234,12 @@ class ExitConditionEvaluator:
             logger.error("Invalid operator: %s", operator)
             return False, ""
 
-        if condition.threshold is None:
+        # 通过 ThresholdResolver 解析阈值
+        resolved = resolve_threshold(condition, holding_context, indicator_cache, start_idx)
+        if resolved is None:
             logger.warning(
-                "Skipping minute exit condition: threshold is None for %s %s",
-                condition.indicator, operator,
+                "Threshold resolution failed for minute scanning %s, skipping",
+                condition.indicator,
             )
             return False, ""
 
@@ -246,8 +251,12 @@ class ExitConditionEvaluator:
             if value is None or math.isnan(value):
                 continue  # Skip NaN/None, continue scanning
 
-            if op_fn(value, condition.threshold):
-                reason = f"{condition.indicator.upper()} {operator} {condition.threshold}"
+            if op_fn(value, resolved):
+                # 构建触发原因字符串
+                if condition.threshold_mode == "relative":
+                    reason = f"{condition.indicator.upper()} {operator} {resolved:.4f}（{condition.base_field}×{condition.factor}）"
+                else:
+                    reason = f"{condition.indicator.upper()} {operator} {resolved}"
                 return True, reason
 
         return False, ""
@@ -258,6 +267,7 @@ class ExitConditionEvaluator:
         bar_index: int,
         indicator_cache: IndicatorCache,
         exit_indicator_cache: dict[str, list[float]] | None,
+        holding_context: HoldingContext | None = None,
     ) -> tuple[bool, str]:
         """
         评估单条平仓条件。
@@ -284,10 +294,12 @@ class ExitConditionEvaluator:
             )
             return False, ""
 
-        if condition.threshold is None:
+        # 通过 ThresholdResolver 解析阈值
+        resolved = resolve_threshold(condition, holding_context, indicator_cache, bar_index)
+        if resolved is None:
             logger.warning(
-                "Skipping exit condition: threshold is None for %s %s",
-                condition.indicator, operator,
+                "Threshold resolution failed for %s, skipping",
+                condition.indicator,
             )
             return False, ""
 
@@ -296,8 +308,12 @@ class ExitConditionEvaluator:
             logger.error("Invalid operator: %s", operator)
             return False, ""
 
-        triggered = op_fn(value, condition.threshold)
-        reason = f"{condition.indicator.upper()} {operator} {condition.threshold}"
+        triggered = op_fn(value, resolved)
+        # 构建触发原因字符串
+        if condition.threshold_mode == "relative":
+            reason = f"{condition.indicator.upper()} {operator} {resolved:.4f}（{condition.base_field}×{condition.factor}）"
+        else:
+            reason = f"{condition.indicator.upper()} {operator} {resolved}"
         return triggered, reason
 
     def _evaluate_cross(

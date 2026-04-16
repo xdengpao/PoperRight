@@ -161,15 +161,61 @@
                 >
                   <option v-for="ind in indicatorOptions" :key="ind.value" :value="ind.value">{{ ind.label }}</option>
                 </select>
-                <input
-                  v-else
-                  v-model.number="cond.threshold"
-                  type="number"
-                  step="any"
-                  class="input input-sm"
-                  placeholder="阈值"
-                  :aria-label="'条件' + (idx + 1) + '阈值'"
-                />
+                <template v-else>
+                  <select
+                    v-model="cond.thresholdMode"
+                    class="input input-sm input-mode"
+                    :aria-label="'条件' + (idx + 1) + '阈值模式'"
+                    @change="onThresholdModeChange(idx)"
+                  >
+                    <option value="absolute">绝对值</option>
+                    <option value="relative">相对值</option>
+                  </select>
+                  <input
+                    v-if="cond.thresholdMode === 'absolute'"
+                    v-model.number="cond.threshold"
+                    type="number"
+                    step="any"
+                    class="input input-sm"
+                    placeholder="阈值"
+                    :aria-label="'条件' + (idx + 1) + '阈值'"
+                  />
+                  <template v-if="cond.thresholdMode === 'relative'">
+                    <select
+                      v-model="cond.baseField"
+                      class="input input-sm"
+                      :aria-label="'条件' + (idx + 1) + '基准字段'"
+                    >
+                      <option value="" disabled>选择基准</option>
+                      <optgroup v-for="group in BASE_FIELD_OPTIONS" :key="group.group" :label="group.group">
+                        <option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+                      </optgroup>
+                    </select>
+                    <span class="factor-label">×</span>
+                    <input
+                      v-model.number="cond.factor"
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      class="input input-sm input-narrow"
+                      placeholder="1.0"
+                      :aria-label="'条件' + (idx + 1) + '乘数因子'"
+                    />
+                    <div v-if="cond.baseField === 'ma_volume'" class="condition-params">
+                      <label :for="'ma-vol-period-' + idx">均量周期:</label>
+                      <input
+                        :id="'ma-vol-period-' + idx"
+                        v-model.number="cond.params.ma_volume_period"
+                        type="number"
+                        min="1"
+                        step="1"
+                        class="input input-sm input-narrow"
+                        placeholder="5"
+                        @focus="cond.params.ma_volume_period = cond.params.ma_volume_period || 5"
+                      />
+                    </div>
+                  </template>
+                </template>
                 <button class="btn btn-icon btn-danger-ghost" @click="removeCondition(idx)" :aria-label="'删除条件' + (idx + 1)">✕</button>
               </div>
               <div v-if="cond.indicator === 'ma'" class="condition-params">
@@ -406,7 +452,7 @@ import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
-import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS, getTemplateFreqLabel } from '@/stores/backtest'
+import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS, BASE_FIELD_OPTIONS, getTemplateFreqLabel } from '@/stores/backtest'
 import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus, ExitTemplate } from '@/stores/backtest'
 
 // ─── Store ────────────────────────────────────────────────────────────────────
@@ -546,6 +592,9 @@ function addCondition() {
     threshold: null,
     crossTarget: null,
     params: {},
+    thresholdMode: 'absolute',
+    baseField: null,
+    factor: null,
   })
 }
 
@@ -557,9 +606,25 @@ function onOperatorChange(index: number) {
   const cond = form.exitConditions.conditions[index]
   if (isCrossOperator(cond.operator)) {
     cond.threshold = null
+    cond.thresholdMode = 'absolute'
+    cond.baseField = null
+    cond.factor = null
     if (!cond.crossTarget) cond.crossTarget = 'close'
   } else {
     cond.crossTarget = null
+  }
+}
+
+function onThresholdModeChange(index: number) {
+  const cond = form.exitConditions.conditions[index]
+  if (cond.thresholdMode === 'absolute') {
+    // Switched to absolute: clear relative fields
+    cond.baseField = null
+    cond.factor = null
+  } else {
+    // Switched to relative: clear absolute field, set defaults
+    cond.threshold = null
+    if (cond.factor === null) cond.factor = 1.0
   }
 }
 
@@ -1148,6 +1213,8 @@ onUnmounted(() => {
 .condition-params { display: flex; align-items: center; gap: 6px; margin-left: 4px; font-size: 13px; color: #8b949e; }
 .input-sm { padding: 4px 8px; font-size: 13px; }
 .input-narrow { width: 70px; }
+.input-mode { width: 80px; }
+.factor-label { color: #8b949e; font-size: 14px; font-weight: 500; line-height: 1; }
 .btn-icon { padding: 4px 8px; font-size: 13px; line-height: 1; border-radius: 4px; }
 .btn-danger-ghost { background: transparent; border: 1px solid #30363d; color: #f85149; cursor: pointer; }
 .btn-danger-ghost:hover { background: rgba(248,81,73,0.1); border-color: #f85149; }

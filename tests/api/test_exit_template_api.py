@@ -39,6 +39,9 @@ _VALID_EXIT_CONDITIONS = {
             "threshold": 80.0,
             "cross_target": None,
             "params": {},
+            "threshold_mode": "absolute",
+            "base_field": None,
+            "factor": None,
         }
     ],
     "logic": "AND",
@@ -873,3 +876,312 @@ class TestSystemTemplateSeedData:
         assert c1.indicator == "rsi"
         assert c1.operator == ">"
         assert c1.threshold == 70.0
+
+
+# ---------------------------------------------------------------------------
+# 相对值阈值系统内置模版 seed 数据验证 (Task 13.2)
+# ---------------------------------------------------------------------------
+
+
+def _load_relative_templates():
+    """Load RELATIVE_TEMPLATES from the alembic migration file 009."""
+    import importlib.util
+    from pathlib import Path
+
+    migration_path = Path("alembic/versions/009_seed_relative_threshold_templates.py")
+    spec = importlib.util.spec_from_file_location(
+        "seed_relative_threshold_templates_009", migration_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.RELATIVE_TEMPLATES
+
+
+class TestRelativeThresholdTemplateSeedData:
+    """Validates: Requirements 8.1, 8.2, 8.4
+
+    验证 alembic migration 009 中定义的 2 个相对值阈值系统内置模版
+    的数据结构正确性，无需实际数据库连接。
+    """
+
+    def test_seed_data_contains_2_relative_templates(self):
+        """数据库 seed 中存在 2 个相对值阈值模版定义。"""
+        templates = _load_relative_templates()
+        assert len(templates) == 2
+
+    def test_seed_template_names_are_correct(self):
+        """2 个相对值模版的名称与预期一致。"""
+        templates = _load_relative_templates()
+        expected_names = {"买入价比例止损", "回撤止损"}
+        actual_names = {tpl["name"] for tpl in templates}
+        assert expected_names == actual_names
+
+    def test_seed_templates_are_system_templates(self):
+        """模版使用系统用户 UUID 且 is_system=True（通过 migration SQL 设置）。"""
+        # The migration sets is_system=TRUE in the INSERT SQL.
+        # We verify the SYSTEM_USER_ID is the expected fixed UUID.
+        import importlib.util
+        from pathlib import Path
+
+        migration_path = Path("alembic/versions/009_seed_relative_threshold_templates.py")
+        spec = importlib.util.spec_from_file_location(
+            "seed_relative_threshold_templates_009_check", migration_path
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.SYSTEM_USER_ID == "00000000-0000-0000-0000-000000000000"
+
+    def test_seed_template_exit_conditions_contain_relative_mode(self):
+        """每个模版的 exit_conditions 中的条件包含 threshold_mode='relative'。"""
+        templates = _load_relative_templates()
+        for tpl in templates:
+            ec = tpl["exit_conditions"]
+            assert "conditions" in ec
+            assert "logic" in ec
+            for cond in ec["conditions"]:
+                assert cond["threshold_mode"] == "relative", (
+                    f"模版 '{tpl['name']}' 条件缺少 threshold_mode='relative'"
+                )
+                assert cond["base_field"] is not None, (
+                    f"模版 '{tpl['name']}' 条件缺少 base_field"
+                )
+                assert cond["factor"] is not None, (
+                    f"模版 '{tpl['name']}' 条件缺少 factor"
+                )
+
+    def test_seed_template_exit_conditions_deserialize(self):
+        """模版的 exit_conditions 可通过 ExitConditionConfig.from_dict() 正确反序列化。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_relative_templates()
+        for tpl in templates:
+            config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+            assert isinstance(config, ExitConditionConfig), (
+                f"模版 '{tpl['name']}' 反序列化失败"
+            )
+            assert len(config.conditions) == len(tpl["exit_conditions"]["conditions"])
+            assert config.logic == tpl["exit_conditions"]["logic"]
+            # Verify relative fields survive deserialization
+            for cond in config.conditions:
+                assert cond.threshold_mode == "relative"
+                assert cond.base_field is not None
+                assert cond.factor is not None
+
+    def test_seed_template_entry_price_stop_loss(self):
+        """买入价比例止损模版配置正确：close < entry_price × 0.95。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_relative_templates()
+        tpl = next(t for t in templates if t["name"] == "买入价比例止损")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.freq == "daily"
+        assert c.indicator == "close"
+        assert c.operator == "<"
+        assert c.threshold_mode == "relative"
+        assert c.base_field == "entry_price"
+        assert c.factor == 0.95
+        assert c.threshold is None
+
+    def test_seed_template_drawdown_stop_loss(self):
+        """回撤止损模版配置正确：close < highest_price × 0.90。"""
+        from app.core.schemas import ExitConditionConfig
+
+        templates = _load_relative_templates()
+        tpl = next(t for t in templates if t["name"] == "回撤止损")
+        config = ExitConditionConfig.from_dict(tpl["exit_conditions"])
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.freq == "daily"
+        assert c.indicator == "close"
+        assert c.operator == "<"
+        assert c.threshold_mode == "relative"
+        assert c.base_field == "highest_price"
+        assert c.factor == 0.90
+        assert c.threshold is None
+
+
+# ---------------------------------------------------------------------------
+# 模版保存/加载往返一致性 (Task 13.3)
+# ---------------------------------------------------------------------------
+
+
+class TestTemplateRoundTripConsistency:
+    """Validates: Requirements 8.1, 8.2, 8.3
+
+    测试包含相对值条件的模版序列化/反序列化往返一致性，
+    以及旧版模版（不含 threshold_mode）的向后兼容默认值。
+    无需实际数据库连接，直接测试 ExitConditionConfig 的序列化逻辑。
+    """
+
+    def test_relative_condition_round_trip_via_dict(self):
+        """包含相对值条件的模版通过 to_dict/from_dict 往返后字段完全保留。"""
+        from app.core.schemas import ExitConditionConfig
+
+        original_data = {
+            "conditions": [
+                {
+                    "freq": "daily",
+                    "indicator": "close",
+                    "operator": "<",
+                    "threshold": None,
+                    "cross_target": None,
+                    "params": {},
+                    "threshold_mode": "relative",
+                    "base_field": "entry_price",
+                    "factor": 0.95,
+                }
+            ],
+            "logic": "AND",
+        }
+        config = ExitConditionConfig.from_dict(original_data)
+        round_tripped = ExitConditionConfig.from_dict(config.to_dict())
+
+        assert len(round_tripped.conditions) == 1
+        c = round_tripped.conditions[0]
+        assert c.threshold_mode == "relative"
+        assert c.base_field == "entry_price"
+        assert c.factor == 0.95
+        assert c.threshold is None
+        assert c.indicator == "close"
+        assert c.operator == "<"
+        assert c.freq == "daily"
+
+    def test_relative_condition_to_dict_contains_all_fields(self):
+        """序列化后的字典包含 threshold_mode、base_field、factor 字段（模拟 JSONB 保存）。"""
+        from app.core.schemas import ExitConditionConfig
+
+        config_data = {
+            "conditions": [
+                {
+                    "freq": "daily",
+                    "indicator": "close",
+                    "operator": "<",
+                    "threshold": None,
+                    "cross_target": None,
+                    "params": {},
+                    "threshold_mode": "relative",
+                    "base_field": "highest_price",
+                    "factor": 0.90,
+                }
+            ],
+            "logic": "AND",
+        }
+        config = ExitConditionConfig.from_dict(config_data)
+        serialized = config.to_dict()
+
+        cond_dict = serialized["conditions"][0]
+        assert "threshold_mode" in cond_dict
+        assert cond_dict["threshold_mode"] == "relative"
+        assert "base_field" in cond_dict
+        assert cond_dict["base_field"] == "highest_price"
+        assert "factor" in cond_dict
+        assert cond_dict["factor"] == 0.90
+
+    def test_old_style_template_without_threshold_mode_defaults_to_absolute(self):
+        """加载不含 threshold_mode 的旧版模版时默认为 'absolute'。"""
+        from app.core.schemas import ExitConditionConfig
+
+        old_style_data = {
+            "conditions": [
+                {
+                    "freq": "daily",
+                    "indicator": "rsi",
+                    "operator": ">",
+                    "threshold": 80.0,
+                    "cross_target": None,
+                    "params": {},
+                    # 注意：没有 threshold_mode、base_field、factor 字段
+                }
+            ],
+            "logic": "AND",
+        }
+        config = ExitConditionConfig.from_dict(old_style_data)
+        assert len(config.conditions) == 1
+        c = config.conditions[0]
+        assert c.threshold_mode == "absolute"
+        assert c.base_field is None
+        assert c.factor is None
+        assert c.threshold == 80.0
+
+    def test_mixed_conditions_round_trip(self):
+        """包含绝对值和相对值混合条件的模版往返一致。"""
+        from app.core.schemas import ExitConditionConfig
+
+        mixed_data = {
+            "conditions": [
+                {
+                    "freq": "daily",
+                    "indicator": "close",
+                    "operator": "<",
+                    "threshold": None,
+                    "cross_target": None,
+                    "params": {},
+                    "threshold_mode": "relative",
+                    "base_field": "entry_price",
+                    "factor": 0.95,
+                },
+                {
+                    "freq": "daily",
+                    "indicator": "rsi",
+                    "operator": ">",
+                    "threshold": 80.0,
+                    "cross_target": None,
+                    "params": {},
+                    "threshold_mode": "absolute",
+                    "base_field": None,
+                    "factor": None,
+                },
+            ],
+            "logic": "OR",
+        }
+        config = ExitConditionConfig.from_dict(mixed_data)
+        serialized = config.to_dict()
+        restored = ExitConditionConfig.from_dict(serialized)
+
+        assert len(restored.conditions) == 2
+        assert restored.logic == "OR"
+
+        # Relative condition
+        c0 = restored.conditions[0]
+        assert c0.threshold_mode == "relative"
+        assert c0.base_field == "entry_price"
+        assert c0.factor == 0.95
+        assert c0.threshold is None
+
+        # Absolute condition
+        c1 = restored.conditions[1]
+        assert c1.threshold_mode == "absolute"
+        assert c1.base_field is None
+        assert c1.factor is None
+        assert c1.threshold == 80.0
+
+    def test_loading_template_with_relative_conditions_restores_correctly(self):
+        """模拟从数据库 JSONB 加载模版数据，验证相对值条件正确还原。"""
+        from app.core.schemas import ExitConditionConfig
+
+        # Simulate what would be stored in the JSONB column
+        jsonb_data = {
+            "conditions": [
+                {
+                    "freq": "daily",
+                    "indicator": "close",
+                    "operator": "<",
+                    "threshold": None,
+                    "cross_target": None,
+                    "params": {},
+                    "threshold_mode": "relative",
+                    "base_field": "highest_price",
+                    "factor": 0.90,
+                }
+            ],
+            "logic": "AND",
+        }
+        config = ExitConditionConfig.from_dict(jsonb_data)
+        c = config.conditions[0]
+        assert c.threshold_mode == "relative"
+        assert c.base_field == "highest_price"
+        assert c.factor == 0.90
+        assert c.indicator == "close"
+        assert c.operator == "<"

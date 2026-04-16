@@ -1091,3 +1091,608 @@ class TestMinuteScanning:
         )
 
         assert minute_reason == daily_reason
+
+
+# ---------------------------------------------------------------------------
+# 相对值阈值集成测试 (Task 4.8)
+# 需求: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6
+# ---------------------------------------------------------------------------
+
+from app.core.schemas import HoldingContext
+
+
+def _make_cache_with_opens(
+    closes: list[float],
+    opens: list[float] | None = None,
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+    volumes: list[int] | None = None,
+) -> IndicatorCache:
+    """创建包含 opens 字段的 IndicatorCache。"""
+    n = len(closes)
+    if opens is None:
+        opens = [c - 0.5 for c in closes]
+    if highs is None:
+        highs = [c + 1 for c in closes]
+    if lows is None:
+        lows = [c - 1 for c in closes]
+    if volumes is None:
+        volumes = [1000] * n
+    return IndicatorCache(
+        closes=closes,
+        highs=highs,
+        lows=lows,
+        opens=opens,
+        volumes=volumes,
+        amounts=[Decimal("100000")] * n,
+        turnovers=[Decimal("5.0")] * n,
+    )
+
+
+class TestRelativeConditionEvaluation:
+    """相对值条件评估测试 (需求 4.2, 4.3)"""
+
+    def test_close_below_entry_price_times_factor_triggers(self):
+        """close < entry_price × 0.95 应触发（止损场景）
+
+        entry_price=10.0, factor=0.95 → resolved=9.5
+        close[2]=9.0 < 9.5 → 触发
+
+        Validates: Requirements 4.2
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.8, 9.0, 9.5, 10.2]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.5,
+            lowest_price=9.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.95,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        assert reason is not None
+
+    def test_close_above_entry_price_times_factor_not_triggered(self):
+        """close > entry_price × 0.95 不应触发
+
+        entry_price=10.0, factor=0.95 → resolved=9.5
+        close[3]=9.5 is NOT < 9.5 (equal, not less) → 不触发
+
+        Validates: Requirements 4.2
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.8, 9.6, 9.5, 10.2]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.5,
+            lowest_price=9.5, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.95,
+                ),
+            ],
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 3, cache, None, holding_context=holding,
+        )
+        assert triggered is False
+
+    def test_close_below_highest_price_times_factor_triggers(self):
+        """close < highest_price × 0.90 应触发（回撤止损场景）
+
+        highest_price=12.0, factor=0.90 → resolved=10.8
+        close[3]=10.5 < 10.8 → 触发
+
+        Validates: Requirements 4.2
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 11.0, 12.0, 10.5, 10.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=12.0,
+            lowest_price=10.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="highest_price", factor=0.90,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 3, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        assert reason is not None
+
+    def test_relative_with_prev_close_base_field(self):
+        """close > prev_close × 1.05 应触发（涨幅超过5%场景）
+
+        prev_close = closes[1] = 100.0, factor=1.05 → resolved=105.0
+        close[2]=106.0 > 105.0 → 触发
+
+        Validates: Requirements 4.2
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [98.0, 100.0, 106.0, 107.0, 108.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=95.0, highest_price=108.0,
+            lowest_price=95.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator=">",
+                    threshold_mode="relative",
+                    base_field="prev_close", factor=1.05,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        assert reason is not None
+
+
+class TestHoldingContextPassing:
+    """holding_context 传递和使用测试 (需求 4.1)"""
+
+    def test_holding_context_none_skips_relative_condition(self):
+        """holding_context=None 时，需要 HoldingContext 的 relative 条件应跳过
+
+        base_field=entry_price 需要 HoldingContext，但未提供 → ThresholdResolver 返回 None → 跳过
+
+        Validates: Requirements 4.1, 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.95,
+                ),
+            ],
+        )
+        # holding_context=None → ThresholdResolver 返回 None → 条件跳过
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=None,
+        )
+        assert triggered is False
+
+    def test_holding_context_passed_to_evaluate_single(self):
+        """holding_context 正确传递到 _evaluate_single 并用于解析
+
+        entry_price=20.0, factor=0.90 → resolved=18.0
+        close[2]=17.0 < 18.0 → 触发
+
+        Validates: Requirements 4.1
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [20.0, 19.0, 17.0, 16.0, 15.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=20.0, highest_price=20.0,
+            lowest_price=15.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.90,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        assert "18.0000" in reason
+
+    def test_holding_context_with_indicator_cache_base_field(self):
+        """relative 条件使用 IndicatorCache 基准字段时不需要 HoldingContext
+
+        base_field=prev_close 从 IndicatorCache 获取，holding_context=None 也可以
+
+        Validates: Requirements 4.1
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [100.0, 105.0, 115.0, 120.0, 125.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator=">",
+                    threshold_mode="relative",
+                    base_field="prev_close", factor=1.05,
+                ),
+            ],
+        )
+        # prev_close = closes[1] = 105.0, factor=1.05 → resolved=110.25
+        # close[2] = 115.0 > 110.25 → 触发
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=None,
+        )
+        assert triggered is True
+        assert reason is not None
+
+
+class TestThresholdResolverReturnsNone:
+    """ThresholdResolver 返回 None 时跳过条件测试 (需求 4.3)"""
+
+    def test_invalid_base_field_skips_condition(self):
+        """无效 base_field 导致 ThresholdResolver 返回 None → 条件跳过
+
+        Validates: Requirements 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="invalid_field", factor=0.95,
+                ),
+            ],
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is False
+
+    def test_factor_none_skips_condition(self):
+        """factor=None 导致 ThresholdResolver 返回 None → 条件跳过
+
+        Validates: Requirements 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=None,
+                ),
+            ],
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is False
+
+    def test_factor_zero_skips_condition(self):
+        """factor=0 导致 ThresholdResolver 返回 None → 条件跳过
+
+        Validates: Requirements 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0,
+                ),
+            ],
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is False
+
+    def test_prev_close_at_bar_index_0_skips_condition(self):
+        """bar_index=0 时 prev_close 无法解析 → 条件跳过
+
+        Validates: Requirements 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="prev_close", factor=0.95,
+                ),
+            ],
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 0, cache, None, holding_context=None,
+        )
+        assert triggered is False
+
+    def test_resolver_none_in_and_logic_prevents_trigger(self):
+        """AND 逻辑中一个条件因 resolver 返回 None 被跳过 → 整体不触发
+
+        Validates: Requirements 4.3
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                # 条件 1: absolute close < 100 → 触发
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold=100.0,
+                ),
+                # 条件 2: relative 但 factor=None → resolver 返回 None → 跳过(False)
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=None,
+                ),
+            ],
+            logic="AND",
+        )
+        triggered, _ = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=None,
+        )
+        assert triggered is False
+
+
+class TestReasonFormatRelativeMode:
+    """触发原因格式测试 (需求 4.5)"""
+
+    def test_relative_reason_includes_resolved_value_and_base_info(self):
+        """relative 模式触发原因应包含解析后阈值和基准信息
+
+        格式: "{INDICATOR} {operator} {resolved:.4f}（{base_field}×{factor}）"
+
+        Validates: Requirements 4.5
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.8, 9.0, 8.5, 8.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=8.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.95,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        # resolved = 10.0 × 0.95 = 9.5
+        assert "CLOSE" in reason
+        assert "<" in reason
+        assert "9.5000" in reason
+        assert "entry_price" in reason
+        assert "0.95" in reason
+        assert "（" in reason and "）" in reason
+
+    def test_relative_reason_format_exact(self):
+        """验证 relative 模式触发原因的精确格式
+
+        Validates: Requirements 4.5
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [20.0, 19.0, 17.0, 16.0, 15.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=20.0, highest_price=20.0,
+            lowest_price=15.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold_mode="relative",
+                    base_field="entry_price", factor=0.90,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        # resolved = 20.0 × 0.90 = 18.0
+        expected = "CLOSE < 18.0000（entry_price×0.9）"
+        assert reason == expected
+
+    def test_absolute_reason_does_not_include_base_info(self):
+        """absolute 模式触发原因不应包含基准信息
+
+        Validates: Requirements 4.5
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold=9.5,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None,
+        )
+        assert triggered is True
+        assert "CLOSE" in reason
+        assert "（" not in reason
+        assert "×" not in reason
+
+
+class TestAbsoluteModeUnchanged:
+    """absolute 模式在有/无 holding_context 时行为不变测试 (需求 4.4)"""
+
+    def test_absolute_without_holding_context(self):
+        """absolute 模式无 holding_context 时保持现有行为
+
+        Validates: Requirements 4.4
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold=9.5,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=None,
+        )
+        assert triggered is True
+        assert "CLOSE" in reason
+        assert "< 9.5" in reason
+
+    def test_absolute_with_holding_context(self):
+        """absolute 模式有 holding_context 时行为不变
+
+        Validates: Requirements 4.4
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold=9.5,
+                ),
+            ],
+        )
+        triggered, reason = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert triggered is True
+        assert "CLOSE" in reason
+        assert "< 9.5" in reason
+
+    def test_absolute_results_identical_with_and_without_holding(self):
+        """absolute 模式有/无 holding_context 结果完全一致
+
+        Validates: Requirements 4.4
+        """
+        evaluator = ExitConditionEvaluator()
+        closes = [10.0, 9.0, 8.0, 7.0, 6.0]
+        cache = _make_cache_with_opens(closes)
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="close", operator="<",
+                    threshold=9.5,
+                ),
+            ],
+        )
+        result_without = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=None,
+        )
+        result_with = evaluator.evaluate(
+            config, "TEST", 2, cache, None, holding_context=holding,
+        )
+        assert result_without == result_with
+
+    def test_absolute_cross_unaffected_by_holding_context(self):
+        """absolute 模式交叉条件不受 holding_context 影响
+
+        Validates: Requirements 4.4, 4.6
+        """
+        evaluator = ExitConditionEvaluator()
+        cache = _make_cache_with_opens(
+            closes=[10.0, 9.0, 8.0, 7.0, 6.0],
+        )
+        exit_cache = {"daily": {
+            "macd_dif": [0.5, 0.3, 0.2, 0.1, -0.1],
+            "macd_dea": [0.1, 0.1, 0.1, 0.1, 0.1],
+        }}
+        holding = HoldingContext(
+            entry_price=10.0, highest_price=10.0,
+            lowest_price=6.0, entry_bar_index=0,
+        )
+
+        config = ExitConditionConfig(
+            conditions=[
+                ExitCondition(
+                    freq="daily", indicator="macd_dif", operator="cross_down",
+                    cross_target="macd_dea",
+                ),
+            ],
+        )
+        result_without = evaluator.evaluate(
+            config, "TEST", 4, cache, exit_cache, holding_context=None,
+        )
+        result_with = evaluator.evaluate(
+            config, "TEST", 4, cache, exit_cache, holding_context=holding,
+        )
+        assert result_without == result_with
+        assert result_without[0] is True
