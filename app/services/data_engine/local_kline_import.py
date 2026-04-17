@@ -1135,6 +1135,10 @@ class LocalKlineImportService:
                             batch = valid_bars[i : i + self.BATCH_SIZE]
                             inserted = await repo.bulk_insert(batch)
                             inserted_for_file += inserted
+                            # 每批写入后更新心跳，防止被误判为僵尸任务
+                            await self.update_progress(
+                                elapsed_seconds=round(time.time() - start_time, 2),
+                            )
                         del valid_bars  # 释放内存
 
                 del zip_bytes  # 释放内存
