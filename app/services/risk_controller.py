@@ -43,7 +43,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from app.core.schemas import MarketRiskLevel, RiskCheckResult
+import logging
+
+from app.core.schemas import MarketRiskLevel, Position, RiskCheckResult
 
 
 # ---------------------------------------------------------------------------
@@ -509,3 +511,269 @@ class StopLossChecker:
             True 表示策略不健康，应触发风险预警
         """
         return win_rate < _STRATEGY_WIN_RATE_THRESHOLD or max_drawdown > _STRATEGY_MAX_DRAWDOWN_THRESHOLD
+
+
+# ---------------------------------------------------------------------------
+# SectorConcentrationChecker — 板块集中度风控
+# ---------------------------------------------------------------------------
+
+_SECTOR_CONCENTRATION_THRESHOLD = 30.0  # 板块集中度预警阈值 (%)
+
+logger = logging.getLogger(__name__)
+
+
+class SectorConcentrationChecker:
+    """
+    板块集中度风控检测器。
+
+    基于板块成分数据计算持仓的板块集中度，当单一板块的持仓股票数量占比
+    或持仓市值占比超过配置阈值时生成预警。
+
+    对应需求：
+    - 需求 9.1：查询持仓股票所属板块
+    - 需求 9.2：持仓股票数量占板块成分股总数比例超阈值 → 预警
+    - 需求 9.3：持仓市值占总持仓市值比例超阈值 → 预警
+    - 需求 9.4：支持配置板块集中度阈值，默认 30%
+    - 需求 9.5：板块数据不可用时跳过检查，不阻塞其他风控
+    """
+
+    def __init__(
+        self,
+        threshold_pct: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    ) -> None:
+        """
+        Args:
+            threshold_pct: 板块集中度预警阈值百分比，默认 30.0
+        """
+        self.threshold_pct = threshold_pct
+
+    async def check_sector_concentration(
+        self,
+        positions: list[Position],
+    ) -> list[dict]:
+        """
+        检查持仓的板块集中度。
+
+        对每只持仓股票查询其所属板块，汇总计算每个板块的：
+        - 持仓股票数 / 成分股总数（count_ratio）
+        - 板块持仓市值 / 总持仓市值（value_ratio）
+
+        当任一比率超过阈值时生成预警。
+
+        Args:
+            positions: 持仓列表，每个元素需有 symbol 和 market_value 属性
+
+        Returns:
+            预警字典列表，每个字典包含：
+            - sector_code: 板块代码
+            - sector_name: 板块名称（如可获取）
+            - count_ratio: 持仓股票数占比 (%)
+            - value_ratio: 持仓市值占比 (%)
+            - warning_type: 预警类型 ("count" / "value" / "both")
+        """
+        try:
+            from app.services.data_engine.sector_repository import SectorRepository
+
+            repo = SectorRepository()
+            return await self._compute_concentration(positions, repo)
+        except Exception:
+            logger.warning(
+                "板块成分数据不可用，跳过板块集中度检查",
+                exc_info=True,
+            )
+            return []
+
+    async def _compute_concentration(
+        self,
+        positions: list[Position],
+        repo: "SectorRepository",
+    ) -> list[dict]:
+        """内部计算逻辑，分离以便测试。"""
+        if not positions:
+            return []
+
+        # 总持仓市值
+        total_market_value = sum(
+            float(p.market_value) for p in positions
+        )
+        if total_market_value <= 0:
+            return []
+
+        # 收集每只股票所属板块
+        # sector_code → { "name": str, "symbols": set, "market_value": float, "constituent_count": int }
+        sector_map: dict[str, dict] = {}
+
+        for pos in positions:
+            try:
+                constituents = await repo.get_sectors_by_stock(pos.symbol)
+            except Exception:
+                logger.warning(
+                    "查询股票 %s 所属板块失败，跳过", pos.symbol, exc_info=True,
+                )
+                continue
+
+            for c in constituents:
+                code = c.sector_code
+                if code not in sector_map:
+                    sector_map[code] = {
+                        "name": "",
+                        "symbols": set(),
+                        "market_value": 0.0,
+                        "constituent_count": 0,
+                    }
+                sector_map[code]["symbols"].add(pos.symbol)
+                sector_map[code]["market_value"] += float(pos.market_value)
+
+        # 查询每个板块的成分股总数和名称
+        for code, info in sector_map.items():
+            try:
+                # 获取板块信息（名称和成分股数量）
+                from app.models.sector import DataSource
+
+                sector_list = await repo.get_sector_list()
+                for si in sector_list:
+                    if si.sector_code == code:
+                        info["name"] = si.name
+                        if si.constituent_count is not None:
+                            info["constituent_count"] = si.constituent_count
+                        break
+
+                # 如果 constituent_count 仍为 0，尝试从成分表计数
+                if info["constituent_count"] == 0:
+                    for ds in DataSource:
+                        constituents = await repo.get_constituents(code, ds)
+                        if constituents:
+                            info["constituent_count"] = len(constituents)
+                            break
+            except Exception:
+                logger.warning(
+                    "查询板块 %s 成分股数量失败", code, exc_info=True,
+                )
+
+        # 计算比率并生成预警
+        warnings: list[dict] = []
+        threshold = self.threshold_pct
+
+        for code, info in sector_map.items():
+            holding_count = len(info["symbols"])
+            constituent_count = info["constituent_count"]
+            sector_mv = info["market_value"]
+
+            # 持仓股票数占比
+            count_ratio = (
+                (holding_count / constituent_count * 100.0)
+                if constituent_count > 0
+                else 0.0
+            )
+
+            # 持仓市值占比
+            value_ratio = (
+                (sector_mv / total_market_value * 100.0)
+                if total_market_value > 0
+                else 0.0
+            )
+
+            count_exceeded = count_ratio > threshold
+            value_exceeded = value_ratio > threshold
+
+            if count_exceeded or value_exceeded:
+                if count_exceeded and value_exceeded:
+                    warning_type = "both"
+                elif count_exceeded:
+                    warning_type = "count"
+                else:
+                    warning_type = "value"
+
+                warnings.append({
+                    "sector_code": code,
+                    "sector_name": info["name"],
+                    "count_ratio": round(count_ratio, 2),
+                    "value_ratio": round(value_ratio, 2),
+                    "warning_type": warning_type,
+                })
+
+        return warnings
+
+    @staticmethod
+    def compute_concentration_pure(
+        positions: list[dict],
+        sector_assignments: dict[str, list[str]],
+        sector_constituent_counts: dict[str, int],
+        threshold_pct: float = _SECTOR_CONCENTRATION_THRESHOLD,
+    ) -> list[dict]:
+        """
+        纯函数版本的板块集中度计算（无数据库依赖，用于属性测试）。
+
+        Args:
+            positions: 持仓列表，每个字典包含 "symbol" 和 "market_value"
+            sector_assignments: 股票 → 所属板块代码列表的映射
+            sector_constituent_counts: 板块代码 → 成分股总数的映射
+            threshold_pct: 预警阈值百分比
+
+        Returns:
+            预警字典列表
+        """
+        if not positions:
+            return []
+
+        total_market_value = sum(p["market_value"] for p in positions)
+        if total_market_value <= 0:
+            return []
+
+        # 汇总每个板块的持仓信息
+        sector_map: dict[str, dict] = {}
+
+        for pos in positions:
+            symbol = pos["symbol"]
+            mv = pos["market_value"]
+            sectors = sector_assignments.get(symbol, [])
+
+            for code in sectors:
+                if code not in sector_map:
+                    sector_map[code] = {
+                        "symbols": set(),
+                        "market_value": 0.0,
+                    }
+                sector_map[code]["symbols"].add(symbol)
+                sector_map[code]["market_value"] += mv
+
+        # 计算比率并生成预警
+        warnings: list[dict] = []
+
+        for code, info in sector_map.items():
+            holding_count = len(info["symbols"])
+            constituent_count = sector_constituent_counts.get(code, 0)
+            sector_mv = info["market_value"]
+
+            count_ratio = (
+                (holding_count / constituent_count * 100.0)
+                if constituent_count > 0
+                else 0.0
+            )
+
+            value_ratio = (
+                (sector_mv / total_market_value * 100.0)
+                if total_market_value > 0
+                else 0.0
+            )
+
+            count_exceeded = count_ratio > threshold_pct
+            value_exceeded = value_ratio > threshold_pct
+
+            if count_exceeded or value_exceeded:
+                if count_exceeded and value_exceeded:
+                    warning_type = "both"
+                elif count_exceeded:
+                    warning_type = "count"
+                else:
+                    warning_type = "value"
+
+                warnings.append({
+                    "sector_code": code,
+                    "sector_name": "",
+                    "count_ratio": round(count_ratio, 2),
+                    "value_ratio": round(value_ratio, 2),
+                    "warning_type": warning_type,
+                })
+
+        return warnings

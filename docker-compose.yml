@@ -89,7 +89,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - /Volumes/light/DBData/timescaledb:/var/lib/postgresql/data
+      - ${TIMESCALEDB_DATA_DIR:-timescaledb_data}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -109,7 +109,7 @@ services:
     ports:
       - "5433:5432"
     volumes:
-      - /Volumes/light/DBData/postgres:/var/lib/postgresql/data
+      - ${POSTGRES_DATA_DIR:-postgres_data}:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
@@ -125,7 +125,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - /Volumes/light/DBData/redis:/data
+      - ${REDIS_DATA_DIR:-redis_data}:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -153,4 +153,13 @@ services:
       retries: 3
     restart: unless-stopped
 
-volumes: {}
+volumes:
+  timescaledb_data:
+    external: true
+    name: poperright_timescaledb_data
+  postgres_data:
+    external: true
+    name: poperright_postgres_data
+  redis_data:
+    external: true
+    name: poperright_redis_data

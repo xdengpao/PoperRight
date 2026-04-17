@@ -17,6 +17,7 @@ celery_app = Celery(
         "app.tasks.screening",
         "app.tasks.backtest",
         "app.tasks.review",
+        "app.tasks.sector_sync",
     ],
 )
 
@@ -32,6 +33,7 @@ celery_app.conf.update(
     # 任务路由：按队列分发
     task_routes={
         "app.tasks.data_sync.*": {"queue": "data_sync"},
+        "app.tasks.sector_sync.*": {"queue": "data_sync"},
         "app.tasks.screening.*": {"queue": "screening"},
         "app.tasks.backtest.*": {"queue": "backtest"},
         "app.tasks.review.*": {"queue": "review"},

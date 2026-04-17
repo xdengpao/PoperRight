@@ -13,6 +13,7 @@ from app.api.v1.data import router as data_router
 from app.api.v1.review import router as review_router
 from app.api.v1.risk import router as risk_router
 from app.api.v1.screen import router as screen_router
+from app.api.v1.sector import router as sector_router
 from app.api.v1.trade import router as trade_router
 from app.api.v1.ws import router as ws_router
 
@@ -27,6 +28,7 @@ router.include_router(backtest_router)
 router.include_router(trade_router)
 router.include_router(review_router)
 router.include_router(admin_router)
+router.include_router(sector_router)
 
 
 # ---------------------------------------------------------------------------

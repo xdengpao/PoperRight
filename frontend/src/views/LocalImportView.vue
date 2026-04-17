@@ -290,6 +290,108 @@
         耗时 {{ formatElapsed(store.adjResult.elapsed_seconds) }}
       </div>
     </section>
+
+    <!-- ══════════════════════════════════════════════════════════════ -->
+    <!-- 板块数据导入 -->
+    <!-- ══════════════════════════════════════════════════════════════ -->
+    <section class="card" aria-label="板块数据导入">
+      <h2 class="section-title">板块数据导入</h2>
+
+      <div class="form-group">
+        <label class="form-label">数据来源</label>
+        <div class="checkbox-group" role="group" aria-label="数据来源">
+          <label v-for="s in sectorSourceOptions" :key="s.value" class="checkbox-item">
+            <input type="checkbox" :value="s.value" v-model="selectedSectorSources" /> {{ s.label }}
+          </label>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">导入模式</label>
+        <div class="checkbox-group" role="group" aria-label="导入模式">
+          <label class="checkbox-item">
+            <input type="radio" value="full" v-model="sectorImportType" name="sectorImportType" /> 全量导入
+          </label>
+          <label class="checkbox-item">
+            <input type="radio" value="incremental" v-model="sectorImportType" name="sectorImportType" /> 增量导入
+          </label>
+        </div>
+      </div>
+
+      <button
+        class="btn btn-primary"
+        :disabled="store.sectorLoading || store.sectorProgress.status === 'running'"
+        @click="handleStartSectorImport"
+        aria-label="开始板块导入"
+      >
+        {{ store.sectorLoading ? '提交中...' : '开始板块导入' }}
+      </button>
+
+      <button
+        v-if="store.sectorProgress.status === 'running'"
+        class="btn btn-danger"
+        @click="store.requestStopSectorImport()"
+        aria-label="停止板块导入"
+      >
+        停止导入
+      </button>
+
+      <span v-if="store.sectorError" class="sync-msg error" role="status">{{ store.sectorError }}</span>
+      <span v-if="sectorSuccessMsg" class="sync-msg success" role="status">{{ sectorSuccessMsg }}</span>
+
+      <button
+        v-if="store.sectorProgress.status !== 'idle' && store.sectorProgress.status !== 'running'"
+        class="btn btn-secondary"
+        @click="handleResetSectorImport"
+        aria-label="清空板块导入状态"
+      >
+        清空状态
+      </button>
+    </section>
+
+    <!-- ── 板块导入进度 ── -->
+    <section v-if="store.sectorProgress.status !== 'idle'" class="card" aria-label="板块导入进度">
+      <h2 class="section-title">板块导入进度</h2>
+
+      <div class="progress-header">
+        <span class="status-badge" :class="sectorStatusClass">{{ sectorStatusLabel }}</span>
+        <span v-if="store.sectorProgress.stage" class="progress-step">
+          {{ sectorStageLabel }}
+        </span>
+      </div>
+
+      <!-- 进度条 -->
+      <div v-if="sectorProgressPct != null" class="progress-bar-container" style="margin: 12px 0;">
+        <div class="progress-bar" :style="{ width: sectorProgressPct + '%' }"></div>
+      </div>
+      <div v-if="sectorProgressPct != null" class="progress-text" style="margin-bottom: 8px;">
+        {{ sectorProgressPct }}%
+      </div>
+
+      <div class="stats-grid">
+        <div v-if="store.sectorProgress.total_files != null" class="stat-card">
+          <div class="stat-label">文件进度</div>
+          <div class="stat-value">{{ store.sectorProgress.processed_files ?? 0 }} / {{ store.sectorProgress.total_files }}</div>
+        </div>
+        <div v-else-if="store.sectorProgress.processed_files != null" class="stat-card">
+          <div class="stat-label">已处理文件数</div>
+          <div class="stat-value">{{ store.sectorProgress.processed_files }}</div>
+        </div>
+        <div v-if="store.sectorProgress.imported_records != null" class="stat-card">
+          <div class="stat-label">已导入记录数</div>
+          <div class="stat-value highlight">{{ (store.sectorProgress.imported_records ?? 0).toLocaleString() }}</div>
+        </div>
+      </div>
+
+      <!-- 当前处理文件 -->
+      <div v-if="store.sectorProgress.current_file && store.sectorProgress.status === 'running'" class="current-file-info" style="margin-top: 8px; font-size: 0.85em; color: var(--text-secondary, #888);">
+        正在处理: {{ store.sectorProgress.current_file }}
+      </div>
+
+      <div v-if="store.sectorProgress.error" class="sync-msg error" style="margin-top: 8px;">
+        {{ store.sectorProgress.error }}
+      </div>
+    </section>
   </div>
 </template>
 
@@ -378,6 +480,58 @@ async function handleResetAdjImport() {
   await store.resetAdjImportStatus()
 }
 
+// ── 板块数据导入配置 ──────────────────────────────────────────────────────────
+
+const sectorSourceOptions = [
+  { value: 'DC', label: '东方财富' },
+  { value: 'TI', label: '同花顺' },
+  { value: 'TDX', label: '通达信' },
+]
+const selectedSectorSources = ref<string[]>(['DC', 'TI', 'TDX'])
+const sectorImportType = ref<'full' | 'incremental'>('incremental')
+const sectorSuccessMsg = ref('')
+
+async function handleStartSectorImport() {
+  sectorSuccessMsg.value = ''
+  const params = {
+    data_sources: selectedSectorSources.value.length === sectorSourceOptions.length ? null : selectedSectorSources.value,
+    import_type: sectorImportType.value,
+  }
+  await store.startSectorImport(params)
+  if (!store.sectorError && store.sectorTaskId) {
+    sectorSuccessMsg.value = `板块导入任务已触发，任务ID: ${store.sectorTaskId}`
+    store.startSectorPolling()
+    setTimeout(() => { sectorSuccessMsg.value = '' }, 5000)
+  }
+}
+
+async function handleResetSectorImport() {
+  await store.resetSectorImportStatus()
+}
+
+const sectorStatusLabel = computed(() => {
+  const map: Record<string, string> = { running: '运行中', completed: '已完成', failed: '失败', stopped: '已停止' }
+  return map[store.sectorProgress.status] ?? store.sectorProgress.status
+})
+
+const sectorStatusClass = computed(() => {
+  const map: Record<string, string> = { running: 'syncing', completed: 'ok', failed: 'error', stopped: 'warn-badge' }
+  return map[store.sectorProgress.status] ?? ''
+})
+
+const sectorStageLabel = computed(() => {
+  const stage = store.sectorProgress.stage ?? ''
+  // 后端直接使用中文阶段名，直接返回
+  return stage
+})
+
+const sectorProgressPct = computed(() => {
+  const total = store.sectorProgress.total_files
+  const processed = store.sectorProgress.processed_files
+  if (total == null || total === 0 || processed == null) return null
+  return Math.min(100, Math.round((processed / total) * 100))
+})
+
 // ── K线进度计算 ───────────────────────────────────────────────────────────────
 
 const progressPct = computed(() => {
@@ -441,17 +595,22 @@ onMounted(async () => {
 
   await store.fetchStatus()
   await store.fetchAdjStatus()
+  await store.fetchSectorStatus()
   if (store.progress.status === 'running' || store.progress.status === 'pending') {
     store.startPolling()
   }
   if (store.adjResult.status === 'running') {
     store.startAdjPolling()
   }
+  if (store.sectorProgress.status === 'running') {
+    store.startSectorPolling()
+  }
 })
 
 onUnmounted(() => {
   store.stopPolling()
   store.stopAdjPolling()
+  store.stopSectorPolling()
 })
 </script>
 

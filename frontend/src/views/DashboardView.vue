@@ -149,30 +149,91 @@
       </div>
     </section>
 
-    <!-- 板块热力 -->
+    <!-- 板块涨幅排行 -->
     <section class="sector-section" aria-label="板块数据">
       <h2 class="section-title">板块涨幅排行</h2>
+
+      <!-- 板块类型标签页 -->
+      <div class="chart-tabs sector-tabs" role="tablist" aria-label="板块类型切换">
+        <button
+          v-for="tab in sectorTabs"
+          :key="tab.key"
+          role="tab"
+          :aria-selected="sectorStore.currentType === tab.key"
+          :class="['tab-btn', { active: sectorStore.currentType === tab.key }]"
+          @click="sectorStore.setSectorType(tab.key)"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
+
+      <!-- 数据源选择器 -->
+      <div class="source-selector" aria-label="数据源切换">
+        <span class="source-label">数据源：</span>
+        <button
+          v-for="src in dataSourceOptions"
+          :key="src.key"
+          :class="['source-btn', { active: sectorStore.currentDataSource === src.key }]"
+          @click="sectorStore.setDataSource(src.key)"
+        >
+          {{ src.label }}
+        </button>
+      </div>
+
+      <!-- 板块排行表格 -->
       <table class="data-table" aria-label="板块涨幅排行表">
         <thead>
           <tr>
+            <th scope="col">排名</th>
             <th scope="col">板块名称</th>
             <th scope="col">涨跌幅</th>
-            <th scope="col">领涨股</th>
-            <th scope="col">总市值(亿)</th>
+            <th scope="col">收盘价</th>
+            <th scope="col">成交额(亿)</th>
+            <th scope="col">换手率</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in sectors" :key="s.name">
-            <td>{{ s.name }}</td>
-            <td :class="s.change_pct >= 0 ? 'up' : 'down'">
-              {{ s.change_pct >= 0 ? '+' : '' }}{{ s.change_pct.toFixed(2) }}%
+          <tr v-if="sectorStore.loading">
+            <td colspan="6" class="loading-text">加载板块数据中...</td>
+          </tr>
+          <tr v-else-if="sectorStore.error">
+            <td colspan="6" class="error-banner-inline">
+              {{ sectorStore.error }}
+              <button class="btn retry-btn" @click="sectorStore.fetchRanking()">重试</button>
             </td>
-            <td>{{ s.leader }}</td>
-            <td>{{ (s.amount / 1e8).toFixed(2) }}</td>
           </tr>
-          <tr v-if="sectors.length === 0">
-            <td colspan="4" class="empty">暂无数据</td>
-          </tr>
+          <template v-else>
+            <template v-for="(s, idx) in sectorStore.rankings" :key="s.sector_code">
+              <tr>
+                <td>{{ idx + 1 }}</td>
+                <td
+                  class="sector-name-cell"
+                  @click="sectorStore.toggleSectorKline(s.sector_code, sectorStore.currentDataSource || undefined)"
+                >
+                  {{ s.name }}
+                </td>
+                <td :class="(s.change_pct ?? 0) >= 0 ? 'up' : 'down'">
+                  {{ s.change_pct != null ? ((s.change_pct >= 0 ? '+' : '') + s.change_pct.toFixed(2) + '%') : '--' }}
+                </td>
+                <td>{{ s.close != null ? s.close.toFixed(2) : '--' }}</td>
+                <td>{{ s.amount != null ? (s.amount / 1e8).toFixed(2) : '--' }}</td>
+                <td>{{ s.turnover != null ? s.turnover.toFixed(2) + '%' : '--' }}</td>
+              </tr>
+              <tr v-if="sectorStore.expandedSectorCode === s.sector_code" class="kline-expand-row">
+                <td colspan="6">
+                  <div v-if="sectorStore.expandedKlineLoading" class="kline-loading">加载K线数据中...</div>
+                  <div v-else-if="sectorStore.expandedKlineError" class="kline-error">
+                    {{ sectorStore.expandedKlineError }}
+                    <button class="btn retry-btn" @click="retrySectorKline(s.sector_code)">重试</button>
+                  </div>
+                  <div v-else :ref="setSectorKlineChartRef" class="sector-kline-chart"></div>
+                </td>
+              </tr>
+            </template>
+            <tr v-if="sectorStore.rankings.length === 0">
+              <td colspan="6" class="empty">暂无数据</td>
+            </tr>
+          </template>
         </tbody>
       </table>
     </section>
@@ -180,8 +241,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
 import { useMarketStore } from '@/stores/market'
+import { useSectorStore } from '@/stores/sector'
+import type { SectorTypeFilter, DataSourceFilter } from '@/stores/sector'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
 import { getFundamentalColorClass, formatFundamentalValue } from './fundamentalUtils'
@@ -561,24 +624,111 @@ function renderKline(data: KlineData[]) {
   })
 }
 
-// ─── 板块数据 ────────────────────────────────────────────────────────────────
+// ─── 板块排行 ────────────────────────────────────────────────────────────────
 
-interface SectorData {
-  name: string
-  change_pct: number
-  leader: string
-  amount: number
+const sectorStore = useSectorStore()
+
+const sectorTabs = [
+  { key: '' as SectorTypeFilter, label: '全部' },
+  { key: 'INDUSTRY' as SectorTypeFilter, label: '行业板块' },
+  { key: 'CONCEPT' as SectorTypeFilter, label: '概念板块' },
+  { key: 'REGION' as SectorTypeFilter, label: '地区板块' },
+  { key: 'STYLE' as SectorTypeFilter, label: '风格板块' },
+]
+
+const dataSourceOptions = [
+  { key: '' as DataSourceFilter, label: '自动' },
+  { key: 'DC' as DataSourceFilter, label: '东方财富' },
+  { key: 'TI' as DataSourceFilter, label: '同花顺' },
+  { key: 'TDX' as DataSourceFilter, label: '通达信' },
+]
+
+// ─── 板块K线展开图表 ─────────────────────────────────────────────────────────
+
+const sectorKlineChartRef = ref<HTMLElement | null>(null)
+let sectorKlineChartInstance: echarts.ECharts | null = null
+
+function setSectorKlineChartRef(el: any) {
+  sectorKlineChartRef.value = el as HTMLElement | null
 }
-const sectors = ref<SectorData[]>([])
 
-async function loadSectors() {
-  try {
-    const res = await apiClient.get<SectorData[]>('/data/market/sectors')
-    sectors.value = res.data
-  } catch {
-    /* API not available yet */
+function retrySectorKline(sectorCode: string) {
+  // Collapse first, then re-expand to trigger a fresh fetch
+  sectorStore.expandedSectorCode = null
+  nextTick(() => {
+    sectorStore.toggleSectorKline(sectorCode, sectorStore.currentDataSource || undefined)
+  })
+}
+
+function renderSectorKline() {
+  if (!sectorKlineChartRef.value) return
+  const data = sectorStore.expandedKlineData
+  if (!data || data.length === 0) return
+
+  if (sectorKlineChartInstance) {
+    sectorKlineChartInstance.dispose()
   }
+  sectorKlineChartInstance = echarts.init(sectorKlineChartRef.value)
+
+  const dates = data.map(d => d.time.slice(0, 10))
+  const ohlc = data.map(d => [d.open, d.close, d.low, d.high])
+  const volumes = data.map(d => d.volume ?? 0)
+
+  sectorKlineChartInstance.setOption({
+    backgroundColor: 'transparent',
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    grid: [
+      { left: 60, right: 20, top: 20, height: '55%' },
+      { left: 60, right: 20, top: '72%', height: '18%' },
+    ],
+    xAxis: [
+      { type: 'category', data: dates, gridIndex: 0, axisLabel: { color: '#8b949e' } },
+      { type: 'category', data: dates, gridIndex: 1, axisLabel: { show: false } },
+    ],
+    yAxis: [
+      { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: '#21262d' } }, axisLabel: { color: '#8b949e' } },
+      { scale: true, gridIndex: 1, splitLine: { show: false }, axisLabel: { color: '#8b949e' } },
+    ],
+    series: [
+      {
+        name: 'K线',
+        type: 'candlestick',
+        data: ohlc,
+        xAxisIndex: 0,
+        yAxisIndex: 0,
+        itemStyle: { color: '#f85149', color0: '#3fb950', borderColor: '#f85149', borderColor0: '#3fb950' },
+      },
+      {
+        name: '成交量',
+        type: 'bar',
+        data: volumes,
+        xAxisIndex: 1,
+        yAxisIndex: 1,
+        itemStyle: { color: '#30363d' },
+      },
+    ],
+  })
 }
+
+watch(
+  () => sectorStore.expandedKlineData,
+  async (newData) => {
+    if (newData && newData.length > 0) {
+      await nextTick()
+      renderSectorKline()
+    }
+  },
+)
+
+watch(
+  () => sectorStore.expandedSectorCode,
+  (newCode) => {
+    if (newCode === null) {
+      sectorKlineChartInstance?.dispose()
+      sectorKlineChartInstance = null
+    }
+  },
+)
 
 // ─── WebSocket 实时刷新 ─────────────────────────────────────────────────────
 
@@ -607,6 +757,7 @@ function connectWs() {
 function handleResize() {
   chartInstance?.resize()
   moneyFlowChartInstance?.resize()
+  sectorKlineChartInstance?.resize()
 }
 
 // ─── 生命周期 ────────────────────────────────────────────────────────────────
@@ -618,7 +769,7 @@ onMounted(async () => {
     chartInstance = echarts.init(klineChartRef.value)
   }
   marketStore.fetchOverview()
-  loadSectors()
+  sectorStore.fetchRanking()
   loadKline()
   connectWs()
   window.addEventListener('resize', handleResize)
@@ -627,6 +778,7 @@ onMounted(async () => {
 onUnmounted(() => {
   chartInstance?.dispose()
   moneyFlowChartInstance?.dispose()
+  sectorKlineChartInstance?.dispose()
   fundamentalsAbortController?.abort()
   moneyFlowAbortController?.abort()
   ws?.close()
@@ -742,6 +894,19 @@ onUnmounted(() => {
 .money-flow-chart { width: 100%; height: 350px; }
 
 .sector-section { margin-bottom: 24px; }
+.source-selector {
+  display: flex; align-items: center; gap: 6px; margin: 8px 0 12px;
+}
+.source-label { font-size: 12px; color: #8b949e; }
+.source-btn {
+  background: #0d1117; border: 1px solid #30363d; color: #8b949e;
+  padding: 3px 10px; border-radius: 4px; font-size: 12px; cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.source-btn:hover { color: #e6edf3; border-color: #484f58; }
+.source-btn.active {
+  color: #e6edf3; border-color: #238636; background: #161b22; font-weight: 500;
+}
 .data-table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; }
 .data-table th, .data-table td { padding: 10px 14px; text-align: left; border-bottom: 1px solid #21262d; font-size: 14px; }
 .data-table th { color: #8b949e; font-weight: 500; background: #161b22; }
@@ -751,5 +916,27 @@ onUnmounted(() => {
 .error-banner-inline {
   display: flex; align-items: center; gap: 12px;
   color: #f85149; font-size: 14px; padding: 16px 0;
+}
+
+/* 板块K线展开 */
+.sector-name-cell {
+  cursor: pointer; transition: text-decoration 0.2s;
+}
+.sector-name-cell:hover {
+  text-decoration: underline;
+}
+.kline-expand-row td {
+  padding: 0 !important; border-bottom: 1px solid #21262d;
+}
+.sector-kline-chart {
+  width: 100%; height: 300px; background: #0d1117;
+}
+.kline-loading {
+  display: flex; align-items: center; justify-content: center;
+  height: 300px; color: #8b949e; font-size: 14px; background: #0d1117;
+}
+.kline-error {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  height: 300px; color: #f85149; font-size: 14px; background: #0d1117;
 }
 </style>

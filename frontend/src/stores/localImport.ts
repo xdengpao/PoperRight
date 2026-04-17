@@ -16,6 +16,22 @@ export interface AdjFactorImportParams {
   adj_factors: string[]
 }
 
+export interface SectorImportParams {
+  data_sources: string[] | null
+  import_type: 'full' | 'incremental'
+}
+
+export interface SectorImportProgress {
+  status: string
+  stage: string | null
+  total_files: number | null
+  processed_files: number | null
+  imported_records: number | null
+  current_file: string | null
+  heartbeat: number | null
+  error: string | null
+}
+
 /** 缓存在 Redis 中的导入页面参数 */
 export interface CachedImportParams {
   markets: string[] | null
@@ -109,8 +125,16 @@ export const useLocalImportStore = defineStore('localImport', () => {
   const adjError = ref('')
   const adjPolling = ref(false)
 
+  // 板块数据导入状态
+  const sectorLoading = ref(false)
+  const sectorProgress = reactive<SectorImportProgress>({ status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+  const sectorError = ref('')
+  const sectorPolling = ref(false)
+  const sectorTaskId = ref<string | null>(null)
+
   let pollingTimer: ReturnType<typeof setInterval> | null = null
   let adjPollingTimer: ReturnType<typeof setInterval> | null = null
+  let sectorPollingTimer: ReturnType<typeof setInterval> | null = null
 
   // ── 动作 ──────────────────────────────────────────────────────────────────
 
@@ -284,6 +308,91 @@ export const useLocalImportStore = defineStore('localImport', () => {
     }
   }
 
+  // ── 板块数据导入 ────────────────────────────────────────────────────────────
+
+  /** 触发板块数据导入任务（全量或增量） */
+  async function startSectorImport(params: SectorImportParams): Promise<void> {
+    sectorLoading.value = true
+    sectorError.value = ''
+    try {
+      const endpoint = params.import_type === 'incremental'
+        ? '/sector/import/incremental'
+        : '/sector/import/full'
+      const body: { data_sources?: string[] } = {}
+      if (params.data_sources && params.data_sources.length > 0) {
+        body.data_sources = params.data_sources
+      }
+      const res = await apiClient.post<{ task_id: string; message: string }>(endpoint, body)
+      sectorTaskId.value = res.data.task_id
+      // 重置进度
+      Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+    } catch (err: unknown) {
+      sectorError.value = extractErrorMessage(err, '触发板块导入失败')
+    } finally {
+      sectorLoading.value = false
+    }
+  }
+
+  /** 获取板块导入进度 */
+  async function fetchSectorStatus(): Promise<void> {
+    try {
+      const res = await apiClient.get<SectorImportProgress>('/sector/import/status')
+      Object.assign(sectorProgress, res.data)
+      // 终态时停止轮询
+      if (
+        res.data.status === 'completed' ||
+        res.data.status === 'failed' ||
+        res.data.status === 'stopped'
+      ) {
+        stopSectorPolling()
+      }
+    } catch {
+      // 静默忽略
+    }
+  }
+
+  /** 启动板块导入轮询 */
+  function startSectorPolling(): void {
+    if (sectorPollingTimer !== null) {
+      clearInterval(sectorPollingTimer)
+      sectorPollingTimer = null
+    }
+    sectorPolling.value = true
+    fetchSectorStatus()
+    sectorPollingTimer = setInterval(fetchSectorStatus, 3000)
+  }
+
+  /** 停止板块导入轮询 */
+  function stopSectorPolling(): void {
+    if (sectorPollingTimer !== null) {
+      clearInterval(sectorPollingTimer)
+      sectorPollingTimer = null
+    }
+    sectorPolling.value = false
+  }
+
+  /** 请求停止板块导入 */
+  async function requestStopSectorImport(): Promise<void> {
+    try {
+      await apiClient.post('/sector/import/stop')
+    } catch {
+      // 静默忽略
+    }
+  }
+
+  /** 清空板块导入状态（重置为 idle） */
+  async function resetSectorImportStatus(): Promise<void> {
+    stopSectorPolling()
+    try {
+      await apiClient.post('/sector/import/reset')
+    } catch {
+      // 静默忽略，仍然清前端状态
+    }
+    Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+    sectorTaskId.value = null
+    sectorError.value = ''
+  }
+
   return {
     taskId,
     progress,
@@ -295,6 +404,11 @@ export const useLocalImportStore = defineStore('localImport', () => {
     adjResult,
     adjError,
     adjPolling,
+    sectorLoading,
+    sectorProgress,
+    sectorError,
+    sectorPolling,
+    sectorTaskId,
     startImport,
     fetchStatus,
     startPolling,
@@ -307,6 +421,12 @@ export const useLocalImportStore = defineStore('localImport', () => {
     requestStopAdjImport,
     resetImportStatus,
     resetAdjImportStatus,
+    startSectorImport,
+    fetchSectorStatus,
+    startSectorPolling,
+    stopSectorPolling,
+    requestStopSectorImport,
+    resetSectorImportStatus,
     saveParams,
     loadParams,
   }
