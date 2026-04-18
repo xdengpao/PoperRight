@@ -353,6 +353,32 @@ class VolumePriceConfig:
 
 
 @dataclass
+class SectorScreenConfig:
+    """板块筛选配置（需求 5.1）"""
+    sector_data_source: str = "DC"       # DC（东方财富）/ TI（同花顺）/ TDX（通达信）
+    sector_type: str = "CONCEPT"         # INDUSTRY / CONCEPT / REGION / STYLE
+    sector_period: int = 5               # 涨幅计算周期（天）
+    sector_top_n: int = 30               # 排名阈值
+
+    def to_dict(self) -> dict:
+        return {
+            "sector_data_source": self.sector_data_source,
+            "sector_type": self.sector_type,
+            "sector_period": self.sector_period,
+            "sector_top_n": self.sector_top_n,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SectorScreenConfig":
+        return cls(
+            sector_data_source=data.get("sector_data_source", "DC"),
+            sector_type=data.get("sector_type", "CONCEPT"),
+            sector_period=data.get("sector_period", 5),
+            sector_top_n=data.get("sector_top_n", 30),
+        )
+
+
+@dataclass
 class StrategyConfig:
     """选股策略配置"""
     factors: list[FactorCondition] = field(default_factory=list)
@@ -363,6 +389,7 @@ class StrategyConfig:
     ma_trend: MaTrendConfig = field(default_factory=MaTrendConfig)
     breakout: BreakoutConfig = field(default_factory=BreakoutConfig)
     volume_price: VolumePriceConfig = field(default_factory=VolumePriceConfig)
+    sector_config: SectorScreenConfig = field(default_factory=SectorScreenConfig)
 
     def to_dict(self) -> dict:
         """序列化为可 JSON 存储的字典"""
@@ -388,6 +415,7 @@ class StrategyConfig:
             "ma_trend": self.ma_trend.to_dict(),
             "breakout": self.breakout.to_dict(),
             "volume_price": self.volume_price.to_dict(),
+            "sector_config": self.sector_config.to_dict(),
         }
 
     @classmethod
@@ -415,6 +443,9 @@ class StrategyConfig:
         raw_vp = data.get("volume_price")
         volume_price = VolumePriceConfig.from_dict(raw_vp) if isinstance(raw_vp, dict) else VolumePriceConfig()
 
+        raw_sc = data.get("sector_config")
+        sector_config = SectorScreenConfig.from_dict(raw_sc) if isinstance(raw_sc, dict) else SectorScreenConfig()
+
         return cls(
             factors=factors,
             logic=data.get("logic", "AND"),
@@ -424,6 +455,7 @@ class StrategyConfig:
             ma_trend=ma_trend,
             breakout=breakout,
             volume_price=volume_price,
+            sector_config=sector_config,
         )
 
 

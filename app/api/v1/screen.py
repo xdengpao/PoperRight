@@ -27,8 +27,15 @@ from app.core.database import AsyncSessionPG, AsyncSessionTS, get_pg_session
 from app.core.redis_client import cache_get, cache_set, get_redis
 from app.core.schemas import ScreenType, StrategyConfig
 from app.models.strategy import StrategyTemplate
+from app.services.screener.factor_registry import (
+    FACTOR_REGISTRY,
+    FactorCategory,
+    FactorMeta,
+    get_factors_by_category,
+)
 from app.services.screener.screen_data_provider import ScreenDataProvider
 from app.services.screener.screen_executor import ScreenExecutor
+from app.services.screener.strategy_examples import STRATEGY_EXAMPLES
 
 router = APIRouter(tags=["选股"])
 
@@ -104,6 +111,13 @@ class VolumePriceConfigIn(BaseModel):
     sector_rank_top: int = 30
 
 
+class SectorScreenConfigIn(BaseModel):
+    sector_data_source: str = "DC"
+    sector_type: str = "CONCEPT"
+    sector_period: int = 5
+    sector_top_n: int = 30
+
+
 class StrategyConfigIn(BaseModel):
     factors: list[FactorConditionIn] = Field(default_factory=list)
     logic: Literal["AND", "OR"] = "AND"
@@ -113,6 +127,7 @@ class StrategyConfigIn(BaseModel):
     ma_trend: MaTrendConfigIn = Field(default_factory=MaTrendConfigIn)
     breakout: BreakoutConfigIn = Field(default_factory=BreakoutConfigIn)
     volume_price: VolumePriceConfigIn = Field(default_factory=VolumePriceConfigIn)
+    sector_config: SectorScreenConfigIn = Field(default_factory=SectorScreenConfigIn)
 
 
 class ScreenRunRequest(BaseModel):
@@ -509,6 +524,67 @@ async def get_eod_schedule_status(redis: Redis = Depends(get_redis)) -> EodSched
         next_run_at=next_run_at, last_run_at=last_run_at,
         last_run_duration_ms=last_run_duration_ms, last_run_result_count=last_run_result_count,
     )
+
+
+# ---------------------------------------------------------------------------
+# 因子注册表 & 策略示例 API
+# ---------------------------------------------------------------------------
+
+
+def _factor_meta_to_dict(meta: FactorMeta) -> dict:
+    """将 FactorMeta 数据类序列化为 JSON 兼容的 dict。"""
+    return {
+        "factor_name": meta.factor_name,
+        "label": meta.label,
+        "category": meta.category.value,
+        "threshold_type": meta.threshold_type.value,
+        "default_threshold": meta.default_threshold,
+        "value_min": meta.value_min,
+        "value_max": meta.value_max,
+        "unit": meta.unit,
+        "description": meta.description,
+        "examples": meta.examples,
+        "default_range": list(meta.default_range) if meta.default_range else None,
+    }
+
+
+@router.get("/screen/factor-registry")
+async def get_factor_registry(
+    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector"),
+) -> dict:
+    """返回因子元数据注册表。"""
+    if category is not None:
+        # 验证 category 是否为有效的 FactorCategory 值
+        try:
+            cat_enum = FactorCategory(category)
+        except ValueError:
+            return {}
+        factors = get_factors_by_category(cat_enum)
+        return {category: [_factor_meta_to_dict(m) for m in factors]}
+
+    # 无 category 参数时，返回所有因子按类别分组
+    result: dict[str, list[dict]] = {}
+    for cat in FactorCategory:
+        factors = get_factors_by_category(cat)
+        result[cat.value] = [_factor_meta_to_dict(m) for m in factors]
+    return result
+
+
+@router.get("/screen/strategy-examples")
+async def get_strategy_examples() -> list[dict]:
+    """返回策略示例库。"""
+    return [
+        {
+            "name": ex.name,
+            "description": ex.description,
+            "factors": ex.factors,
+            "logic": ex.logic,
+            "weights": ex.weights,
+            "enabled_modules": ex.enabled_modules,
+            "sector_config": ex.sector_config,
+        }
+        for ex in STRATEGY_EXAMPLES
+    ]
 
 
 # ---------------------------------------------------------------------------

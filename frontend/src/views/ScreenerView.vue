@@ -92,6 +92,7 @@
             @click="config.logic = 'OR'"
           >OR（满足其一）</button>
         </div>
+        <button class="btn btn-outline btn-sm" @click="showExamplesDialog = true">📋 加载示例策略</button>
       </div>
 
       <!-- 因子条件列表 -->
@@ -111,34 +112,86 @@
             <option v-for="ft in factorTypes" :key="ft.key" :value="ft.key">{{ ft.label }}</option>
           </select>
 
-          <select
-            v-model="factor.factor_name"
-            class="input factor-name"
-            :aria-label="`因子名称 ${idx + 1}`"
-          >
-            <option value="" disabled>选择因子</option>
-            <option
-              v-for="opt in factorNameOptions[factor.type]"
-              :key="opt.value"
-              :value="opt.value"
-            >{{ opt.label }}</option>
-          </select>
+          <div class="factor-name-wrapper" :title="getFactorMeta(factor.factor_name)?.description ?? ''">
+            <select
+              v-model="factor.factor_name"
+              class="input factor-name"
+              :aria-label="`因子名称 ${idx + 1}`"
+            >
+              <option value="" disabled>选择因子</option>
+              <option
+                v-for="opt in factorNameOptions[factor.type]"
+                :key="opt.value"
+                :value="opt.value"
+              >{{ opt.label }}</option>
+            </select>
+          </div>
 
-          <select v-model="factor.operator" class="input factor-op" :aria-label="`运算符 ${idx + 1}`">
-            <option value=">">&gt;</option>
-            <option value=">=">&gt;=</option>
-            <option value="<">&lt;</option>
-            <option value="<=">&lt;=</option>
-            <option value="==">==</option>
-          </select>
+          <span class="threshold-type-badge" :class="getFactorThresholdType(factor.factor_name)">
+            {{ thresholdTypeLabel(getFactorThresholdType(factor.factor_name)) }}
+          </span>
 
-          <input
-            v-model.number="factor.threshold"
-            type="number"
-            class="input factor-threshold"
-            placeholder="阈值"
-            :aria-label="`阈值 ${idx + 1}`"
-          />
+          <!-- Boolean type: toggle switch, hide operator -->
+          <template v-if="getFactorThresholdType(factor.factor_name) === 'boolean'">
+            <label class="toggle-switch factor-toggle">
+              <input type="checkbox" :checked="factor.threshold !== 0" @change="factor.threshold = ($event.target as HTMLInputElement).checked ? null : 0" />
+              <span class="toggle-track"></span>
+            </label>
+          </template>
+
+          <!-- Range type: dual inputs -->
+          <template v-else-if="getFactorThresholdType(factor.factor_name) === 'range'">
+            <div class="range-inputs">
+              <input v-model.number="(factor.params as Record<string, unknown>).threshold_low" type="number" class="input factor-threshold-half" placeholder="下限" :aria-label="`下限 ${idx + 1}`" />
+              <span class="range-sep">–</span>
+              <input v-model.number="(factor.params as Record<string, unknown>).threshold_high" type="number" class="input factor-threshold-half" placeholder="上限" :aria-label="`上限 ${idx + 1}`" />
+            </div>
+          </template>
+
+          <!-- Default: existing threshold input + operator -->
+          <template v-else>
+            <select v-model="factor.operator" class="input factor-op" :aria-label="`运算符 ${idx + 1}`">
+              <option value=">">&gt;</option>
+              <option value=">=">&gt;=</option>
+              <option value="<">&lt;</option>
+              <option value="<=">&lt;=</option>
+              <option value="==">==</option>
+            </select>
+
+            <input
+              v-model.number="factor.threshold"
+              type="number"
+              class="input factor-threshold"
+              placeholder="阈值"
+              :aria-label="`阈值 ${idx + 1}`"
+            />
+          </template>
+
+          <span v-if="getFactorMeta(factor.factor_name)?.unit" class="factor-unit">
+            {{ getFactorMeta(factor.factor_name)?.unit }}
+          </span>
+          <span v-if="getFactorMeta(factor.factor_name)?.value_min != null" class="factor-range-hint">
+            ({{ getFactorMeta(factor.factor_name)?.value_min }}–{{ getFactorMeta(factor.factor_name)?.value_max }})
+          </span>
+
+          <!-- Sector-specific selectors -->
+          <div v-if="factor.type === 'sector'" class="sector-selectors">
+            <select v-model="sectorConfig.sector_data_source" class="input sector-select" aria-label="数据来源">
+              <option value="DC">东方财富</option>
+              <option value="TI">同花顺</option>
+              <option value="TDX">通达信</option>
+            </select>
+            <select v-model="sectorConfig.sector_type" class="input sector-select" aria-label="板块类型">
+              <option value="INDUSTRY">行业板块</option>
+              <option value="CONCEPT">概念板块</option>
+              <option value="REGION">地区板块</option>
+              <option value="STYLE">风格板块</option>
+            </select>
+            <div class="sector-period-input">
+              <input v-model.number="sectorConfig.sector_period" type="number" min="1" max="60" class="input param-input" aria-label="涨幅周期" />
+              <span class="param-hint">天</span>
+            </div>
+          </div>
 
           <!-- 权重滑块 -->
           <div class="weight-control">
@@ -155,6 +208,7 @@
             <span class="weight-value">{{ factor.weight }}</span>
           </div>
 
+          <button class="btn-icon" title="恢复默认" @click="resetFactorDefault(idx)" aria-label="恢复默认">↺</button>
           <button class="btn-icon danger" @click="removeFactor(idx)" :aria-label="`删除因子 ${idx + 1}`">✕</button>
         </div>
 
@@ -819,6 +873,30 @@
         </div>
       </div>
     </div>
+
+    <!-- 策略示例对话框 -->
+    <div v-if="showExamplesDialog" class="dialog-overlay" @click.self="showExamplesDialog = false">
+      <div class="dialog dialog-wide" role="dialog" aria-modal="true" aria-label="加载示例策略">
+        <h3 class="dialog-title">选择策略示例</h3>
+        <div class="example-list">
+          <div
+            v-for="(ex, idx) in screenerStore.strategyExamples"
+            :key="idx"
+            class="example-item"
+            @click="loadStrategyExample(ex)"
+          >
+            <div class="example-name">{{ ex.name }}</div>
+            <div class="example-desc">{{ ex.description }}</div>
+            <div class="example-tags">
+              <span v-for="mod in ex.enabled_modules" :key="mod" class="example-tag">{{ mod }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-outline" @click="showExamplesDialog = false">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -828,6 +906,8 @@ import { useRouter } from 'vue-router'
 import { apiClient } from '@/api'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
+import { useScreenerStore } from '@/stores/screener'
+import type { FactorMeta, StrategyExample } from '@/stores/screener'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -839,6 +919,7 @@ interface FactorCondition {
   operator: string
   threshold: number | null
   weight: number
+  params: Record<string, unknown>
 }
 
 type StrategyModule = 'factor_editor' | 'ma_trend' | 'indicator_params' | 'breakout' | 'volume_price'
@@ -888,40 +969,38 @@ const factorTypes: { key: FactorType; label: string }[] = [
   { key: 'sector', label: '板块面' },
 ]
 
-/** 每个因子类型下可选的因子名称枚举 */
+/** 每个因子类型下可选的因子名称枚举
+ *
+ * 因子名称与后端 FACTOR_REGISTRY 保持一致。
+ * 前端 FactorType 'capital' 对应后端 FactorCategory 'money_flow'。
+ */
 const factorNameOptions: Record<FactorType, { value: string; label: string }[]> = {
   technical: [
-    { value: 'ma_trend', label: '均线趋势评分' },
-    { value: 'macd_signal', label: 'MACD 多头信号' },
-    { value: 'boll_breakout', label: 'BOLL 突破信号' },
-    { value: 'rsi_strength', label: 'RSI 强势信号' },
-    { value: 'dma_signal', label: 'DMA 信号' },
+    { value: 'ma_trend', label: 'MA趋势打分' },
     { value: 'ma_support', label: '均线支撑信号' },
-    { value: 'box_breakout', label: '箱体突破' },
-    { value: 'high_breakout', label: '前高突破' },
-    { value: 'trendline_breakout', label: '趋势线突破' },
-    { value: 'breakout_score', label: '突破综合评分' },
+    { value: 'macd', label: 'MACD金叉信号' },
+    { value: 'boll', label: '布林带突破信号' },
+    { value: 'rsi', label: 'RSI强势信号' },
+    { value: 'dma', label: 'DMA平行线差' },
+    { value: 'breakout', label: '形态突破' },
   ],
   capital: [
-    { value: 'capital_inflow', label: '主力资金净流入' },
-    { value: 'large_order_ratio', label: '大单成交占比' },
-    { value: 'north_inflow', label: '北向资金流入' },
-    { value: 'volume_surge', label: '成交量放大倍数' },
-    { value: 'turnover_rate', label: '换手率' },
+    { value: 'turnover', label: '换手率' },
+    { value: 'money_flow', label: '主力资金净流入' },
+    { value: 'large_order', label: '大单成交占比' },
+    { value: 'volume_price', label: '日均成交额' },
   ],
   fundamental: [
-    { value: 'pe_ttm', label: 'PE（TTM）' },
-    { value: 'pb', label: 'PB' },
-    { value: 'roe', label: 'ROE' },
-    { value: 'net_profit_growth', label: '净利润同比增长率' },
-    { value: 'revenue_growth', label: '营收同比增长率' },
+    { value: 'pe', label: '市盈率 TTM' },
+    { value: 'pb', label: '市净率' },
+    { value: 'roe', label: '净资产收益率' },
+    { value: 'profit_growth', label: '利润增长率' },
     { value: 'market_cap', label: '总市值' },
+    { value: 'revenue_growth', label: '营收增长率' },
   ],
   sector: [
     { value: 'sector_rank', label: '板块涨幅排名' },
-    { value: 'sector_trend', label: '板块趋势强度' },
-    { value: 'sector_inflow', label: '板块资金流入' },
-    { value: 'sector_count', label: '板块涨停家数' },
+    { value: 'sector_trend', label: '板块趋势' },
   ],
 }
 
@@ -939,6 +1018,60 @@ function inferFactorType(name: string): FactorType {
 
 function factorTypeLabel(type: string): string {
   return factorTypes.find((f) => f.key === type)?.label ?? type
+}
+
+// ─── Screener Store ───────────────────────────────────────────────────────────
+
+const screenerStore = useScreenerStore()
+
+// ─── 因子元数据辅助函数 ───────────────────────────────────────────────────────
+
+function getFactorMeta(factorName: string): FactorMeta | undefined {
+  for (const factors of Object.values(screenerStore.factorRegistry)) {
+    const found = factors.find(f => f.factor_name === factorName)
+    if (found) return found
+  }
+  return undefined
+}
+
+function getFactorThresholdType(factorName: string): string {
+  return getFactorMeta(factorName)?.threshold_type ?? 'absolute'
+}
+
+function thresholdTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    absolute: '绝对值',
+    percentile: '百分位',
+    industry_relative: '行业相对',
+    boolean: '布尔',
+    range: '区间',
+    z_score: 'Z分数',
+  }
+  return labels[type] ?? type
+}
+
+function getFactorCategory(factorName: string): string {
+  const meta = getFactorMeta(factorName)
+  const category = meta?.category ?? 'technical'
+  // 后端 FactorCategory 'money_flow' 对应前端 FactorType 'capital'
+  if (category === 'money_flow') return 'capital'
+  return category
+}
+
+function resetFactorDefault(idx: number) {
+  const factor = config.factors[idx]
+  const meta = getFactorMeta(factor.factor_name)
+  if (!meta) return
+  if (meta.threshold_type === 'range' && meta.default_range) {
+    factor.threshold = null
+    factor.params = { ...factor.params, threshold_low: meta.default_range[0], threshold_high: meta.default_range[1] }
+    factor.operator = 'BETWEEN'
+  } else if (meta.threshold_type === 'boolean') {
+    factor.threshold = null
+    factor.operator = '=='
+  } else {
+    factor.threshold = meta.default_threshold
+  }
 }
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
@@ -1098,6 +1231,48 @@ const volumePriceConfig = reactive<VolumePriceConfig>({
   sector_rank_top: 30,
 })
 
+// ─── 板块筛选配置 ──────────────────────────────────────────────────────────────
+
+const sectorConfig = reactive({
+  sector_data_source: 'DC',
+  sector_type: 'CONCEPT',
+  sector_period: 5,
+  sector_top_n: 30,
+})
+
+// ─── 策略示例 ──────────────────────────────────────────────────────────────────
+
+const showExamplesDialog = ref(false)
+
+function loadStrategyExample(ex: StrategyExample) {
+  // Load factors
+  config.factors = ex.factors.map(f => ({
+    type: (getFactorCategory(f.factor_name) as FactorType),
+    factor_name: f.factor_name,
+    operator: f.operator,
+    threshold: f.threshold,
+    params: { ...f.params },
+    weight: Math.round((ex.weights[f.factor_name] ?? 1.0) * 100),
+  }))
+  config.logic = ex.logic as 'AND' | 'OR'
+
+  // Load sector config
+  if (ex.sector_config) {
+    sectorConfig.sector_data_source = ex.sector_config.sector_data_source
+    sectorConfig.sector_type = ex.sector_config.sector_type
+    sectorConfig.sector_period = ex.sector_config.sector_period
+    sectorConfig.sector_top_n = ex.sector_config.sector_top_n
+  }
+
+  // Enable required modules
+  currentEnabledModules.value = [...ex.enabled_modules] as StrategyModule[]
+  if (ex.factors.length > 0 && !currentEnabledModules.value.includes('factor_editor')) {
+    currentEnabledModules.value.push('factor_editor')
+  }
+
+  showExamplesDialog.value = false
+}
+
 // ─── 策略数量上限 ──────────────────────────────────────────────────────────────
 
 const MAX_STRATEGIES = 20
@@ -1136,10 +1311,10 @@ const _isTradingHoursRef = ref(isTradingHours())
 let _tradingHoursTimer: ReturnType<typeof setInterval> | null = null
 
 function startTradingHoursCheck() {
-  _tradingHoursRef.value = isTradingHours()
+  _isTradingHoursRef.value = isTradingHours()
   _tradingHoursTimer = setInterval(() => {
-    _tradingHoursRef.value = isTradingHours()
-    if (!_tradingHoursRef.value && realtimeEnabled.value) {
+    _isTradingHoursRef.value = isTradingHours()
+    if (!_isTradingHoursRef.value && realtimeEnabled.value) {
       stopRealtime()
     }
   }, 30_000)
@@ -1301,6 +1476,7 @@ async function selectStrategy(id: string) {
       operator: (f.operator as string) ?? '>',
       threshold: (f.threshold as number | null) ?? null,
       weight: Math.round(((weights[(f.factor_name as string) ?? ''] ?? 0.5) * 100)),
+      params: (f.params as Record<string, unknown>) ?? {},
     }))
 
     // 回填均线趋势配置
@@ -1361,6 +1537,17 @@ async function selectStrategy(id: string) {
       })
     } else {
       Object.assign(volumePriceConfig, { ...VOLUME_PRICE_DEFAULTS })
+    }
+
+    // 回填板块筛选配置
+    const sc = cfg.sector_config as Record<string, unknown> | undefined
+    if (sc) {
+      sectorConfig.sector_data_source = (sc.sector_data_source as string) ?? 'DC'
+      sectorConfig.sector_type = (sc.sector_type as string) ?? 'CONCEPT'
+      sectorConfig.sector_period = (sc.sector_period as number) ?? 5
+      sectorConfig.sector_top_n = (sc.sector_top_n as number) ?? 30
+    } else {
+      Object.assign(sectorConfig, { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 5, sector_top_n: 30 })
     }
 
     // 激活该策略（需求 22.3）
@@ -1528,6 +1715,7 @@ function addFactor(type: FactorType) {
     operator: '>',
     threshold: null,
     weight: 50,
+    params: {},
   })
 }
 
@@ -1538,7 +1726,7 @@ function removeFactor(idx: number) {
 function buildStrategyConfig() {
   return {
     logic: config.logic,
-    factors: config.factors.map(({ weight: _weight, ...f }) => f),
+    factors: config.factors.map(({ weight: _weight, type: _type, ...f }) => f),
     weights: Object.fromEntries(
       config.factors.map((f) => [f.factor_name || f.type, f.weight / 100])
     ),
@@ -1557,6 +1745,7 @@ function buildStrategyConfig() {
     },
     breakout: { ...breakoutConfig },
     volume_price: { ...volumePriceConfig },
+    sector_config: { ...sectorConfig },
   }
 }
 
@@ -1585,6 +1774,9 @@ async function runScreen() {
 
 onMounted(async () => {
   await loadStrategies()
+  // 加载因子注册表和策略示例
+  screenerStore.fetchFactorRegistry()
+  screenerStore.fetchStrategyExamples()
   // 自动选中 is_active=true 的策略并回显配置（需求 22.3）
   const active = strategies.value.find((s) => s.is_active)
   if (active) {
@@ -1919,4 +2111,48 @@ details > summary::-webkit-details-marker { display: none; }
   animation: fadeIn 0.2s ease-in;
 }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* ─── 因子元数据增强 ────────────────────────────────────────────────────────── */
+.factor-name-wrapper { flex: 1; min-width: 120px; }
+.factor-name-wrapper .factor-name { width: 100%; }
+
+.threshold-type-badge {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  background: var(--bg-secondary, #2d333b); color: var(--text-secondary, #8b949e);
+  white-space: nowrap; flex-shrink: 0;
+}
+.threshold-type-badge.percentile { background: #1a3a5c; color: #58a6ff; }
+.threshold-type-badge.industry_relative { background: #2a3a2a; color: #7ee787; }
+.threshold-type-badge.boolean { background: #3a2a3a; color: #d2a8ff; }
+.threshold-type-badge.range { background: #3a3a1a; color: #e3b341; }
+
+.range-inputs { display: flex; align-items: center; gap: 4px; }
+.factor-threshold-half { width: 70px; }
+.range-sep { color: var(--text-secondary, #8b949e); font-size: 13px; }
+
+.factor-toggle { flex-shrink: 0; }
+
+.sector-selectors { display: flex; gap: 8px; align-items: center; margin-top: 4px; width: 100%; }
+.sector-select { width: 100px; }
+.sector-period-input { display: flex; align-items: center; gap: 4px; }
+.param-hint { font-size: 12px; color: #8b949e; }
+
+.factor-unit { font-size: 12px; color: var(--text-secondary, #8b949e); flex-shrink: 0; }
+.factor-range-hint { font-size: 11px; color: var(--text-secondary, #8b949e); flex-shrink: 0; }
+
+/* ─── 策略示例对话框 ────────────────────────────────────────────────────────── */
+.dialog-wide { max-width: 600px; }
+.example-list { max-height: 400px; overflow-y: auto; }
+.example-item {
+  padding: 12px; border-bottom: 1px solid var(--border, #30363d);
+  cursor: pointer; transition: background 0.15s;
+}
+.example-item:hover { background: var(--bg-secondary, #2d333b); }
+.example-name { font-weight: 600; margin-bottom: 4px; color: #e6edf3; }
+.example-desc { font-size: 13px; color: var(--text-secondary, #8b949e); margin-bottom: 6px; }
+.example-tags { display: flex; gap: 4px; flex-wrap: wrap; }
+.example-tag {
+  font-size: 11px; padding: 1px 6px; border-radius: 3px;
+  background: var(--bg-secondary, #2d333b); color: #8b949e;
+}
 </style>

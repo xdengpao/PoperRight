@@ -2,27 +2,31 @@
 
 ## Backend (Python 3.11+)
 
-- Framework: FastAPI (async, uvicorn)
+- Framework: FastAPI (async, uvicorn), app factory in `app/main.py` via `create_app()`
 - ORM: SQLAlchemy 2.0 async API with two separate engines:
-  - `PGBase` → PostgreSQL 16 (business data)
-  - `TSBase` → TimescaleDB (time-series market data)
+  - `PGBase` → PostgreSQL 16 (business data: users, strategies, trades, stocks)
+  - `TSBase` → TimescaleDB (time-series: K-line hypertables)
+- Models use `Mapped[]` + `mapped_column()` (SQLAlchemy 2.0 declarative style)
 - Migrations: Alembic (script dir: `alembic/`, versions in `alembic/versions/`)
 - Task queue: Celery + Redis broker, 4 queues: `data_sync`, `screening`, `backtest`, `review`
+- Task base classes in `app/tasks/base.py`: `DataSyncTask`, `ScreeningTask`, `BacktestTask`, `ReviewTask`
 - Scheduling: Celery Beat (crontab-based, weekday-only jobs)
 - Caching / Pub-Sub: Redis 7 (async via `redis.asyncio`)
-- Config: pydantic-settings (`BaseSettings`), loaded from `.env`
+- Config: pydantic-settings (`BaseSettings` singleton in `app/core/config.py`), loaded from `.env`
 - Auth: custom JWT (HMAC-SHA256), TOTP 2FA stub, bcrypt-style password hashing
 - Build system: Hatchling (`pyproject.toml`)
 - Python package layout: `app/` is the sole top-level package
+- Business data types: plain `dataclasses` + `enum.Enum` in `app/core/schemas.py` (not Pydantic)
+- Async test mode: `pytest-asyncio` with `asyncio_mode = "auto"`
 
 ## Frontend (TypeScript)
 
 - Framework: Vue 3 (Composition API, `<script setup>`)
-- State: Pinia stores
-- Routing: vue-router 4 with JWT auth guards and role-based access
-- HTTP: Axios with interceptors for token injection
+- State: Pinia stores (defineStore with setup syntax)
+- Routing: vue-router 4 with JWT auth guards and role-based access (`meta.roles`)
+- HTTP: Axios with interceptors for token injection and error handling
 - Charts: ECharts 5 via vue-echarts
-- Build: Vite 5
+- Build: Vite 5 with `@` path alias → `src/`
 - Testing: Vitest + @vue/test-utils + fast-check (property-based)
 
 ## Infrastructure
@@ -30,6 +34,7 @@
 - Docker Compose orchestration: app, celery-worker, celery-beat, timescaledb, postgres, redis, nginx
 - Nginx reverse proxy serves frontend static files and proxies `/api` to FastAPI
 - Python image: `python:3.11-slim`
+- Vite dev server proxies `/api` and `/ws` to localhost:8000
 
 ## Common Commands
 

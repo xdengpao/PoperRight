@@ -5,9 +5,9 @@ A-Share Quantitative Trading System (A股右侧量化选股系统) — a full-st
 ## Core Capabilities
 
 - Market data ingestion: real-time and historical K-line data via TimescaleDB, plus fundamental and money-flow data
-- Intelligent stock screening: configurable multi-factor strategies (MA trend, MACD, volume-price, breakout) with AND/OR logic and weighted scoring
-- Risk management: per-stock and per-sector position limits, stop-loss/take-profit, trailing stops, market-level risk states (NORMAL / CAUTION / DANGER)
-- Backtesting engine: historical strategy replay with 9 performance metrics (Sharpe, Calmar, max drawdown, win rate, etc.)
+- Intelligent stock screening: configurable multi-factor strategies (MA trend, MACD, BOLL, RSI, DMA, volume-price, breakout) with AND/OR logic and weighted scoring
+- Risk management: pre-trade (market risk, stock filters, blacklist), in-trade (position limits, sector concentration, breakdown detection), post-trade (fixed/trailing/trend stop-loss, strategy health)
+- Backtesting engine: historical strategy replay with 9 performance metrics (Sharpe, Calmar, max drawdown, win rate, etc.), T+1 rule enforcement, configurable exit conditions
 - Trade execution: live and paper trading modes, limit/market/condition orders, broker API integration
 - Post-market review: automated daily review reports and strategy performance analysis
 - Real-time alerts: WebSocket push for screening results, stop-loss triggers, price thresholds, and market risk changes
@@ -18,4 +18,7 @@ A-Share Quantitative Trading System (A股右侧量化选股系统) — a full-st
 - Trading hours: 09:25–15:00 CST (Asia/Shanghai)
 - Scheduled jobs run on weekdays only (Mon–Fri)
 - All monetary values use `Decimal`; percentages are floats
-- The system is designed for the Chinese stock market — comments and UI labels are in Chinese
+- Stock symbols are 6-digit codes (e.g., "600000" for SH, "000001" for SZ)
+- Market risk levels: NORMAL (threshold 80) → CAUTION (threshold 90, below MA20) → DANGER (buy suspended, below MA60)
+- Comments, docstrings, and UI labels are in Chinese (中文)
+- Data sources: Tushare, AkShare, local CSV files for K-line data

@@ -21,6 +21,11 @@ from datetime import datetime
 from typing import Any
 
 from app.core.schemas import FactorCondition, StrategyConfig
+from app.services.screener.factor_registry import (
+    FACTOR_REGISTRY,
+    ThresholdType,
+    get_factor_meta,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +132,15 @@ class FactorEvaluator:
         weight: float = 1.0,
     ) -> FactorEvalResult:
         """
-        评估单个因子条件。
+        评估单个因子条件（阈值类型感知）。
 
-        对于布尔型因子（如 macd 信号），threshold 为 None 时直接取 bool 值。
-        对于数值型因子，使用 operator 和 threshold 进行比较。
+        根据因子的 threshold_type 自动选择正确的比较字段：
+        - PERCENTILE → 读取 {factor_name}_pctl
+        - INDUSTRY_RELATIVE → 读取 {factor_name}_ind_rel
+        - ABSOLUTE / BOOLEAN → 读取 {factor_name}（原始值）
+        - RANGE → 读取 {factor_name}，检查是否在 [threshold_low, threshold_high] 区间内
+
+        支持通过 condition.params["threshold_type"] 覆盖 FACTOR_REGISTRY 中的阈值类型（向后兼容）。
 
         Args:
             condition: 因子条件
@@ -141,9 +151,30 @@ class FactorEvaluator:
             FactorEvalResult
         """
         factor_name = condition.factor_name
-        value = stock_data.get(factor_name)
 
-        # 因子数据缺失 → 不通过
+        # 1. 确定 threshold_type：先检查 params 覆盖，再查 FACTOR_REGISTRY，最后默认 ABSOLUTE
+        override_type = condition.params.get("threshold_type")
+        if override_type:
+            try:
+                threshold_type = ThresholdType(override_type)
+            except ValueError:
+                threshold_type = ThresholdType.ABSOLUTE
+        else:
+            meta = get_factor_meta(factor_name)
+            threshold_type = meta.threshold_type if meta else ThresholdType.ABSOLUTE
+
+        # 2. 根据 threshold_type 确定读取字段
+        if threshold_type == ThresholdType.PERCENTILE:
+            field_name = f"{factor_name}_pctl"
+        elif threshold_type == ThresholdType.INDUSTRY_RELATIVE:
+            field_name = f"{factor_name}_ind_rel"
+        else:
+            field_name = factor_name
+
+        # 3. 读取值
+        value = stock_data.get(field_name)
+
+        # 4. 值缺失 → 不通过
         if value is None:
             return FactorEvalResult(
                 factor_name=factor_name,
@@ -152,10 +183,20 @@ class FactorEvaluator:
                 weight=weight,
             )
 
-        # 布尔型因子（threshold 为 None）
-        if condition.threshold is None:
-            passed = bool(value)
-            numeric_value = 1.0 if passed else 0.0
+        # 5. RANGE 类型：检查值是否在 [threshold_low, threshold_high] 区间内
+        #    (必须在 BOOLEAN/None 检查之前，因为 RANGE 条件的 threshold 通常为 None)
+        if threshold_type == ThresholdType.RANGE:
+            low = condition.params.get("threshold_low")
+            high = condition.params.get("threshold_high")
+            if low is None or high is None:
+                return FactorEvalResult(
+                    factor_name=factor_name,
+                    passed=False,
+                    value=float(value),
+                    weight=weight,
+                )
+            numeric_value = float(value)
+            passed = low <= numeric_value <= high
             return FactorEvalResult(
                 factor_name=factor_name,
                 passed=passed,
@@ -163,7 +204,17 @@ class FactorEvaluator:
                 weight=weight,
             )
 
-        # 数值型因子
+        # 6. BOOLEAN 类型（threshold 为 None）
+        if threshold_type == ThresholdType.BOOLEAN or condition.threshold is None:
+            passed = bool(value)
+            return FactorEvalResult(
+                factor_name=factor_name,
+                passed=passed,
+                value=1.0 if passed else 0.0,
+                weight=weight,
+            )
+
+        # 7. ABSOLUTE / PERCENTILE / INDUSTRY_RELATIVE — 标准比较运算符
         numeric_value = float(value)
         operator_fn = cls._OPERATORS.get(condition.operator)
         if operator_fn is None:

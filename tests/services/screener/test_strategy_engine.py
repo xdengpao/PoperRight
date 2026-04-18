@@ -46,19 +46,23 @@ class TestFactorEvaluator:
         assert result.passed is False
 
     def test_numeric_less_than(self):
+        # pe is INDUSTRY_RELATIVE in FACTOR_REGISTRY → reads pe_ind_rel
         cond = FactorCondition(factor_name="pe", operator="<", threshold=30.0)
-        assert FactorEvaluator.evaluate(cond, {"pe": 25.0}).passed is True
-        assert FactorEvaluator.evaluate(cond, {"pe": 35.0}).passed is False
+        assert FactorEvaluator.evaluate(cond, {"pe_ind_rel": 25.0}).passed is True
+        assert FactorEvaluator.evaluate(cond, {"pe_ind_rel": 35.0}).passed is False
 
     def test_numeric_gte(self):
-        cond = FactorCondition(factor_name="rsi", operator=">=", threshold=50.0)
+        # rsi is RANGE in FACTOR_REGISTRY → use threshold_type override to test as ABSOLUTE
+        cond = FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                               params={"threshold_type": "absolute"})
         assert FactorEvaluator.evaluate(cond, {"rsi": 50.0}).passed is True
         assert FactorEvaluator.evaluate(cond, {"rsi": 49.9}).passed is False
 
     def test_numeric_lte(self):
+        # pe is INDUSTRY_RELATIVE → reads pe_ind_rel
         cond = FactorCondition(factor_name="pe", operator="<=", threshold=30.0)
-        assert FactorEvaluator.evaluate(cond, {"pe": 30.0}).passed is True
-        assert FactorEvaluator.evaluate(cond, {"pe": 30.1}).passed is False
+        assert FactorEvaluator.evaluate(cond, {"pe_ind_rel": 30.0}).passed is True
+        assert FactorEvaluator.evaluate(cond, {"pe_ind_rel": 30.1}).passed is False
 
     def test_numeric_equal(self):
         cond = FactorCondition(factor_name="sector_rank", operator="==", threshold=1.0)
@@ -117,7 +121,8 @@ class TestStrategyEngine:
         """AND 模式：所有因子通过 → 通过"""
         config = self._make_config("AND", [
             FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),
-            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                            params={"threshold_type": "absolute"}),
         ])
         result = StrategyEngine.evaluate(config, {"ma_trend": 85.0, "rsi": 65.0})
         assert result.passed is True
@@ -127,7 +132,8 @@ class TestStrategyEngine:
         """AND 模式：一个因子不通过 → 不通过"""
         config = self._make_config("AND", [
             FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),
-            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                            params={"threshold_type": "absolute"}),
         ])
         result = StrategyEngine.evaluate(config, {"ma_trend": 85.0, "rsi": 40.0})
         assert result.passed is False
@@ -136,7 +142,8 @@ class TestStrategyEngine:
         """OR 模式：一个因子通过 → 通过"""
         config = self._make_config("OR", [
             FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),
-            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                            params={"threshold_type": "absolute"}),
         ])
         result = StrategyEngine.evaluate(config, {"ma_trend": 85.0, "rsi": 40.0})
         assert result.passed is True
@@ -145,7 +152,8 @@ class TestStrategyEngine:
         """OR 模式：所有因子不通过 → 不通过"""
         config = self._make_config("OR", [
             FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),
-            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                            params={"threshold_type": "absolute"}),
         ])
         result = StrategyEngine.evaluate(config, {"ma_trend": 70.0, "rsi": 40.0})
         assert result.passed is False
@@ -162,7 +170,8 @@ class TestStrategyEngine:
             "AND",
             [
                 FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),
-                FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+                FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                                params={"threshold_type": "absolute"}),
             ],
             weights={"ma_trend": 2.0, "rsi": 1.0},
         )
@@ -174,12 +183,17 @@ class TestStrategyEngine:
     def test_four_category_factors(self):
         """四类因子（技术/资金/基本面/板块）自由组合"""
         config = self._make_config("AND", [
-            FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),   # 技术
-            FactorCondition(factor_name="money_flow", operator=">=", threshold=1000.0),  # 资金
-            FactorCondition(factor_name="pe", operator="<=", threshold=30.0),          # 基本面
-            FactorCondition(factor_name="sector_rank", operator="<=", threshold=30.0), # 板块
+            FactorCondition(factor_name="ma_trend", operator=">=", threshold=80.0),   # 技术 (ABSOLUTE)
+            FactorCondition(factor_name="money_flow", operator=">=", threshold=80.0),  # 资金 (PERCENTILE → reads _pctl)
+            FactorCondition(factor_name="pe", operator="<=", threshold=1.5),          # 基本面 (INDUSTRY_RELATIVE → reads _ind_rel)
+            FactorCondition(factor_name="sector_rank", operator="<=", threshold=30.0), # 板块 (ABSOLUTE)
         ])
-        stock = {"ma_trend": 85.0, "money_flow": 1500.0, "pe": 25.0, "sector_rank": 10.0}
+        stock = {
+            "ma_trend": 85.0,
+            "money_flow_pctl": 90.0,
+            "pe_ind_rel": 0.8,
+            "sector_rank": 10.0,
+        }
         result = StrategyEngine.evaluate(config, stock)
         assert result.passed is True
         assert len(result.factor_results) == 4
@@ -206,7 +220,8 @@ class TestStrategyEngine:
         """AND 模式混合布尔和数值因子"""
         config = self._make_config("AND", [
             FactorCondition(factor_name="macd", operator="==", threshold=None),
-            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0),
+            FactorCondition(factor_name="rsi", operator=">=", threshold=50.0,
+                            params={"threshold_type": "absolute"}),
         ])
         assert StrategyEngine.evaluate(config, {"macd": True, "rsi": 65.0}).passed is True
         assert StrategyEngine.evaluate(config, {"macd": False, "rsi": 65.0}).passed is False

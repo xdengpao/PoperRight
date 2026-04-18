@@ -76,6 +76,15 @@ _DATE_RE = re.compile(r"(\d{8})")
 _DATE_DASH_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
+def _normalize_symbol(raw: str) -> str:
+    """将带后缀的股票代码（如 ``000002.SZ``）转为裸代码（``000002``）。
+
+    业务表（stock_info, sector_constituent, position 等）统一使用裸代码，
+    仅 kline 时序表使用带后缀格式。参见 data-consistency.md §3.2。
+    """
+    return raw.split(".")[0] if "." in raw else raw
+
+
 # ---------------------------------------------------------------------------
 # SectorCSVParser
 # ---------------------------------------------------------------------------
@@ -324,7 +333,7 @@ class SectorCSVParser:
                     if len(row) < 4:
                         continue
                     sector_code = row[1].strip()
-                    symbol = row[2].strip()
+                    symbol = _normalize_symbol(row[2].strip())
                     stock_name = row[3].strip() or None
 
                     if not sector_code or not symbol:
@@ -388,7 +397,7 @@ class SectorCSVParser:
                     continue
 
                 sector_code = row[0].strip()
-                symbol = row[3].strip()
+                symbol = _normalize_symbol(row[3].strip())
                 stock_name = row[4].strip() or None
 
                 if not sector_code or not symbol:
@@ -440,7 +449,7 @@ class SectorCSVParser:
                     if len(row) < 4:
                         continue
                     sector_code = row[0].strip()
-                    symbol = row[2].strip()
+                    symbol = _normalize_symbol(row[2].strip())
                     stock_name = row[3].strip() or None
 
                     if not sector_code or not symbol:

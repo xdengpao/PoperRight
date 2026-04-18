@@ -19,11 +19,51 @@ export interface StrategyTemplate {
   created_at: string
 }
 
+export type ThresholdType = 'absolute' | 'percentile' | 'industry_relative' | 'z_score' | 'boolean' | 'range'
+
+export interface FactorMeta {
+  factor_name: string
+  label: string
+  category: string
+  threshold_type: ThresholdType
+  default_threshold: number | null
+  value_min: number | null
+  value_max: number | null
+  unit: string
+  description: string
+  examples: Record<string, unknown>[]
+  default_range: [number, number] | null
+}
+
+export interface SectorScreenConfig {
+  sector_data_source: string
+  sector_type: string
+  sector_period: number
+  sector_top_n: number
+}
+
+export interface StrategyExample {
+  name: string
+  description: string
+  factors: Array<{
+    factor_name: string
+    operator: string
+    threshold: number | null
+    params: Record<string, unknown>
+  }>
+  logic: string
+  weights: Record<string, number>
+  enabled_modules: string[]
+  sector_config: SectorScreenConfig | null
+}
+
 export const useScreenerStore = defineStore('screener', () => {
   const results = ref<ScreenItem[]>([])
   const strategies = ref<StrategyTemplate[]>([])
   const loading = ref(false)
   const lastUpdated = ref<Date | null>(null)
+  const factorRegistry = ref<Record<string, FactorMeta[]>>({})
+  const strategyExamples = ref<StrategyExample[]>([])
 
   async function fetchResults() {
     loading.value = true
@@ -46,5 +86,28 @@ export const useScreenerStore = defineStore('screener', () => {
     await fetchStrategies()
   }
 
-  return { results, strategies, loading, lastUpdated, fetchResults, fetchStrategies, activateStrategy }
+  async function fetchFactorRegistry(category?: string) {
+    const params = category ? { category } : {}
+    const res = await apiClient.get<Record<string, FactorMeta[]>>('/screen/factor-registry', { params })
+    factorRegistry.value = res.data
+  }
+
+  async function fetchStrategyExamples() {
+    const res = await apiClient.get<StrategyExample[]>('/screen/strategy-examples')
+    strategyExamples.value = res.data
+  }
+
+  return {
+    results,
+    strategies,
+    loading,
+    lastUpdated,
+    factorRegistry,
+    strategyExamples,
+    fetchResults,
+    fetchStrategies,
+    activateStrategy,
+    fetchFactorRegistry,
+    fetchStrategyExamples,
+  }
 })
