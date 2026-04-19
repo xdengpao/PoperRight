@@ -90,13 +90,13 @@ def factor_editor_stocks_data(draw):
 def test_factor_editor_trend_score_equals_weighted_score(data):
     """
     Property Test 1: factor_editor 启用且 factors 非空时，
-    trend_score 等于 StrategyEngine.evaluate() 的 weighted_score（clamped [0, 100]）。
+    trend_score 等于加权求和结果（需求 5 重构后）。
 
-    **Validates: Requirements 3.1, 3.2**
+    **Validates: Requirements 3.1, 3.2, 5.1**
 
     GIVEN enabled_modules 包含 "factor_editor" 且 factors 非空
     WHEN 执行 run_eod_screen()
-    THEN 每个 ScreenItem.trend_score == max(0, min(100, evaluate().weighted_score))
+    THEN 每个 ScreenItem.trend_score == _compute_weighted_score({"factor_editor": weighted_score})
     """
     config, stocks_data, enabled_modules = data
 
@@ -109,12 +109,17 @@ def test_factor_editor_trend_score_equals_weighted_score(data):
     for item in result.items:
         stock_data = stocks_data[item.symbol]
         eval_result = StrategyEngine.evaluate(config, stock_data)
-        expected_score = max(0.0, min(100.0, eval_result.weighted_score))
+        # 需求 5 重构后：仅 factor_editor 启用时，
+        # 加权求和 = weighted_score * 0.30 / 0.30 = weighted_score（clamped [0, 100]）
+        module_scores: dict[str, float] = {}
+        if eval_result.weighted_score > 0:
+            module_scores["factor_editor"] = eval_result.weighted_score
+        expected_score = ScreenExecutor._compute_weighted_score(module_scores)
 
         assert item.trend_score == expected_score, (
             f"股票 {item.symbol}: trend_score 应为 {expected_score}，"
             f"实际为 {item.trend_score}。"
-            f"factor_editor 路径下 trend_score 应等于 clamped weighted_score"
+            f"factor_editor 路径下 trend_score 应等于加权求和结果"
         )
 
 
@@ -131,15 +136,15 @@ def test_factor_editor_trend_score_equals_weighted_score(data):
 def test_no_ma_trend_module_trend_score_equals_weighted_score(close, ma_trend_val):
     """
     Property Test 2: ma_trend 模块未启用时（enabled_modules=["indicator_params"]），
-    trend_score 等于 eval_result.weighted_score。
+    trend_score 等于加权求和结果（需求 5 重构后）。
 
-    **Validates: Requirements 3.2, 3.3**
+    **Validates: Requirements 3.2, 3.3, 5.1**
 
     GIVEN enabled_modules=["indicator_params"]（不含 "ma_trend"）
     AND factors=[]（空因子列表）
     AND stock_data 包含 macd=True 以产生 indicator_params 信号
     WHEN 执行 run_eod_screen()
-    THEN trend_score == eval_result.weighted_score（即 0.0，因为 factors 为空）
+    THEN trend_score == _compute_weighted_score({"indicator_params": 25.0})
     """
     config = StrategyConfig(factors=[])
     stocks_data = {
@@ -162,12 +167,15 @@ def test_no_ma_trend_module_trend_score_equals_weighted_score(close, ma_trend_va
     )
 
     item = result.items[0]
-    eval_result = StrategyEngine.evaluate(config, stocks_data["600000.SH"])
-    expected_score = max(0.0, min(100.0, eval_result.weighted_score))
+    # 需求 5 重构后：indicator_params 模块评分 25.0（macd=True），
+    # 加权求和 = 25.0 * 0.20 / 0.20 = 25.0
+    expected_score = ScreenExecutor._compute_weighted_score(
+        {"indicator_params": 25.0}
+    )
 
     assert item.trend_score == expected_score, (
         f"trend_score 应为 {expected_score}，实际为 {item.trend_score}。"
-        f"ma_trend 未启用时 trend_score 应等于 weighted_score"
+        f"加权求和后 indicator_params=25.0 的结果应为 {expected_score}"
     )
 
 

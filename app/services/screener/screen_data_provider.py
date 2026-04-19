@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.core.schemas import SectorScreenConfig
 from app.models.kline import KlineBar
+from app.models.money_flow import MoneyFlow
 from app.models.sector import SectorConstituent, SectorInfo
 from app.models.stock import StockInfo
 from app.services.data_engine.adj_factor_repository import AdjFactorRepository
@@ -51,6 +52,9 @@ logger = logging.getLogger(__name__)
 
 # 默认回溯天数（覆盖 MA250 所需的最少交易日）
 DEFAULT_LOOKBACK_DAYS = 365
+
+# 资金流数据默认回溯交易日数
+_MONEY_FLOW_LOOKBACK_DAYS = 5
 
 
 class ScreenDataProvider:
@@ -142,6 +146,12 @@ class ScreenDataProvider:
 
                 factor_dict = self._build_factor_dict(stock, bars, self._strategy_config)
                 factor_dict["raw_close"] = raw_close
+
+                # 资金流因子接入（需求 1）：查询 money_flow 表数据
+                await self._enrich_money_flow_factors(
+                    factor_dict, stock.symbol, screen_date,
+                )
+
                 result[stock.symbol] = factor_dict
             except Exception:
                 logger.warning(
@@ -175,7 +185,10 @@ class ScreenDataProvider:
         except Exception:
             logger.warning("计算行业相对值失败，跳过", exc_info=True)
 
-        # 6. 加载板块强势数据
+        # 6. 加载板块强势数据（需求 3）
+        #    确保 sector_rank（int|None）和 sector_trend（bool）写入每只股票的
+        #    Factor_Dict 内部。加载失败或会话不可用时降级为默认值，选股流程不中断。
+        sector_loaded = False
         try:
             sector_cfg_raw = self._strategy_config.get("sector_config")
             if isinstance(sector_cfg_raw, dict):
@@ -208,16 +221,187 @@ class ScreenDataProvider:
                     stock_sector_map=stock_sector_map,
                     top_n=sector_cfg.sector_top_n,
                 )
+                sector_loaded = True
+
+                # 需求 3.1：验证 sector_rank 和 sector_trend 类型正确性
+                for sym, fd in result.items():
+                    sr = fd.get("sector_rank")
+                    if sr is not None and not isinstance(sr, int):
+                        fd["sector_rank"] = int(sr)
+                    st_val = fd.get("sector_trend")
+                    if not isinstance(st_val, bool):
+                        fd["sector_trend"] = bool(st_val) if st_val else False
             else:
-                logger.warning("数据库会话不可用，跳过板块强势数据加载")
+                logger.warning(
+                    "数据库会话不可用，板块因子降级为默认值 "
+                    "(sector_rank=None, sector_trend=False)"
+                )
         except Exception:
-            logger.warning("加载板块强势数据失败，跳过", exc_info=True)
+            logger.warning(
+                "加载板块强势数据失败，板块因子降级为默认值 "
+                "(sector_rank=None, sector_trend=False)",
+                exc_info=True,
+            )
+
+        # 需求 3.2：板块数据加载失败时的降级逻辑
+        if not sector_loaded:
+            for fd in result.values():
+                fd.setdefault("sector_rank", None)
+                fd.setdefault("sector_trend", False)
+                fd.setdefault("sector_name", None)
+
+        # 7. 加载板块分类数据（需求 9）
+        #    批量查询三个数据源（DC/TI/TDX）的板块归属信息，写入每只股票的
+        #    factor_dict["sector_classifications"]。加载失败时降级为空分类，
+        #    不阻断选股主流程。
+        try:
+            sector_classifications = await self._load_sector_classifications(
+                pg_session=self._pg_session,
+                symbols=list(result.keys()),
+            )
+            for sym, fd in result.items():
+                fd["sector_classifications"] = sector_classifications.get(
+                    sym, {"DC": [], "TI": [], "TDX": []}
+                )
+        except Exception:
+            logger.warning(
+                "加载板块分类数据失败，降级为空分类",
+                exc_info=True,
+            )
+            for fd in result.values():
+                fd.setdefault(
+                    "sector_classifications", {"DC": [], "TI": [], "TDX": []}
+                )
 
         logger.info(
             "选股数据加载完成：有效股票 %d 只，成功加载 %d 只",
             len(stocks), len(result),
         )
         return result
+
+    # ------------------------------------------------------------------
+    # 资金流因子接入（需求 1）
+    # ------------------------------------------------------------------
+
+    async def _query_money_flow_data(
+        self,
+        symbol: str,
+        trade_date: date,
+        days: int = _MONEY_FLOW_LOOKBACK_DAYS,
+    ) -> list[MoneyFlow]:
+        """
+        从 money_flow 表查询指定股票最近 N 个交易日的资金流数据。
+
+        Args:
+            symbol: 股票代码
+            trade_date: 基准日期
+            days: 回溯交易日数
+
+        Returns:
+            MoneyFlow 记录列表（按 trade_date 升序）
+        """
+        stmt = (
+            select(MoneyFlow)
+            .where(
+                MoneyFlow.symbol == symbol,
+                MoneyFlow.trade_date <= trade_date,
+            )
+            .order_by(MoneyFlow.trade_date.desc())
+            .limit(days)
+        )
+
+        if self._pg_session is not None:
+            res = await self._pg_session.execute(stmt)
+            rows = list(res.scalars().all())
+        else:
+            async with AsyncSessionPG() as session:
+                res = await session.execute(stmt)
+                rows = list(res.scalars().all())
+
+        # 返回按日期升序
+        rows.reverse()
+        return rows
+
+    async def _enrich_money_flow_factors(
+        self,
+        factor_dict: dict[str, Any],
+        symbol: str,
+        screen_date: date,
+    ) -> None:
+        """
+        查询资金流数据并补充 money_flow / large_order 因子到 factor_dict。
+
+        - 调用 check_money_flow_signal() 计算 money_flow 信号
+        - 调用 check_large_order_signal() 计算 large_order 信号
+        - 将原始数值（main_net_inflow、large_order_ratio）写入 factor_dict
+        - 无数据时降级为 False 并记录 WARNING 日志
+
+        Args:
+            factor_dict: 待补充的因子字典（就地修改）
+            symbol: 股票代码
+            screen_date: 选股基准日期
+        """
+        try:
+            rows = await self._query_money_flow_data(symbol, screen_date)
+
+            if not rows:
+                # 缺失数据降级（需求 1.3）
+                logger.warning(
+                    "股票 %s 在 money_flow 表中无数据记录，资金流因子降级为 False",
+                    symbol,
+                )
+                factor_dict["money_flow"] = False
+                factor_dict["large_order"] = False
+                factor_dict["main_net_inflow"] = None
+                factor_dict["large_order_ratio"] = None
+                return
+
+            # 提取最近 N 日主力净流入序列（万元）
+            daily_inflows: list[float] = [
+                float(r.main_net_inflow) if r.main_net_inflow is not None else 0.0
+                for r in rows
+            ]
+
+            # 计算 money_flow 信号
+            mf_result = check_money_flow_signal(daily_inflows)
+            factor_dict["money_flow"] = mf_result.signal
+
+            # 提取当日大单成交占比（最后一条记录）
+            latest_row = rows[-1]
+            latest_large_order_ratio = (
+                float(latest_row.large_order_ratio)
+                if latest_row.large_order_ratio is not None
+                else 0.0
+            )
+
+            # 计算 large_order 信号
+            lo_result = check_large_order_signal(latest_large_order_ratio)
+            factor_dict["large_order"] = lo_result.signal
+
+            # 写入原始数值以便百分位排名计算（需求 1.4）
+            latest_inflow = (
+                float(latest_row.main_net_inflow)
+                if latest_row.main_net_inflow is not None
+                else None
+            )
+            factor_dict["main_net_inflow"] = latest_inflow
+            factor_dict["large_order_ratio"] = (
+                float(latest_row.large_order_ratio)
+                if latest_row.large_order_ratio is not None
+                else None
+            )
+
+        except Exception:
+            # 异常时降级
+            logger.warning(
+                "查询股票 %s 资金流数据异常，资金流因子降级为 False",
+                symbol,
+                exc_info=True,
+            )
+            factor_dict["money_flow"] = False
+            factor_dict["large_order"] = False
+            factor_dict["main_net_inflow"] = None
+            factor_dict["large_order_ratio"] = None
 
     async def _load_valid_stocks(self) -> list[StockInfo]:
         """查询全市场有效股票（排除 ST 和退市）。"""
@@ -366,75 +550,19 @@ class ScreenDataProvider:
             logger.debug("计算 dma 失败", exc_info=True)
             stock_data["dma"] = None
 
-        # 形态突破模块
+        # 形态突破模块（需求 6：多重突破信号并发检测）
         try:
-            breakout_signal = None
             bo_cfg = _cfg.get("breakout", {}) if isinstance(_cfg.get("breakout"), dict) else {}
-            vol_threshold = float(bo_cfg.get("volume_ratio_threshold", 1.5))
-            confirm_days = int(bo_cfg.get("confirm_days", 1))
-            enable_box = bo_cfg.get("box_breakout", True)
-            enable_high = bo_cfg.get("high_breakout", True)
-            enable_trendline = bo_cfg.get("trendline_breakout", True)
-
-            if enable_box:
-                box = detect_box_breakout(
-                    closes_float, highs_float, lows_float, volumes_int,
-                    volume_multiplier=vol_threshold,
-                )
-                if box is not None:
-                    # 站稳确认：检查突破后 confirm_days 天是否站稳
-                    if confirm_days > 0 and len(closes_float) > 1:
-                        from app.services.screener.breakout import check_false_breakout
-                        box = check_false_breakout(box, closes_float[-1], hold_days=confirm_days)
-                    breakout_signal = {
-                        "type": box.breakout_type.value,
-                        "resistance": box.resistance_level,
-                        "is_valid": box.is_valid,
-                        "is_false_breakout": box.is_false_breakout,
-                        "volume_ratio": box.volume_ratio,
-                        "generates_buy_signal": box.generates_buy_signal,
-                    }
-
-            if breakout_signal is None and enable_high:
-                prev_high = detect_previous_high_breakout(
-                    closes_float, volumes_int,
-                    volume_multiplier=vol_threshold,
-                )
-                if prev_high is not None:
-                    if confirm_days > 0 and len(closes_float) > 1:
-                        from app.services.screener.breakout import check_false_breakout
-                        prev_high = check_false_breakout(prev_high, closes_float[-1], hold_days=confirm_days)
-                    breakout_signal = {
-                        "type": prev_high.breakout_type.value,
-                        "resistance": prev_high.resistance_level,
-                        "is_valid": prev_high.is_valid,
-                        "is_false_breakout": prev_high.is_false_breakout,
-                        "volume_ratio": prev_high.volume_ratio,
-                        "generates_buy_signal": prev_high.generates_buy_signal,
-                    }
-
-            if breakout_signal is None and enable_trendline:
-                trendline = detect_descending_trendline_breakout(
-                    closes_float, highs_float, volumes_int,
-                    volume_multiplier=vol_threshold,
-                )
-                if trendline is not None:
-                    if confirm_days > 0 and len(closes_float) > 1:
-                        from app.services.screener.breakout import check_false_breakout
-                        trendline = check_false_breakout(trendline, closes_float[-1], hold_days=confirm_days)
-                    breakout_signal = {
-                        "type": trendline.breakout_type.value,
-                        "resistance": trendline.resistance_level,
-                        "is_valid": trendline.is_valid,
-                        "is_false_breakout": trendline.is_false_breakout,
-                        "volume_ratio": trendline.volume_ratio,
-                        "generates_buy_signal": trendline.generates_buy_signal,
-                    }
-
-            stock_data["breakout"] = breakout_signal
+            breakout_list = ScreenDataProvider._detect_all_breakouts(
+                closes_float, highs_float, lows_float, volumes_int, bo_cfg,
+            )
+            # 需求 6.2：向后兼容 - breakout 保留第一个信号（或 None）
+            stock_data["breakout"] = breakout_list[0] if breakout_list else None
+            stock_data["breakout_list"] = breakout_list
         except Exception:
             logger.debug("计算 breakout 失败", exc_info=True)
             stock_data["breakout"] = None
+            stock_data["breakout_list"] = []
 
         # 量价资金模块
         try:
@@ -449,6 +577,95 @@ class ScreenDataProvider:
         stock_data["large_order"] = False
 
         return stock_data
+
+    # ------------------------------------------------------------------
+    # 多重突破信号并发检测（需求 6）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_all_breakouts(
+        closes: list[float],
+        highs: list[float],
+        lows: list[float],
+        volumes: list[int],
+        bo_cfg: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        对所有启用的突破类型逐一检测，返回所有触发的突破信号列表（纯函数，用于属性测试）。
+
+        与旧逻辑不同，不再在检测到第一个突破后停止，而是逐一检测所有启用类型。
+
+        Args:
+            closes: 收盘价序列（float，时间升序）
+            highs: 最高价序列
+            lows: 最低价序列
+            volumes: 成交量序列
+            bo_cfg: 突破配置字典，可包含 box_breakout、high_breakout、
+                    trendline_breakout、volume_ratio_threshold、confirm_days
+
+        Returns:
+            list[dict]，每个 dict 包含 type、resistance、is_valid、
+            is_false_breakout、volume_ratio、generates_buy_signal
+        """
+        if bo_cfg is None:
+            bo_cfg = {}
+
+        vol_threshold = float(bo_cfg.get("volume_ratio_threshold", 1.5))
+        confirm_days = int(bo_cfg.get("confirm_days", 1))
+        enable_box = bo_cfg.get("box_breakout", True)
+        enable_high = bo_cfg.get("high_breakout", True)
+        enable_trendline = bo_cfg.get("trendline_breakout", True)
+
+        breakout_list: list[dict[str, Any]] = []
+
+        def _signal_to_dict(signal) -> dict[str, Any]:
+            """将 BreakoutSignal 转换为字典。"""
+            return {
+                "type": signal.breakout_type.value,
+                "resistance": signal.resistance_level,
+                "is_valid": signal.is_valid,
+                "is_false_breakout": signal.is_false_breakout,
+                "volume_ratio": signal.volume_ratio,
+                "generates_buy_signal": signal.generates_buy_signal,
+            }
+
+        # 箱体突破
+        if enable_box:
+            box = detect_box_breakout(
+                closes, highs, lows, volumes,
+                volume_multiplier=vol_threshold,
+            )
+            if box is not None:
+                if confirm_days > 0 and len(closes) > 1:
+                    from app.services.screener.breakout import check_false_breakout
+                    box = check_false_breakout(box, closes[-1], hold_days=confirm_days)
+                breakout_list.append(_signal_to_dict(box))
+
+        # 前期高点突破
+        if enable_high:
+            prev_high = detect_previous_high_breakout(
+                closes, volumes,
+                volume_multiplier=vol_threshold,
+            )
+            if prev_high is not None:
+                if confirm_days > 0 and len(closes) > 1:
+                    from app.services.screener.breakout import check_false_breakout
+                    prev_high = check_false_breakout(prev_high, closes[-1], hold_days=confirm_days)
+                breakout_list.append(_signal_to_dict(prev_high))
+
+        # 下降趋势线突破
+        if enable_trendline:
+            trendline = detect_descending_trendline_breakout(
+                closes, highs, volumes,
+                volume_multiplier=vol_threshold,
+            )
+            if trendline is not None:
+                if confirm_days > 0 and len(closes) > 1:
+                    from app.services.screener.breakout import check_false_breakout
+                    trendline = check_false_breakout(trendline, closes[-1], hold_days=confirm_days)
+                breakout_list.append(_signal_to_dict(trendline))
+
+        return breakout_list
 
     # ------------------------------------------------------------------
     # 百分位排名计算（Task 6.1）
@@ -690,3 +907,105 @@ class ScreenDataProvider:
                     continue
 
                 data[ind_rel_field] = float(val) / median
+
+    # ------------------------------------------------------------------
+    # 板块分类数据加载（需求 9）
+    # ------------------------------------------------------------------
+
+    async def _load_sector_classifications(
+        self,
+        pg_session: AsyncSession,
+        symbols: list[str],
+        trade_date: date | None = None,
+    ) -> dict[str, dict[str, list[str]]]:
+        """
+        批量加载所有股票在三个数据源（DC/TI/TDX）的板块分类信息。
+
+        一次查询 SectorConstituent 表获取所有目标股票的成分股记录，
+        再批量查询 SectorInfo 表将 sector_code 转换为人类可读的板块名称，
+        避免 N+1 查询。
+
+        Args:
+            pg_session: PostgreSQL 异步会话
+            symbols: 股票代码列表
+            trade_date: 交易日期（可选，默认使用表中最新交易日）
+
+        Returns:
+            {symbol: {"DC": [板块名, ...], "TI": [...], "TDX": [...]}} 映射
+        """
+        _DATA_SOURCES = ["DC", "TI", "TDX"]
+
+        if not symbols:
+            return {}
+
+        # 若 trade_date 为 None，查询最新交易日
+        if trade_date is None:
+            latest_date_stmt = select(
+                func.max(SectorConstituent.trade_date)
+            ).where(
+                SectorConstituent.data_source.in_(_DATA_SOURCES),
+            )
+            date_result = await pg_session.execute(latest_date_stmt)
+            trade_date = date_result.scalar_one_or_none()
+            if trade_date is None:
+                logger.warning("SectorConstituent 表中无交易日数据，返回空分类")
+                return {}
+
+        # 1. 批量查询成分股记录
+        constituents_stmt = (
+            select(SectorConstituent)
+            .where(
+                SectorConstituent.symbol.in_(symbols),
+                SectorConstituent.trade_date == trade_date,
+                SectorConstituent.data_source.in_(_DATA_SOURCES),
+            )
+        )
+        result = await pg_session.execute(constituents_stmt)
+        constituents = list(result.scalars().all())
+
+        if not constituents:
+            return {}
+
+        # 2. 收集所有 (sector_code, data_source) 对，批量查询 SectorInfo
+        sector_keys: set[tuple[str, str]] = set()
+        for c in constituents:
+            sector_keys.add((c.sector_code, c.data_source))
+
+        # 提取唯一的 sector_code 和 data_source 用于查询
+        unique_codes = {k[0] for k in sector_keys}
+        unique_sources = {k[1] for k in sector_keys}
+
+        info_stmt = (
+            select(
+                SectorInfo.sector_code,
+                SectorInfo.data_source,
+                SectorInfo.name,
+            )
+            .where(
+                SectorInfo.sector_code.in_(unique_codes),
+                SectorInfo.data_source.in_(unique_sources),
+            )
+        )
+        info_result = await pg_session.execute(info_stmt)
+        info_rows = info_result.all()
+
+        # 构建 (sector_code, data_source) → name 映射
+        name_map: dict[tuple[str, str], str] = {}
+        for row in info_rows:
+            name_map[(row.sector_code, row.data_source)] = row.name
+
+        # 3. 构建 symbol → {"DC": [...], "TI": [...], "TDX": [...]} 结果
+        classifications: dict[str, dict[str, list[str]]] = {}
+        for c in constituents:
+            if c.symbol not in classifications:
+                classifications[c.symbol] = {src: [] for src in _DATA_SOURCES}
+
+            # 若 SectorInfo 中缺少该 sector_code，使用原始值作为板块名称
+            sector_name = name_map.get(
+                (c.sector_code, c.data_source), c.sector_code
+            )
+            source_list = classifications[c.symbol][c.data_source]
+            if sector_name not in source_list:
+                source_list.append(sector_name)
+
+        return classifications

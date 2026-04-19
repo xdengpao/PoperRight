@@ -4,6 +4,7 @@
 
 from app.models.backtest import BacktestRun
 from app.models.kline import Kline, KlineBar
+from app.models.money_flow import MoneyFlow
 from app.models.stock import PermanentExclusion, StockInfo, StockList
 from app.models.strategy import ScreenResult, StrategyTemplate
 from app.models.trade import Position, TradeOrder
@@ -17,6 +18,8 @@ __all__ = [
     "StockInfo",
     "PermanentExclusion",
     "StockList",
+    # 资金流向数据
+    "MoneyFlow",
     # 策略与选股
     "StrategyTemplate",
     "ScreenResult",

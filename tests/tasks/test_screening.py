@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -293,9 +293,32 @@ class TestRunEodScreening:
 
     def test_returns_success_with_default_strategy(self):
         """默认策略应返回成功结果"""
+        from unittest.mock import AsyncMock, MagicMock
         from app.tasks.screening import run_eod_screening
 
-        result = run_eod_screening()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock()
+        mock_redis.aclose = AsyncMock()
+
+        with (
+            patch("app.tasks.screening.AsyncSessionPG", return_value=mock_session),
+            patch("app.tasks.screening.AsyncSessionTS", return_value=mock_session),
+            patch("app.tasks.screening.ScreenDataProvider") as mock_cls,
+            patch("app.tasks.screening.get_redis_client", return_value=mock_redis),
+        ):
+            mock_provider = AsyncMock()
+            mock_provider.load_screen_data = AsyncMock(return_value={})
+            mock_cls.return_value = mock_provider
+
+            result = run_eod_screening()
 
         assert result["status"] == "success"
         assert result["screen_type"] == "EOD"
@@ -304,10 +327,30 @@ class TestRunEodScreening:
 
     def test_accepts_strategy_dict(self):
         """应接受策略字典参数"""
+        from unittest.mock import AsyncMock
         from app.tasks.screening import run_eod_screening
 
+        mock_session = AsyncMock()
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        mock_redis = AsyncMock()
+        mock_redis.set = AsyncMock()
+        mock_redis.aclose = AsyncMock()
+
         strategy_dict = _make_strategy_config().to_dict()
-        result = run_eod_screening(strategy_dict=strategy_dict)
+
+        with (
+            patch("app.tasks.screening.AsyncSessionPG", return_value=mock_session),
+            patch("app.tasks.screening.AsyncSessionTS", return_value=mock_session),
+            patch("app.tasks.screening.ScreenDataProvider") as mock_cls,
+            patch("app.tasks.screening.get_redis_client", return_value=mock_redis),
+        ):
+            mock_provider = AsyncMock()
+            mock_provider.load_screen_data = AsyncMock(return_value={})
+            mock_cls.return_value = mock_provider
+
+            result = run_eod_screening(strategy_dict=strategy_dict)
 
         assert result["status"] == "success"
 
@@ -330,7 +373,31 @@ class TestRunRealtimeScreening:
         """交易时段应执行选股"""
         from app.tasks.screening import run_realtime_screening
 
-        result = run_realtime_screening()
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=None)  # 未预热
+        mock_redis.aclose = AsyncMock()
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(return_value=mock_result)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("app.tasks.screening.AsyncSessionPG", return_value=mock_session),
+            patch(
+                "app.tasks.screening.get_redis_client",
+                return_value=mock_redis,
+            ),
+            patch(
+                "app.tasks.screening._warmup_factor_cache",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            result = run_realtime_screening()
 
         assert result["status"] == "success"
         assert result["screen_type"] == "REALTIME"
@@ -340,7 +407,22 @@ class TestRunRealtimeScreening:
         """应接受策略字典参数"""
         from app.tasks.screening import run_realtime_screening
 
-        strategy_dict = _make_strategy_config().to_dict()
-        result = run_realtime_screening(strategy_dict=strategy_dict)
+        mock_redis = AsyncMock()
+        mock_redis.get = AsyncMock(return_value=None)
+        mock_redis.aclose = AsyncMock()
+
+        with (
+            patch(
+                "app.tasks.screening.get_redis_client",
+                return_value=mock_redis,
+            ),
+            patch(
+                "app.tasks.screening._warmup_factor_cache",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            strategy_dict = _make_strategy_config().to_dict()
+            result = run_realtime_screening(strategy_dict=strategy_dict)
 
         assert result["status"] == "success"

@@ -117,16 +117,38 @@
                 <div class="detail-panel detail-panel-flex">
                   <div class="detail-signals">
                     <div class="detail-header">触发信号详情</div>
+                    <div v-if="allResults.length > 0" class="signal-strength-legend">
+                      🔴 强：多个因子共振确认&nbsp;&nbsp;🟡 中：部分因子确认&nbsp;&nbsp;⚪ 弱：单一因子触发
+                    </div>
                     <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
                     <div v-else class="signal-tags">
                       <span
                         v-for="(sig, idx) in row.signals"
                         :key="idx"
-                        :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category]]"
+                        :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category], signalStrengthClass(sig.strength)]"
                       >
-                        {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.label }}
+                        {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.description || sig.label }}
+                        <span class="strength-label">{{ signalStrengthText(sig.strength) }}</span>
+                        <span v-if="sig.freshness === 'NEW'" class="freshness-badge">新</span>
                         <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
                       </span>
+                    </div>
+                  </div>
+                  <!-- 板块分类展示（需求 9） -->
+                  <div class="sector-classifications" v-if="row.sector_classifications">
+                    <div class="detail-header">板块分类</div>
+                    <div class="sector-columns">
+                      <div class="sector-column" v-for="source in sectorSources" :key="source.key">
+                        <div class="sector-source-title">{{ source.label }}</div>
+                        <div v-if="(row.sector_classifications[source.key] ?? []).length > 0" class="sector-tags">
+                          <span
+                            v-for="name in row.sector_classifications[source.key]"
+                            :key="name"
+                            class="sector-tag"
+                          >{{ name }}</span>
+                        </div>
+                        <div v-else class="sector-empty">暂无数据</div>
+                      </div>
                     </div>
                   </div>
                   <div class="detail-charts-container">
@@ -206,6 +228,15 @@ interface SignalDetail {
   category: SignalCategory
   label: string
   is_fake_breakout: boolean
+  strength?: 'STRONG' | 'MEDIUM' | 'WEAK'
+  freshness?: 'NEW' | 'CONTINUING'
+  description?: string
+}
+
+interface SectorClassifications {
+  eastmoney: string[]
+  tonghuashun: string[]
+  tongdaxin: string[]
 }
 
 interface ScreenResultRow {
@@ -217,6 +248,7 @@ interface ScreenResultRow {
   signals: SignalDetail[]
   screen_time: string
   has_fake_breakout: boolean
+  sector_classifications?: SectorClassifications
 }
 
 type SortKey = 'trend_score' | 'risk_level' | 'signal_count'
@@ -230,6 +262,13 @@ const sortOptions: { key: SortKey; label: string }[] = [
   { key: 'trend_score', label: '趋势评分' },
   { key: 'risk_level', label: '风险等级' },
   { key: 'signal_count', label: '信号数量' },
+]
+
+// 板块分类数据源
+const sectorSources = [
+  { key: 'eastmoney' as const, label: '东方财富' },
+  { key: 'tonghuashun' as const, label: '同花顺' },
+  { key: 'tongdaxin' as const, label: '通达信' },
 ]
 
 // 信号分类 → 颜色 CSS 类
@@ -262,8 +301,36 @@ const SIGNAL_CATEGORY_LABEL: Record<SignalCategory, string> = {
 
 function signalSummary(signals: SignalDetail[]): string {
   if (!signals.length) return '无信号'
+  const strongCount = signals.filter(s => s.strength === 'STRONG').length
+  const base = strongCount > 0
+    ? `${signals.length} 个信号（${strongCount} 强）`
+    : `${signals.length} 个信号`
   const cats = [...new Set(signals.map((s) => SIGNAL_CATEGORY_LABEL[s.category] ?? s.category))]
-  return `${signals.length} 个信号：${cats.slice(0, 3).join(' / ')}${cats.length > 3 ? ' …' : ''}`
+  return `${base}：${cats.slice(0, 3).join(' / ')}${cats.length > 3 ? ' …' : ''}`
+}
+
+// 信号强度 → CSS 类映射
+const SIGNAL_STRENGTH_CLASS: Record<string, string> = {
+  STRONG: 'sig-strong',
+  MEDIUM: 'sig-medium',
+  WEAK: 'sig-weak',
+}
+
+// 信号强度 → 中文文字标注映射
+const SIGNAL_STRENGTH_TEXT: Record<string, string> = {
+  STRONG: '强',
+  MEDIUM: '中',
+  WEAK: '弱',
+}
+
+/** 根据信号强度返回对应 CSS 类，缺失时默认 MEDIUM */
+function signalStrengthClass(strength?: string): string {
+  return SIGNAL_STRENGTH_CLASS[strength ?? 'MEDIUM'] ?? 'sig-medium'
+}
+
+/** 根据信号强度返回中文文字标注，缺失时默认"中" */
+function signalStrengthText(strength?: string): string {
+  return SIGNAL_STRENGTH_TEXT[strength ?? 'MEDIUM'] ?? '中'
 }
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
@@ -731,6 +798,14 @@ onMounted(() => {
 }
 .detail-empty { font-size: 13px; color: #484f58; }
 
+/* ─── 信号强度图例 ──────────────────────────────────────────────────────────── */
+.signal-strength-legend {
+  font-size: 11px;
+  color: #6e7681;
+  margin-bottom: 8px;
+  line-height: 1.6;
+}
+
 /* ─── 信号标签 ──────────────────────────────────────────────────────────────── */
 .signal-tags { display: flex; flex-wrap: wrap; gap: 8px; }
 
@@ -759,6 +834,25 @@ onMounted(() => {
 .fake-tag {
   background: #f85149; color: #fff; font-size: 11px; font-weight: 700;
   padding: 1px 6px; border-radius: 8px; margin-left: 2px;
+}
+
+/* ─── 信号强度颜色编码 ─────────────────────────────────────────────────────── */
+.sig-strong { border-color: #f85149; background: #3a1a1a; }
+.sig-medium { border-color: #d29922; background: #3a2a1a; }
+.sig-weak   { border-color: #484f58; background: #21262d; }
+
+/* 强度文字标注 */
+.strength-label {
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 6px; margin-left: 4px;
+  background: rgba(255, 255, 255, 0.1); color: inherit;
+}
+
+/* 新鲜度"新"徽章 */
+.freshness-badge {
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 6px; margin-left: 2px;
+  background: #1f6feb; color: #fff;
 }
 
 /* 主行假突破徽章 */
@@ -804,6 +898,45 @@ onMounted(() => {
 .btn-page:hover:not(:disabled) { color: #e6edf3; border-color: #8b949e; }
 .btn-page:disabled { opacity: 0.4; cursor: not-allowed; }
 .page-info { font-size: 13px; color: #8b949e; }
+
+/* ─── 板块分类 ──────────────────────────────────────────────────────────────── */
+.sector-classifications {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #21262d;
+}
+.sector-columns {
+  display: flex;
+  gap: 16px;
+}
+.sector-column {
+  flex: 1;
+  min-width: 0;
+}
+.sector-source-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8b949e;
+  margin-bottom: 8px;
+}
+.sector-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sector-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: #1c2128;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+}
+.sector-empty {
+  font-size: 12px;
+  color: #484f58;
+}
 
 /* ─── 响应式：小屏幕上下堆叠 ───────────────────────────────────────────────── */
 @media (max-width: 768px) {

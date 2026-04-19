@@ -5,6 +5,7 @@
 - GET  /screen/results       — 查询选股结果
 - GET  /screen/export        — 导出选股结果
 - GET  /screen/schedule      — 盘后选股调度状态
+- POST /screen/backtest      — 选股结果到回测闭环（需求 11）
 - CRUD /strategies           — 策略模板管理
 """
 
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 
 # Placeholder user_id (real auth would inject this)
 _DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+# 数据源代码 → API 字段名映射（需求 9）
+_SOURCE_TO_API_KEY = {"DC": "eastmoney", "TI": "tonghuashun", "TDX": "tongdaxin"}
 
 
 # ---------------------------------------------------------------------------
@@ -435,9 +439,25 @@ async def run_screen(body: ScreenRunRequest) -> dict:
                 "ref_buy_price": float(item.ref_buy_price),
                 "trend_score": item.trend_score,
                 "risk_level": item.risk_level.value,
-                "signals": [{"category": s.category.value, "label": s.label,
-                             "is_fake_breakout": s.is_fake_breakout} for s in item.signals],
+                "signals": [
+                    {
+                        "category": s.category.value,
+                        "label": s.label,
+                        "is_fake_breakout": s.is_fake_breakout,
+                        "strength": s.strength.value,
+                        "freshness": s.freshness.value,
+                        "description": s.description,
+                    }
+                    for s in item.signals
+                ],
                 "has_fake_breakout": item.has_fake_breakout,
+                "sector_classifications": {
+                    _SOURCE_TO_API_KEY[src]: names
+                    for src, names in stocks_data.get(item.symbol, {})
+                        .get("sector_classifications", {"DC": [], "TI": [], "TDX": []})
+                        .items()
+                    if src in _SOURCE_TO_API_KEY
+                },
                 "screen_time": screen_time_str,
             }
             for item in result.items
@@ -500,6 +520,88 @@ async def export_screen_results(
 ) -> dict:
     """导出选股结果（stub）。"""
     return {"download_url": f"/api/v1/screen/export/file?format={format}", "status": "pending"}
+
+
+# ---------------------------------------------------------------------------
+# 选股结果到回测闭环（需求 11）
+# ---------------------------------------------------------------------------
+
+
+class ScreenToBacktestRequest(BaseModel):
+    """选股结果到回测请求模型（需求 11）"""
+    screen_result_id: str = Field(..., description="选股结果 ID（strategy_id 或 'latest'）")
+    start_date: date | None = Field(None, description="回测起始日期，默认使用选股时间")
+    end_date: date | None = Field(None, description="回测结束日期")
+    initial_capital: float = Field(1_000_000.0, gt=0, description="初始资金")
+
+
+@router.post("/screen/backtest", status_code=202)
+async def screen_to_backtest(body: ScreenToBacktestRequest) -> dict:
+    """将选股结果一键发送到回测引擎进行历史验证（需求 11）。
+
+    从 Redis 缓存中读取选股结果，提取策略配置和股票列表，
+    构造 BacktestConfig 并提交 Celery 回测任务。
+    """
+    from app.tasks.backtest import run_backtest_task
+
+    # 1. 从 Redis 读取选股结果
+    cache_key = f"screen:results:{body.screen_result_id}"
+    raw = await cache_get(cache_key)
+    if not raw:
+        raise HTTPException(
+            status_code=404,
+            detail=f"选股结果不存在或已过期: {body.screen_result_id}",
+        )
+
+    try:
+        screen_data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(
+            status_code=404,
+            detail=f"选股结果数据损坏: {body.screen_result_id}",
+        )
+
+    # 2. 提取选股结果中的关键信息
+    items = screen_data.get("items", [])
+    strategy_id = screen_data.get("strategy_id")
+    screen_time_str = screen_data.get("screen_time")
+
+    # 3. 确定回测起始日期（默认使用选股时间）
+    if body.start_date is not None:
+        start_date = body.start_date
+    elif screen_time_str:
+        try:
+            screen_dt = datetime.fromisoformat(screen_time_str)
+            start_date = screen_dt.date()
+        except (ValueError, TypeError):
+            start_date = date.today()
+    else:
+        start_date = date.today()
+
+    # 4. 确定回测结束日期（默认为今天）
+    end_date = body.end_date if body.end_date is not None else date.today()
+
+    # 5. 提交回测任务
+    run_id = str(uuid4())
+    run_backtest_task.delay(
+        run_id=run_id,
+        strategy_id=strategy_id,
+        start_date=start_date.isoformat(),
+        end_date=end_date.isoformat(),
+        initial_capital=body.initial_capital,
+    )
+
+    return {
+        "backtest_id": run_id,
+        "screen_result_id": body.screen_result_id,
+        "strategy_id": strategy_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "initial_capital": body.initial_capital,
+        "stock_count": len(items),
+        "status": "PENDING",
+        "message": "回测任务已提交，可通过回测 API 查询进度和结果",
+    }
 
 
 @router.get("/screen/schedule", response_model=EodScheduleStatus)

@@ -84,6 +84,26 @@ class AlertType(str, Enum):
     SYSTEM = "SYSTEM"                   # 系统告警
 
 
+class SignalStrength(str, Enum):
+    """信号强度等级（需求 7）"""
+    STRONG = "STRONG"
+    MEDIUM = "MEDIUM"
+    WEAK = "WEAK"
+
+
+class SignalFreshness(str, Enum):
+    """信号新鲜度（需求 8）"""
+    NEW = "NEW"                             # 当日新出现的信号
+    CONTINUING = "CONTINUING"               # 持续存在的信号
+
+
+class ChangeType(str, Enum):
+    """选股结果变化类型（需求 10）"""
+    NEW = "NEW"             # 新增股票（本轮有、上轮无）
+    UPDATED = "UPDATED"     # 信号变化（同一股票的信号列表发生变化）
+    REMOVED = "REMOVED"     # 股票移出（上轮有、本轮无）
+
+
 class SignalCategory(str, Enum):
     """选股信号分类（需求 21.15）"""
     MA_TREND = "MA_TREND"               # 均线趋势信号
@@ -96,6 +116,27 @@ class SignalCategory(str, Enum):
     LARGE_ORDER = "LARGE_ORDER"         # 大单活跃信号
     MA_SUPPORT = "MA_SUPPORT"           # 均线支撑信号
     SECTOR_STRONG = "SECTOR_STRONG"     # 板块强势信号
+
+
+# ---------------------------------------------------------------------------
+# 选股模块默认权重（需求 5）
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODULE_WEIGHTS: dict[str, float] = {
+    "factor_editor": 0.30,
+    "ma_trend": 0.25,
+    "indicator_params": 0.20,
+    "breakout": 0.15,
+    "volume_price": 0.10,
+}
+"""
+各选股模块的默认权重，用于加权求和计算 Trend_Score。
+
+公式: Trend_Score = Σ(module_score × module_weight) / Σ(module_weight)
+未启用或评分为 0 的模块不计入分母。
+"""
+
+DEFAULT_MODULE_WEIGHTS = _DEFAULT_MODULE_WEIGHTS
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +174,10 @@ class SignalDetail:
     category: SignalCategory        # 信号分类
     label: str                      # 信号标签（如"多头排列"、"MACD 金叉"）
     is_fake_breakout: bool = False  # 是否为假突破标记
+    breakout_type: str | None = None  # 突破类型标识（需求 6：BOX/PREVIOUS_HIGH/TRENDLINE）
+    strength: SignalStrength = SignalStrength.MEDIUM  # 信号强度等级（需求 7）
+    freshness: SignalFreshness = SignalFreshness.NEW  # 信号新鲜度（需求 8）
+    description: str = ""  # 人类可读的因子条件描述文本（需求 8.1, 8.2）
 
 
 @dataclass
@@ -144,6 +189,17 @@ class ScreenItem:
     risk_level: RiskLevel           # 风险等级
     signals: list[SignalDetail] = field(default_factory=list)  # 触发的信号详情
     has_fake_breakout: bool = False  # 是否存在假突破信号
+    has_new_signal: bool = False     # 是否包含至少一个 NEW 信号（需求 8）
+    market_risk_level: MarketRiskLevel | None = None   # 大盘风险等级（需求 4）
+    risk_filter_info: dict | None = None               # 风控过滤信息（需求 4）
+
+
+@dataclass
+class ScreenChange:
+    """选股结果变化条目（需求 10）"""
+    symbol: str                         # 股票代码
+    change_type: ChangeType             # 变化类型
+    item: ScreenItem | None = None      # 对应的 ScreenItem，REMOVED 时为 None
 
 
 @dataclass
@@ -154,6 +210,8 @@ class ScreenResult:
     screen_type: ScreenType
     items: list[ScreenItem] = field(default_factory=list)
     is_complete: bool = True        # False 表示超时返回的不完整结果
+    market_risk_level: MarketRiskLevel | None = None   # 大盘风险等级（需求 4）
+    changes: list[ScreenChange] = field(default_factory=list)  # 变化列表（需求 10）
 
 
 # ---------------------------------------------------------------------------
