@@ -8,6 +8,9 @@ SectorRepository 提供：
 - get_sector_kline：查询板块行情 K 线
 - get_latest_trade_date：查询最新交易日
 - get_sector_ranking：查询板块涨跌幅排行（双查询合并）
+- browse_sector_info：分页浏览板块信息（需求 10.1）
+- browse_sector_constituent：分页浏览板块成分股（需求 10.2）
+- browse_sector_kline：分页浏览板块行情（需求 10.3）
 
 使用 AsyncSessionPG 查询 SectorInfo / SectorConstituent（PostgreSQL），
 使用 AsyncSessionTS 查询 SectorKline（TimescaleDB）。
@@ -19,7 +22,7 @@ import logging
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, or_
 
 from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.models.sector import (
@@ -45,6 +48,14 @@ class SectorRankingItem:
     volume: int | None
     amount: float | None
     turnover: float | None
+
+
+@dataclass
+class PaginatedResult:
+    """通用分页查询结果"""
+
+    total: int
+    items: list
 
 
 class SectorRepository:
@@ -365,7 +376,11 @@ class SectorRepository:
         sector_type: SectorType | None,
         trade_date: date | None,
     ) -> list[SectorRankingItem]:
-        """查询单个数据源的板块排行（内部方法）。"""
+        """查询单个数据源的板块排行（内部方法）。
+
+        当数据源缺少 change_pct 时（如 TDX 历史 ZIP 格式），自动查询
+        前一交易日收盘价并计算涨跌幅。
+        """
         # 步骤 1：从 TimescaleDB 查询最新交易日行情
         if trade_date is None:
             resolved_date = await self._get_latest_kline_trade_date(data_source)
@@ -389,6 +404,14 @@ class SectorRepository:
         if not klines:
             return []
 
+        # 步骤 1.5：检查是否需要补算 change_pct（部分数据源缺少该字段）
+        need_prev_close = any(k.change_pct is None and k.close is not None for k in klines)
+        prev_close_map: dict[str, Decimal] = {}
+        if need_prev_close:
+            prev_close_map = await self._get_prev_close_map(
+                data_source, resolved_date, [k.sector_code for k in klines],
+            )
+
         # 步骤 2：从 PostgreSQL 批量查询板块信息
         sector_codes = [k.sector_code for k in klines]
         async with AsyncSessionPG() as session:
@@ -407,12 +430,24 @@ class SectorRepository:
             si = info_map.get(k.sector_code)
             if si is None:
                 continue  # 无板块信息则跳过（或被 sector_type 过滤）
+
+            # 涨跌幅：优先使用数据库值，缺失时从前一交易日收盘价计算
+            change_pct: float | None = None
+            if k.change_pct is not None:
+                change_pct = float(k.change_pct)
+            elif k.close is not None and k.sector_code in prev_close_map:
+                prev_close = prev_close_map[k.sector_code]
+                if prev_close and prev_close != 0:
+                    change_pct = float(
+                        (k.close - prev_close) / prev_close * 100
+                    )
+
             results.append(
                 SectorRankingItem(
                     sector_code=k.sector_code,
                     name=si.name,
                     sector_type=si.sector_type,
-                    change_pct=float(k.change_pct) if k.change_pct is not None else None,
+                    change_pct=change_pct,
                     close=float(k.close) if k.close is not None else None,
                     volume=k.volume,
                     amount=float(k.amount) if k.amount is not None else None,
@@ -421,6 +456,267 @@ class SectorRepository:
             )
 
         return results
+
+    async def _get_prev_close_map(
+        self,
+        data_source: DataSource,
+        current_date: date,
+        sector_codes: list[str],
+    ) -> dict[str, Decimal]:
+        """查询前一交易日各板块的收盘价，用于补算涨跌幅。
+
+        查找 current_date 之前最近一个有数据的交易日的收盘价。
+        """
+        if not sector_codes:
+            return {}
+
+        async with AsyncSessionTS() as session:
+            # 子查询：找到 current_date 之前最近的交易日
+            prev_date_stmt = (
+                select(func.max(SectorKline.time))
+                .where(
+                    SectorKline.data_source == data_source.value,
+                    SectorKline.freq == "1d",
+                    SectorKline.time < datetime(
+                        current_date.year, current_date.month, current_date.day
+                    ),
+                )
+            )
+            prev_dt = (await session.execute(prev_date_stmt)).scalar_one_or_none()
+            if prev_dt is None:
+                return {}
+
+            prev_date = prev_dt.date() if isinstance(prev_dt, datetime) else prev_dt
+
+            # 查询前一交易日所有板块的收盘价
+            stmt = (
+                select(SectorKline.sector_code, SectorKline.close)
+                .where(
+                    SectorKline.data_source == data_source.value,
+                    SectorKline.freq == "1d",
+                    SectorKline.time >= datetime(
+                        prev_date.year, prev_date.month, prev_date.day
+                    ),
+                    SectorKline.time <= datetime(
+                        prev_date.year, prev_date.month, prev_date.day, 23, 59, 59
+                    ),
+                    SectorKline.sector_code.in_(sector_codes),
+                )
+            )
+            rows = (await session.execute(stmt)).all()
+
+        return {
+            row.sector_code: row.close
+            for row in rows
+            if row.close is not None
+        }
+
+    # ------------------------------------------------------------------
+    # 分页浏览
+    # ------------------------------------------------------------------
+
+    async def browse_sector_info(
+        self,
+        data_source: DataSource | None = None,
+        sector_type: SectorType | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块信息。
+
+        keyword 对 sector_code 和 name 执行 ILIKE '%keyword%' 模糊匹配。
+
+        Args:
+            data_source: 数据来源筛选（可选）
+            sector_type: 板块类型筛选（可选）
+            keyword: 模糊搜索关键词（可选）
+            page: 页码，从 1 开始
+            page_size: 每页条数
+
+        Returns:
+            PaginatedResult(total=总数, items=SectorInfo 列表)
+        """
+        stmt = select(SectorInfo)
+        count_stmt = select(func.count()).select_from(SectorInfo)
+
+        # 构建 WHERE 条件
+        conditions: list = []
+        if data_source is not None:
+            conditions.append(SectorInfo.data_source == data_source.value)
+        if sector_type is not None:
+            conditions.append(SectorInfo.sector_type == sector_type.value)
+        if keyword:
+            like_pattern = f"%{keyword}%"
+            conditions.append(
+                or_(
+                    SectorInfo.sector_code.ilike(like_pattern),
+                    SectorInfo.name.ilike(like_pattern),
+                )
+            )
+
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+            count_stmt = count_stmt.where(and_(*conditions))
+
+        # 分页
+        offset = (page - 1) * page_size
+        stmt = stmt.order_by(SectorInfo.sector_code).offset(offset).limit(page_size)
+
+        async with AsyncSessionPG() as session:
+            total = (await session.execute(count_stmt)).scalar_one()
+            items = list((await session.execute(stmt)).scalars().all())
+
+        logger.debug(
+            "浏览板块信息 source=%s type=%s keyword=%s page=%d 共 %d 条（总 %d）",
+            data_source,
+            sector_type,
+            keyword,
+            page,
+            len(items),
+            total,
+        )
+        return PaginatedResult(total=total, items=items)
+
+    async def browse_sector_constituent(
+        self,
+        data_source: DataSource,
+        sector_code: str | None = None,
+        trade_date: date | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块成分股。
+
+        data_source 必填。trade_date 默认最新交易日。
+        keyword 对 symbol 和 stock_name 执行 ILIKE '%keyword%' 模糊匹配。
+
+        Args:
+            data_source: 数据来源（必填）
+            sector_code: 板块代码精确匹配（可选）
+            trade_date: 交易日期（可选，默认最新）
+            keyword: 模糊搜索关键词（可选）
+            page: 页码，从 1 开始
+            page_size: 每页条数
+
+        Returns:
+            PaginatedResult(total=总数, items=SectorConstituent 列表)
+        """
+        # trade_date 默认使用最新交易日
+        if trade_date is None:
+            trade_date = await self.get_latest_trade_date(data_source)
+            if trade_date is None:
+                return PaginatedResult(total=0, items=[])
+
+        stmt = select(SectorConstituent)
+        count_stmt = select(func.count()).select_from(SectorConstituent)
+
+        # 构建 WHERE 条件
+        conditions: list = [
+            SectorConstituent.data_source == data_source.value,
+            SectorConstituent.trade_date == trade_date,
+        ]
+        if sector_code is not None:
+            conditions.append(SectorConstituent.sector_code == sector_code)
+        if keyword:
+            like_pattern = f"%{keyword}%"
+            conditions.append(
+                or_(
+                    SectorConstituent.symbol.ilike(like_pattern),
+                    SectorConstituent.stock_name.ilike(like_pattern),
+                )
+            )
+
+        stmt = stmt.where(and_(*conditions))
+        count_stmt = count_stmt.where(and_(*conditions))
+
+        # 分页
+        offset = (page - 1) * page_size
+        stmt = stmt.order_by(SectorConstituent.sector_code, SectorConstituent.symbol).offset(offset).limit(page_size)
+
+        async with AsyncSessionPG() as session:
+            total = (await session.execute(count_stmt)).scalar_one()
+            items = list((await session.execute(stmt)).scalars().all())
+
+        logger.debug(
+            "浏览板块成分 source=%s code=%s date=%s keyword=%s page=%d 共 %d 条（总 %d）",
+            data_source.value,
+            sector_code,
+            trade_date,
+            keyword,
+            page,
+            len(items),
+            total,
+        )
+        return PaginatedResult(total=total, items=items)
+
+    async def browse_sector_kline(
+        self,
+        data_source: DataSource,
+        sector_code: str | None = None,
+        freq: str = "1d",
+        start: date | None = None,
+        end: date | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块行情。
+
+        data_source 必填。按 time DESC 排序。
+
+        Args:
+            data_source: 数据来源（必填）
+            sector_code: 板块代码精确匹配（可选）
+            freq: K 线频率，默认 "1d"
+            start: 起始日期（含，可选）
+            end: 结束日期（含，可选）
+            page: 页码，从 1 开始
+            page_size: 每页条数
+
+        Returns:
+            PaginatedResult(total=总数, items=SectorKline 列表)
+        """
+        stmt = select(SectorKline)
+        count_stmt = select(func.count()).select_from(SectorKline)
+
+        # 构建 WHERE 条件
+        conditions: list = [
+            SectorKline.data_source == data_source.value,
+            SectorKline.freq == freq,
+        ]
+        if sector_code is not None:
+            conditions.append(SectorKline.sector_code == sector_code)
+        if start is not None:
+            start_dt = datetime(start.year, start.month, start.day)
+            conditions.append(SectorKline.time >= start_dt)
+        if end is not None:
+            end_dt = datetime(end.year, end.month, end.day, 23, 59, 59)
+            conditions.append(SectorKline.time <= end_dt)
+
+        stmt = stmt.where(and_(*conditions))
+        count_stmt = count_stmt.where(and_(*conditions))
+
+        # 分页，按时间降序
+        offset = (page - 1) * page_size
+        stmt = stmt.order_by(SectorKline.time.desc()).offset(offset).limit(page_size)
+
+        async with AsyncSessionTS() as session:
+            total = (await session.execute(count_stmt)).scalar_one()
+            items = list((await session.execute(stmt)).scalars().all())
+
+        logger.debug(
+            "浏览板块行情 source=%s code=%s freq=%s %s~%s page=%d 共 %d 条（总 %d）",
+            data_source.value,
+            sector_code,
+            freq,
+            start,
+            end,
+            page,
+            len(items),
+            total,
+        )
+        return PaginatedResult(total=total, items=items)
 
     # ------------------------------------------------------------------
     # 内部辅助

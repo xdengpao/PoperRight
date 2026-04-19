@@ -152,6 +152,8 @@
     <!-- 板块涨幅排行 -->
     <section class="sector-section" aria-label="板块数据">
       <h2 class="section-title">板块涨幅排行</h2>
+      <div class="sector-panels">
+        <div class="sector-panel-left">
 
       <!-- 板块类型标签页 -->
       <div class="chart-tabs sector-tabs" role="tablist" aria-label="板块类型切换">
@@ -236,6 +238,12 @@
           </template>
         </tbody>
       </table>
+
+        </div>
+        <div class="sector-panel-right">
+          <SectorBrowserPanel />
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -249,6 +257,7 @@ import { apiClient } from '@/api'
 import * as echarts from 'echarts'
 import { getFundamentalColorClass, formatFundamentalValue } from './fundamentalUtils'
 import { getMoneyFlowBarColor } from './moneyFlowUtils'
+import SectorBrowserPanel from '@/components/SectorBrowserPanel.vue'
 
 // ─── TypeScript 接口 (Task 24.2.2) ──────────────────────────────────────────
 
@@ -938,5 +947,21 @@ onUnmounted(() => {
 .kline-error {
   display: flex; align-items: center; justify-content: center; gap: 12px;
   height: 300px; color: #f85149; font-size: 14px; background: #0d1117;
+}
+
+/* 双面板布局 */
+.sector-panels {
+  display: flex;
+  gap: 16px;
+}
+.sector-panel-left,
+.sector-panel-right {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .sector-panels {
+    flex-direction: column;
+  }
 }
 </style>

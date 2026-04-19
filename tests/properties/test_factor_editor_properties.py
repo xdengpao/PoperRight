@@ -1446,3 +1446,204 @@ def test_range_type_evaluation(scenario):
         f"Factor '{factor_name}': value={value}, range=[{low}, {high}], "
         f"expected passed={expected_passed}, got passed={result.passed}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Property 10: change_pct fallback 正确性
+# Feature: factor-editor-optimization, Property 10: change_pct fallback 正确性
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass as _dataclass
+from decimal import Decimal as _Decimal
+
+
+@_dataclass
+class _MockSectorKline:
+    """用于属性测试的 SectorKline 模拟对象。
+
+    仅包含 _aggregate_change_pct 所需的 change_pct 和 close 字段。
+    """
+
+    change_pct: _Decimal | None
+    close: _Decimal | None
+
+
+# -- Hypothesis strategies for generating kline data --
+
+# 生成单条 K 线记录：change_pct 和 close 均可为 None 或有效 Decimal 值
+_decimal_or_none = st.one_of(
+    st.floats(
+        min_value=-50.0, max_value=50.0,
+        allow_nan=False, allow_infinity=False,
+    ).map(lambda x: _Decimal(str(round(x, 4)))),
+    st.none(),
+)
+
+_positive_decimal_or_none = st.one_of(
+    st.floats(
+        min_value=0.01, max_value=10000.0,
+        allow_nan=False, allow_infinity=False,
+    ).map(lambda x: _Decimal(str(round(x, 4)))),
+    st.none(),
+)
+
+_mock_kline_strategy = st.builds(
+    _MockSectorKline,
+    change_pct=_decimal_or_none,
+    close=_positive_decimal_or_none,
+)
+
+# 生成 change_pct 全 NULL 的 K 线列表（用于测试 fallback 路径）
+_all_null_pct_kline_strategy = st.builds(
+    _MockSectorKline,
+    change_pct=st.none(),
+    close=_positive_decimal_or_none,
+)
+
+# 生成至少有一条 change_pct 非 NULL 的 K 线列表（用于测试优先路径）
+_non_null_pct_kline_strategy = st.builds(
+    _MockSectorKline,
+    change_pct=st.floats(
+        min_value=-50.0, max_value=50.0,
+        allow_nan=False, allow_infinity=False,
+    ).map(lambda x: _Decimal(str(round(x, 4)))),
+    close=_positive_decimal_or_none,
+)
+
+
+@st.composite
+def _sector_kline_data_strategy(draw):
+    """生成 sector_code → [_MockSectorKline, ...] 映射数据。
+
+    生成 1-5 个板块，每个板块有 1-20 条 K 线记录。
+    板块被随机分为三类：
+    - 全部 change_pct 非 NULL（优先路径）
+    - 全部 change_pct 为 NULL（fallback 路径）
+    - 混合 change_pct（至少一条非 NULL → 优先路径）
+
+    Returns:
+        dict[str, list[_MockSectorKline]]
+    """
+    n_sectors = draw(st.integers(min_value=1, max_value=5))
+    kline_data: dict[str, list[_MockSectorKline]] = {}
+
+    for i in range(n_sectors):
+        code = f"SECTOR{i:03d}"
+        # 随机选择板块类型
+        sector_type = draw(st.sampled_from([
+            "all_valid_pct",
+            "all_null_pct",
+            "mixed_pct",
+        ]))
+        n_klines = draw(st.integers(min_value=1, max_value=20))
+
+        if sector_type == "all_valid_pct":
+            # 所有 change_pct 非 NULL
+            klines = draw(st.lists(
+                _non_null_pct_kline_strategy,
+                min_size=n_klines,
+                max_size=n_klines,
+            ))
+        elif sector_type == "all_null_pct":
+            # 所有 change_pct 为 NULL
+            klines = draw(st.lists(
+                _all_null_pct_kline_strategy,
+                min_size=n_klines,
+                max_size=n_klines,
+            ))
+        else:
+            # 混合：至少一条非 NULL change_pct + 其余随机
+            first = draw(_non_null_pct_kline_strategy)
+            rest = draw(st.lists(
+                _mock_kline_strategy,
+                min_size=max(0, n_klines - 1),
+                max_size=max(0, n_klines - 1),
+            ))
+            klines = [first] + rest
+
+        kline_data[code] = klines
+
+    return kline_data
+
+
+@settings(max_examples=200)
+@given(kline_data=_sector_kline_data_strategy())
+def test_change_pct_fallback_correctness(
+    kline_data: dict[str, list[_MockSectorKline]],
+):
+    """
+    # Feature: factor-editor-optimization, Property 10: change_pct fallback 正确性
+
+    **Validates: Requirements 15.1, 15.2, 15.3, 15.4**
+
+    For any sector kline dataset:
+    1. If a sector has at least one non-NULL change_pct, the aggregated result
+       SHALL equal the sum of all non-NULL change_pct values (fallback NOT used)
+    2. If a sector has ALL change_pct as NULL and at least 2 valid close prices,
+       the aggregated result SHALL equal
+       (latest_close - earliest_close) / earliest_close × 100
+    3. If a sector has ALL change_pct as NULL and fewer than 2 valid close prices,
+       the aggregated result SHALL be 0.0
+    4. The return type SHALL always be float
+    """
+    # 调用被测方法
+    result = SectorStrengthFilter._aggregate_change_pct(kline_data)
+
+    # 验证每个板块的结果
+    for code, klines in kline_data.items():
+        assert code in result, (
+            f"板块 '{code}' 应在结果中，但未找到"
+        )
+
+        aggregated = result[code]
+
+        # --- 子属性 4：返回类型始终为 float ---
+        assert isinstance(aggregated, float), (
+            f"板块 '{code}' 返回类型应为 float，实际为 {type(aggregated)}"
+        )
+
+        # 收集有效的 change_pct 值
+        valid_pcts = [
+            float(k.change_pct)
+            for k in klines
+            if k.change_pct is not None
+        ]
+
+        if valid_pcts:
+            # --- 子属性 1 & 3：有非 NULL change_pct → 使用 change_pct 累加 ---
+            expected = sum(valid_pcts)
+            assert abs(aggregated - expected) < 1e-6, (
+                f"板块 '{code}' 有 {len(valid_pcts)} 条有效 change_pct，"
+                f"期望累加值 {expected}，实际 {aggregated}"
+            )
+        else:
+            # 所有 change_pct 为 NULL → fallback 路径
+            valid_closes = [
+                float(k.close)
+                for k in klines
+                if k.close is not None
+            ]
+
+            if len(valid_closes) >= 2:
+                # --- 子属性 2：使用收盘价公式 ---
+                earliest = valid_closes[0]
+                latest = valid_closes[-1]
+                if earliest != 0.0:
+                    expected = (latest - earliest) / earliest * 100
+                else:
+                    expected = 0.0
+                assert abs(aggregated - expected) < 1e-6, (
+                    f"板块 '{code}' change_pct 全 NULL，有 {len(valid_closes)} 个有效收盘价，"
+                    f"期望 fallback 值 {expected}，实际 {aggregated}"
+                )
+            else:
+                # --- 子属性 3：有效收盘价 < 2 → 0.0 ---
+                assert aggregated == 0.0, (
+                    f"板块 '{code}' change_pct 全 NULL 且有效收盘价 < 2，"
+                    f"期望 0.0，实际 {aggregated}"
+                )
+
+    # 验证结果中不包含多余的板块
+    assert set(result.keys()) == set(kline_data.keys()), (
+        f"结果板块集合 {set(result.keys())} 与输入 {set(kline_data.keys())} 不一致"
+    )

@@ -1094,3 +1094,204 @@ describe('ScreenerView - strategy example loader', () => {
     wrapper.unmount()
   })
 })
+
+// ─── 板块数据源覆盖率显示测试 ─────────────────────────────────────────────────
+
+const MOCK_COVERAGE_DATA = {
+  sources: [
+    {
+      data_source: 'DC',
+      total_sectors: 1030,
+      sectors_with_constituents: 1030,
+      total_stocks: 5882,
+      coverage_ratio: 1.0,
+    },
+    {
+      data_source: 'TI',
+      total_sectors: 1724,
+      sectors_with_constituents: 90,
+      total_stocks: 5755,
+      coverage_ratio: 0.0522,
+    },
+    {
+      data_source: 'TDX',
+      total_sectors: 615,
+      sectors_with_constituents: 615,
+      total_stocks: 7122,
+      coverage_ratio: 1.0,
+    },
+  ],
+}
+
+/**
+ * Helper: set up mocks for a sector-factor strategy with coverage data.
+ * Returns a mockGet implementation that serves factor registry, strategy examples,
+ * strategies with a sector factor, and sector coverage data.
+ */
+function setupSectorCoverageMocks(selectedSource = 'DC') {
+  mockGet.mockImplementation((url: string) => {
+    if (url === '/screen/factor-registry') {
+      return Promise.resolve({ data: MOCK_FACTOR_REGISTRY })
+    }
+    if (url === '/screen/strategy-examples') {
+      return Promise.resolve({ data: MOCK_STRATEGY_EXAMPLES })
+    }
+    if (url === '/sector/coverage') {
+      return Promise.resolve({ data: MOCK_COVERAGE_DATA })
+    }
+    if (url === '/strategies') {
+      return Promise.resolve({
+        data: [{
+          id: 'test-coverage',
+          name: 'Coverage Test',
+          config: {
+            logic: 'AND',
+            factors: [
+              { type: 'sector', factor_name: 'sector_rank', operator: '<=', threshold: 30, params: {} },
+            ],
+            weights: { sector_rank: 1.0 },
+            sector_config: {
+              sector_data_source: selectedSource,
+              sector_type: 'CONCEPT',
+              sector_period: 5,
+              sector_top_n: 30,
+            },
+          },
+          is_active: true,
+          created_at: '2024-01-01',
+          enabled_modules: ['factor_editor'],
+        }],
+      })
+    }
+    if (typeof url === 'string' && url.startsWith('/strategies/')) {
+      return Promise.resolve({
+        data: {
+          id: 'test-coverage',
+          name: 'Coverage Test',
+          config: {
+            logic: 'AND',
+            factors: [
+              { type: 'sector', factor_name: 'sector_rank', operator: '<=', threshold: 30, params: {} },
+            ],
+            weights: { sector_rank: 1.0 },
+            sector_config: {
+              sector_data_source: selectedSource,
+              sector_type: 'CONCEPT',
+              sector_period: 5,
+              sector_top_n: 30,
+            },
+          },
+          is_active: true,
+          created_at: '2024-01-01',
+          enabled_modules: ['factor_editor'],
+        },
+      })
+    }
+    return Promise.resolve({ data: [] })
+  })
+  mockPost.mockResolvedValue({ data: {} })
+}
+
+describe('ScreenerView - 板块数据源覆盖率显示', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+  })
+
+  // ─── Req 16.1: 数据源下拉选项显示覆盖率摘要 ─────────────────────────────
+
+  it('数据源下拉选项显示板块数和股票数覆盖信息', async () => {
+    setupSectorCoverageMocks('DC')
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    // 数据来源选择器应存在
+    const dataSourceSelect = wrapper.find('[aria-label="数据来源"]')
+    expect(dataSourceSelect.exists()).toBe(true)
+
+    // 获取所有选项
+    const options = dataSourceSelect.findAll('option')
+    expect(options.length).toBe(3)
+
+    // DC 选项应包含板块数和股票数
+    const dcOption = options.find(o => o.element.value === 'DC')
+    expect(dcOption).toBeDefined()
+    expect(dcOption!.text()).toContain('1030')
+    expect(dcOption!.text()).toContain('5882')
+    expect(dcOption!.text()).toContain('板块')
+    expect(dcOption!.text()).toContain('股票')
+
+    // TI 选项应包含覆盖率信息和警告标记
+    const tiOption = options.find(o => o.element.value === 'TI')
+    expect(tiOption).toBeDefined()
+    expect(tiOption!.text()).toContain('90')
+    expect(tiOption!.text()).toContain('5755')
+    expect(tiOption!.text()).toContain('⚠️')
+
+    // TDX 选项应包含覆盖率信息，无警告标记
+    const tdxOption = options.find(o => o.element.value === 'TDX')
+    expect(tdxOption).toBeDefined()
+    expect(tdxOption!.text()).toContain('615')
+    expect(tdxOption!.text()).toContain('7122')
+    expect(tdxOption!.text()).not.toContain('⚠️')
+
+    wrapper.unmount()
+  })
+
+  // ─── Req 16.3: 低覆盖率数据源显示警告 ───────────────────────────────────
+
+  it('选择 TI 数据源时显示低覆盖率警告', async () => {
+    setupSectorCoverageMocks('TI')
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    // TI 的 coverage_ratio = 0.0522 < 0.5，应显示警告
+    const warning = wrapper.find('.sector-coverage-warning')
+    expect(warning.exists()).toBe(true)
+    expect(warning.attributes('role')).toBe('alert')
+    expect(warning.text()).toContain('该数据源成分股数据不完整')
+    expect(warning.text()).toContain('90')
+    expect(warning.text()).toContain('1724')
+
+    wrapper.unmount()
+  })
+
+  // ─── Req 16.3: DC 数据源不显示警告 ──────────────────────────────────────
+
+  it('选择 DC 数据源时不显示低覆盖率警告', async () => {
+    setupSectorCoverageMocks('DC')
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    // DC 的 coverage_ratio = 1.0 >= 0.5，不应显示警告
+    const warning = wrapper.find('.sector-coverage-warning')
+    expect(warning.exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+
+  // ─── Req 16.3: TDX 数据源不显示警告 ─────────────────────────────────────
+
+  it('选择 TDX 数据源时不显示低覆盖率警告', async () => {
+    setupSectorCoverageMocks('TDX')
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    // TDX 的 coverage_ratio = 1.0 >= 0.5，不应显示警告
+    const warning = wrapper.find('.sector-coverage-warning')
+    expect(warning.exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+})

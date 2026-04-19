@@ -1,352 +1,359 @@
-# Implementation Plan: 行业概念板块数据导入 (Sector Data Import)
+# 实现计划：行业概念板块数据导入（重构版 v2）
 
-## Overview
+## 概述
 
-本实现计划将行业概念板块数据导入功能分解为增量编码步骤，从数据模型和枚举定义开始，逐步构建 CSV 解析器、导入服务、查询仓储、Celery 任务、API 端点，最后接入风控和选股模块。每个步骤都在前一步基础上构建，确保无孤立代码。所有新模块独立于现有 K 线导入模块，不修改现有文件。
+将现有的单一 `SectorCSVParser` 重构为三个独立解析引擎（`BaseParsingEngine` + `DCParsingEngine` + `TIParsingEngine` + `TDXParsingEngine`），并重写 `SectorImportService` 的文件扫描和导入编排逻辑以匹配按数据源重新组织的目录结构。所有代码变更集中在 `app/services/data_engine/sector_csv_parser.py` 和 `app/services/data_engine/sector_import.py` 两个文件，现有 ORM 模型、API 端点、Celery 任务、数据库迁移均保持不变。
 
-## Tasks
+## 任务列表
 
-- [x] 1. Define data models, enums, and database schema
-  - [x] 1.1 Create `app/models/sector.py` with SectorInfo, SectorConstituent, SectorKline ORM models and enums
-    - Define `DataSource` enum (DC, TI, TDX) and `SectorType` enum (CONCEPT, INDUSTRY, REGION, STYLE) as `str, Enum`
-    - Implement `SectorInfo(PGBase)` with fields: id, sector_code, name, sector_type, data_source, list_date, constituent_count, updated_at
-    - Add `UniqueConstraint("sector_code", "data_source")` and `Index("sector_type", "data_source")` to SectorInfo
-    - Implement `SectorConstituent(PGBase)` with fields: id, trade_date, sector_code, data_source, symbol, stock_name
-    - Add `UniqueConstraint("trade_date", "sector_code", "data_source", "symbol")` and indexes on (symbol, trade_date) and (sector_code, data_source, trade_date)
-    - Implement `SectorKline(TSBase)` with composite primary key (time, sector_code, data_source, freq) and OHLCV + change_pct + turnover fields
-    - Add unique index on (time, sector_code, data_source, freq) and query index on (sector_code, data_source, freq, time)
-    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 11.5_
+- [x] 1. 实现 BaseParsingEngine 基类和共享数据结构
+  - [x] 1.1 在 `app/services/data_engine/sector_csv_parser.py` 中重构：保留现有 dataclass（ParsedSectorInfo、ParsedConstituent、ParsedSectorKline）和辅助函数（`_normalize_symbol`、`_DATE_RE`、`_DATE_DASH_RE`），删除 `SectorCSVParser` 类，新增 `BaseParsingEngine` 基类
+    - 实现 `_read_csv(file_path: Path) -> str`：自动检测编码（UTF-8 → GBK → GB2312），去除 BOM
+    - 实现 `iter_zip_entries(zip_path: Path) -> Iterator[tuple[str, str]]`：逐个读取 ZIP 内文件，yield (文件名, CSV文本)
+    - 实现 `_validate_ohlc(kline: ParsedSectorKline) -> bool`：验证 OHLC 保序性
+    - 实现 `_infer_date_from_filename(filename: str) -> date | None`：从文件名推断日期
+    - 实现 `_parse_date(raw_date: str) -> date | None`：解析日期字符串
+    - 实现 `_safe_decimal(raw: str) -> Decimal | None` 和 `_safe_int(raw: str) -> int | None`
+    - 这些方法大部分可从现有 `SectorCSVParser` 中迁移，确保接口签名与设计文档一致
+    - _需求: 8.1, 8.2, 8.3, 8.4, 8.5, 8.6_
 
-  - [x] 1.2 Create Alembic migration for sector_info, sector_constituent, and sector_kline tables
-    - Generate migration with `alembic revision --autogenerate -m "add sector tables"`
-    - Include TimescaleDB hypertable creation for sector_kline: `SELECT create_hypertable('sector_kline', 'time')`
-    - _Requirements: 1.6, 2.4, 3.4_
-
-  - [x] 1.3 Write property test for enum validation (Property 1)
+  - [x] 1.2 更新属性测试 P1（枚举验证）确认仍通过
     - **Property 1: Enum validation rejects invalid values**
-    - For any string not in {CONCEPT, INDUSTRY, REGION, STYLE}, SectorType SHALL reject it; for any string not in {DC, TI, TDX}, DataSource SHALL reject it
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 1.4, 1.5, 3.5**
+    - **验证: 需求 1.4, 1.5**
 
-- [x] 2. Implement SectorCSVParser — sector list parsing
-  - [x] 2.1 Create `app/services/data_engine/sector_csv_parser.py` with dataclasses and core utilities
-    - Define `ParsedSectorInfo`, `ParsedConstituent`, `ParsedSectorKline` dataclasses
-    - Implement `_read_csv(file_path)` with auto encoding detection (UTF-8 → GBK → GB2312)
-    - Implement `_extract_zip(zip_path)` for in-memory ZIP extraction returning `[(filename, csv_text), ...]`
-    - Implement `_validate_ohlc(kline)` checking low ≤ open, low ≤ close, high ≥ open, high ≥ close
-    - Implement `_infer_date_from_filename(filename)` extracting YYYYMMDD dates from filenames
-    - Implement `_map_dc_sector_type(idx_type)` and `_map_ti_sector_type(index_type)` for type mapping
-    - _Requirements: 4.10, 4.11_
-
-  - [x] 2.2 Implement sector list parsing methods for all three data sources
-    - Implement `parse_sector_list_dc(file_path)` parsing DC CSV with columns: 板块代码,交易日期,板块名称,...,idx_type,level
-    - Implement `parse_sector_list_ti(file_path)` parsing TI CSV with columns: 代码,名称,成分个数,交易所,上市日期,指数类型
-    - Implement `parse_sector_list_tdx(file_path)` parsing TDX CSV with columns: 板块代码,交易日期,板块名称,板块类型,成分个数,...
-    - Each method returns `list[ParsedSectorInfo]` with appropriate data_source set
-    - _Requirements: 4.1, 4.2, 4.3_
-
-  - [x] 2.3 Write property test for sector list CSV parsing round-trip (Property 2)
-    - **Property 2: Sector list CSV parsing round-trip**
-    - For any valid sector info data, generating a CSV row in DC/TI/TDX format and parsing it back SHALL recover the original field values
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 4.1, 4.2, 4.3**
-
-  - [x] 2.4 Write property test for encoding detection (Property 5)
+  - [x] 1.3 更新属性测试 P5（编码检测）使用 BaseParsingEngine 替代 SectorCSVParser
     - **Property 5: Encoding detection preserves content**
-    - For any valid CSV text containing Chinese characters, encoding as UTF-8, GBK, or GB2312 and reading with auto-detection SHALL produce identical parsed content
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 4.10**
+    - **验证: 需求 8.1**
 
-  - [x] 2.5 Write property test for OHLC validation invariant (Property 6)
+  - [x] 1.4 更新属性测试 P6（OHLC 验证）使用 BaseParsingEngine 替代 SectorCSVParser
     - **Property 6: OHLC validation invariant**
-    - For any four positive decimals, the OHLC validator SHALL return True iff low ≤ open AND low ≤ close AND high ≥ open AND high ≥ close
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 4.11**
+    - **验证: 需求 8.2**
 
-- [x] 3. Implement SectorCSVParser — constituent and kline parsing
-  - [x] 3.1 Implement constituent parsing methods for all three data sources
-    - Implement `parse_constituents_dc_zip(zip_path)` extracting CSV files from ZIP, parsing trade_date from filename, extracting sector_code, symbol, stock_name
-    - Implement `parse_constituents_ti_csv(file_path, trade_date)` parsing TI CSV with columns: 指数代码,指数名称,指数类型,股票代码,股票名称
-    - Implement `parse_constituents_tdx_zip(zip_path)` extracting CSV files from ZIP, parsing sector_code, trade_date, symbol, stock_name
-    - Each method returns `list[ParsedConstituent]` with appropriate data_source set
-    - _Requirements: 4.4, 4.5, 4.6_
+  - [x] 1.5 更新属性测试 P7（日期推断）使用 BaseParsingEngine 替代 SectorCSVParser
+    - **Property 7: Date inference round-trip from filename**
+    - **验证: 需求 8.3**
 
-  - [x] 3.2 Implement kline parsing methods for all three data sources
-    - Implement `parse_kline_dc_csv(file_path)` parsing DC CSV with columns: 日期,概念代码,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
-    - Implement `parse_kline_ti_csv(file_path)` parsing TI CSV with columns: 指数代码,交易日期,开盘点位,最高点位,最低点位,收盘点位,...,涨跌幅,...,换手率
-    - Implement `parse_kline_tdx_csv(file_path)` parsing TDX CSV with columns: 日期,代码,名称,开盘,收盘,最高,最低,成交量,成交额,...
-    - Apply `_validate_ohlc` to each parsed kline record, skipping invalid rows
-    - Each method returns `list[ParsedSectorKline]` with appropriate data_source and freq="1d"
-    - _Requirements: 4.7, 4.8, 4.9, 4.11_
+- [x] 2. 实现 DCParsingEngine（东方财富解析引擎）
+  - [x] 2.1 在 `app/services/data_engine/sector_csv_parser.py` 中新增 `DCParsingEngine(BaseParsingEngine)` 类
+    - 实现 `parse_sector_list(file_path: Path) -> list[ParsedSectorInfo]`：解析 DC 板块列表 CSV（13列含 idx_type，少于13列默认 CONCEPT），按 sector_code 去重
+    - 实现 `_map_sector_type(idx_type: str) -> SectorType`：idx_type 包含匹配（行业/地区/地域/风格/概念）
+    - 实现 `parse_kline_csv(file_path: Path) -> list[ParsedSectorKline]`：解析散装/增量行情 CSV，自动检测两种列头格式：格式 A（地区板块/增量: 板块代码,交易日期,收盘点位,开盘点位,...，收盘在开盘前）和格式 B（行业板块: 日期,行业代码,开盘,收盘,...，标准 OHLC 顺序）
+    - 实现 `parse_constituents_zip(zip_path: Path) -> list[ParsedConstituent]`：解析板块成分 ZIP
+    - 实现 `iter_constituents_zip(zip_path: Path) -> Iterator[list[ParsedConstituent]]`：流式解析成分 ZIP
+    - _需求: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, 5.8_
 
-  - [x] 3.3 Write property test for constituent data parsing round-trip (Property 3)
-    - **Property 3: Constituent data parsing round-trip**
-    - For any valid constituent data, generating CSV/ZIP content in DC/TI/TDX format and parsing it back SHALL recover the original field values
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 4.4, 4.5, 4.6**
+  - [x] 2.2 更新属性测试 P2（板块列表解析往返）DC 部分，使用 DCParsingEngine 替代 SectorCSVParser
+    - **Property 2: Sector list CSV parsing round-trip (DC)**
+    - **验证: 需求 5.2, 5.3**
 
-  - [x] 3.4 Write property test for kline CSV parsing round-trip (Property 4)
-    - **Property 4: Kline CSV parsing round-trip**
-    - For any valid sector kline data where OHLC invariant holds, generating a CSV row in DC/TI/TDX format and parsing it back SHALL recover the original OHLCV values
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 4.7, 4.8, 4.9**
+  - [x] 2.3 更新属性测试 P3（成分数据解析往返）DC 部分，使用 DCParsingEngine 替代 SectorCSVParser
+    - **Property 3: Constituent data parsing round-trip (DC)**
+    - **验证: 需求 5.6**
 
-  - [x] 3.5 Write unit tests for SectorCSVParser
-    - Test file: `tests/services/test_sector_csv_parser.py`
-    - Test each data source's sector list parsing with sample CSV data
-    - Test constituent parsing from ZIP and CSV formats
-    - Test kline parsing with OHLC validation
-    - Test encoding fallback (GBK file parsed correctly)
-    - Test corrupted ZIP handling (BadZipFile)
-    - Test rows with insufficient fields are skipped
-    - _Requirements: 4.1–4.11_
+  - [x] 2.4 更新属性测试 P4（行情解析往返）DC 部分，使用 DCParsingEngine 替代 SectorCSVParser
+    - **Property 4: Kline CSV parsing round-trip (DC)**
+    - **验证: 需求 5.5**
 
-- [x] 4. Checkpoint — Ensure all parser tests pass
-  - Ensure all tests pass, ask the user if questions arise.
+  - [x] 2.5 更新 `tests/services/data_engine/test_sector_csv_parser.py` 中 DC 相关单元测试
+    - 将 TestParseSectorListDC、TestParseConstituentsDCZip、TestParseKlineDC 中的 `SectorCSVParser` 替换为 `DCParsingEngine`
+    - 更新方法调用名称（`parse_sector_list_dc` → `parse_sector_list` 等）
+    - _需求: 5.2, 5.3, 5.4, 5.5, 5.6_
 
-- [x] 5. Implement SectorImportService — bulk write and file scanning
-  - [x] 5.1 Create `app/services/data_engine/sector_import.py` with SectorImportService class
-    - Define class constants: BATCH_SIZE=5000, REDIS_PROGRESS_KEY, REDIS_INCREMENTAL_KEY, REDIS_STOP_KEY, PROGRESS_TTL, HEARTBEAT_TIMEOUT
-    - Implement `__init__(self, base_dir)` with default path `/Volumes/light/行业概念板块`
-    - Implement `_scan_sector_list_files(source)`: DC scans `概念板块列表_东财.csv` from root + `东方财富_*板块_历史行情数据/` list CSVs + `增量数据/概念板块_东财/YYYY-MM/YYYY-MM-DD.csv`; TI scans `行业概念板块_同花顺.csv` from root; TDX scans `通达信板块列表.csv` + `板块信息_通达信.zip` from root + `增量数据/板块信息_通达信/YYYY-MM/YYYY-MM-DD.csv`
-    - Implement `_scan_constituent_files(source)`: DC scans `概念板块_东财.zip` from root + `板块成分_东财/YYYY-MM/板块成分_DC_YYYYMMDD.zip`; TI scans root CSVs (`概念板块成分汇总_同花顺.csv`, `行业板块成分汇总_同花顺.csv`) + `概念板块成分_同花顺.zip` + `板块成分_同花顺/*/YYYY-MM/*.csv`; TDX scans `板块成分_通达信/YYYY-MM/板块成分_TDX_YYYYMMDD.zip`
-    - Implement `_scan_kline_files(source)`: DC scans `板块行情_东财.zip` from root + `东方财富_*板块_历史行情数据/*.zip` + `增量数据/板块行情_东财/YYYY-MM/YYYY-MM-DD.csv`; TI scans `板块指数行情_同花顺.zip` from root + `增量数据/板块指数行情_同花顺/YYYY-MM/YYYY-MM-DD.csv`; TDX scans `板块行情_通达信.zip` from root + `通达信_*板块_历史行情数据/*.zip` + `增量数据/板块行情_通达信/YYYY-MM/YYYY-MM-DD.csv`
-    - _Requirements: 5.1, 11.1, 11.2, 12.1, 12.2, 12.3, 12.4, 12.14_
+- [x] 3. 实现 TIParsingEngine（同花顺解析引擎）
+  - [x] 3.1 在 `app/services/data_engine/sector_csv_parser.py` 中新增 `TIParsingEngine(BaseParsingEngine)` 类
+    - 实现 `parse_sector_list(file_path: Path) -> list[ParsedSectorInfo]`：解析 TI 板块列表 CSV（6列：代码,名称,成分个数,交易所,上市日期,指数类型）
+    - 实现 `_map_sector_type(index_type: str) -> SectorType`：指数类型映射
+    - 实现 `parse_kline_csv(file_path: Path) -> list[ParsedSectorKline]`：解析散装/增量行情 CSV（12列，标准 OHLC 顺序）
+    - 实现 `parse_constituents_summary(file_path: Path, trade_date: date | None = None) -> list[ParsedConstituent]`：解析5列成分汇总 CSV
+    - 实现 `parse_constituents_per_sector(file_path: Path, trade_date: date | None = None) -> list[ParsedConstituent]`：解析3列散装成分 CSV
+    - _需求: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7_
 
-  - [x] 5.2 Implement bulk write methods
-    - Implement `_bulk_upsert_sector_info(items)` using PostgreSQL UPSERT (ON CONFLICT DO UPDATE) in batches of BATCH_SIZE
-    - Implement `_bulk_insert_constituents(items)` using ON CONFLICT DO NOTHING in batches of BATCH_SIZE
-    - Implement `_bulk_insert_klines(items)` using ON CONFLICT DO NOTHING in batches of BATCH_SIZE, writing to TimescaleDB
-    - Use `AsyncSessionPG` for sector_info and sector_constituent, `AsyncSessionTS` for sector_kline
-    - _Requirements: 5.3, 5.4, 5.5, 5.6_
+  - [x] 3.2 更新属性测试 P2（板块列表解析往返）TI 部分，使用 TIParsingEngine
+    - **Property 2: Sector list CSV parsing round-trip (TI)**
+    - **验证: 需求 6.2**
 
-  - [x] 5.3 Implement progress tracking and stop signal
-    - Implement `update_progress(**kwargs)` writing JSON to Redis with heartbeat timestamp
-    - Implement `is_running()` checking Redis progress status with heartbeat timeout detection (120s)
-    - Implement `request_stop()` setting Redis stop signal key
-    - Implement `_check_stop_signal()` reading Redis stop signal key
-    - Use independent Redis key prefix `sector_import:` separate from K-line import
-    - _Requirements: 5.8, 7.3, 7.4, 7.5, 11.2_
+  - [x] 3.3 更新属性测试 P3（成分数据解析往返）TI 部分，使用 TIParsingEngine
+    - **Property 3: Constituent data parsing round-trip (TI)**
+    - **验证: 需求 6.4, 6.5**
 
-  - [x] 5.4 Write property test for SectorInfo UPSERT idempotence (Property 7)
-    - **Property 7: SectorInfo UPSERT idempotence**
-    - For any valid SectorInfo record, inserting via UPSERT twice (second time with modified mutable fields) SHALL result in exactly one record with updated values
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 1.2, 5.3, 6.6**
+  - [x] 3.4 更新属性测试 P4（行情解析往返）TI 部分，使用 TIParsingEngine
+    - **Property 4: Kline CSV parsing round-trip (TI)**
+    - **验证: 需求 6.3**
 
-  - [x] 5.5 Write property test for SectorConstituent conflict-ignore idempotence (Property 8)
-    - **Property 8: SectorConstituent conflict-ignore idempotence**
-    - For any valid SectorConstituent record, inserting via ON CONFLICT DO NOTHING twice SHALL result in exactly one record
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 2.2, 5.4, 6.5**
+  - [x] 3.5 更新 `tests/services/data_engine/test_sector_csv_parser.py` 中 TI 相关单元测试
+    - 将 TestParseSectorListTI、TestParseConstituentsTICSV、TestParseKlineTI 中的 `SectorCSVParser` 替换为 `TIParsingEngine`
+    - 更新方法调用名称（`parse_sector_list_ti` → `parse_sector_list` 等）
+    - _需求: 6.2, 6.3, 6.4, 6.5_
 
-  - [x] 5.6 Write property test for SectorKline conflict-ignore idempotence (Property 9)
-    - **Property 9: SectorKline conflict-ignore idempotence**
-    - For any valid SectorKline record, inserting via ON CONFLICT DO NOTHING twice SHALL result in exactly one record
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 3.2, 5.5, 6.4**
+- [x] 4. 检查点 - 确保 DC 和 TI 解析引擎测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
 
-- [x] 6. Implement SectorImportService — full and incremental import
-  - [x] 6.1 Implement full import orchestration
-    - Implement `import_full(data_sources)` orchestrating: _import_sector_list → _import_constituents → _import_klines
-    - Implement `_import_sector_list(data_sources)` scanning and parsing sector list files per source, calling `_bulk_upsert_sector_info`
-    - Implement `_import_constituents(data_sources)` scanning and parsing constituent files per source, calling `_bulk_insert_constituents`
-    - Implement `_import_klines(data_sources)` scanning and parsing kline files per source, calling `_bulk_insert_klines`
-    - Check stop signal between files, update progress after each file
-    - Log errors and skip failed files, continue processing remaining files
-    - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.7, 5.8_
+- [x] 5. 实现 TDXParsingEngine（通达信解析引擎）
+  - [x] 5.1 在 `app/services/data_engine/sector_csv_parser.py` 中新增 `TDXParsingEngine(BaseParsingEngine)` 类
+    - 实现 `parse_sector_list(file_path: Path) -> list[ParsedSectorInfo]`：解析 TDX 板块列表 CSV（9列），按 sector_code 去重
+    - 实现 `_map_sector_type(raw_type: str) -> SectorType`：板块类型映射
+    - 实现 `parse_kline_csv(file_path: Path) -> list[ParsedSectorKline]`：解析散装/增量行情 CSV（格式 B，38列，收盘在开盘前）
+    - 实现 `parse_kline_zip(zip_path: Path) -> list[ParsedSectorKline]`：解析历史行情 ZIP（格式 A）
+    - 实现 `iter_kline_zip(zip_path: Path) -> Iterator[list[ParsedSectorKline]]`：流式解析历史行情 ZIP
+    - 实现 `_infer_freq_from_filename(filename: str) -> str`：从 ZIP 文件名推断频率（日k→1d、周k→1w、月k→1M）
+    - 实现双格式自动检测：格式 A（历史 ZIP 内: 日期,代码,名称,开盘,收盘,...）和格式 B（散装/增量: 板块代码,交易日期,收盘点位,开盘点位,...）
+    - 实现 `parse_constituents_zip(zip_path: Path) -> list[ParsedConstituent]`：解析板块成分 ZIP
+    - _需求: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, 7.7, 7.8, 7.9, 7.10_
 
-  - [x] 6.2 Implement incremental import
-    - Implement `check_incremental(file_path)` checking Redis hash for file path + mtime
-    - Implement `mark_imported(file_path)` storing file path + mtime in Redis hash
-    - Implement `import_incremental(data_sources)` scanning all files but skipping already-imported ones via `check_incremental`
-    - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6_
+  - [x] 5.2 更新属性测试 P2（板块列表解析往返）TDX 部分，使用 TDXParsingEngine
+    - **Property 2: Sector list CSV parsing round-trip (TDX)**
+    - **验证: 需求 7.2**
 
-  - [x] 6.3 Write property test for incremental detection correctness (Property 10)
-    - **Property 10: Incremental detection correctness**
-    - For any file path, after `mark_imported(path)`, `check_incremental(path)` SHALL return True; for unmarked paths SHALL return False
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 6.3**
+  - [x] 5.3 更新属性测试 P3（成分数据解析往返）TDX 部分，使用 TDXParsingEngine
+    - **Property 3: Constituent data parsing round-trip (TDX)**
+    - **验证: 需求 7.9**
 
-  - [x] 6.4 Write unit tests for SectorImportService
-    - Test file: `tests/services/test_sector_import.py`
-    - Test file scanning discovers correct files per data source
-    - Test batch size splitting logic
-    - Test progress update and heartbeat
-    - Test stop signal detection
-    - Test zombie task detection (heartbeat timeout)
-    - Test error handling: skip failed files, continue processing
-    - _Requirements: 5.1–5.8, 6.1–6.6_
+  - [x] 5.4 更新属性测试 P4（行情解析往返）TDX 部分，使用 TDXParsingEngine（覆盖格式 A 和格式 B）
+    - **Property 4: Kline CSV parsing round-trip (TDX)**
+    - **验证: 需求 7.4, 7.5, 7.6**
 
-- [x] 7. Checkpoint — Ensure all import service tests pass
-  - Ensure all tests pass, ask the user if questions arise.
+  - [x] 5.5 新增属性测试 P8（频率推断）使用 TDXParsingEngine
+    - **Property 8: Frequency inference from ZIP filename**
+    - **验证: 需求 7.7**
 
-- [x] 8. Implement SectorRepository and Celery tasks
-  - [x] 8.1 Create `app/services/data_engine/sector_repository.py` with SectorRepository
-    - Implement `get_sector_list(sector_type, data_source)` querying SectorInfo with optional filters
-    - Implement `get_constituents(sector_code, data_source, trade_date)` querying SectorConstituent, defaulting to latest trade_date if not specified
-    - Implement `get_sectors_by_stock(symbol, trade_date)` querying SectorConstituent by symbol, defaulting to latest trade_date
-    - Implement `get_sector_kline(sector_code, data_source, freq, start, end)` querying SectorKline from TimescaleDB
-    - Implement `get_latest_trade_date(data_source)` returning the most recent trade_date from SectorConstituent
-    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
+  - [x] 5.6 新增属性测试 P9（流式 ZIP 等价性）使用 TDXParsingEngine
+    - **Property 9: Streaming ZIP produces identical results**
+    - **验证: 需求 7.8, 8.4, 11.2**
 
-  - [x] 8.2 Create `app/tasks/sector_sync.py` with Celery tasks
-    - Implement `sector_import_full(data_sources, base_dir)` task on `data_sync` queue, calling `SectorImportService.import_full()`
-    - Implement `sector_import_incremental(data_sources)` task on `data_sync` queue, calling `SectorImportService.import_incremental()`
-    - Use `_run_async` pattern from existing `data_sync.py` for running async code in Celery worker
-    - Register with independent task names: `app.tasks.sector_sync.sector_import_full`, `app.tasks.sector_sync.sector_import_incremental`
-    - _Requirements: 7.6, 11.3, 11.4_
+  - [x] 5.7 更新 `tests/services/data_engine/test_sector_csv_parser.py` 中 TDX 相关单元测试
+    - 将 TestParseSectorListTDX、TestParseConstituentsTDXZip、TestParseKlineTDX 中的 `SectorCSVParser` 替换为 `TDXParsingEngine`
+    - 更新方法调用名称，新增 TDX 格式 B（38列散装行情）和双格式自动检测的测试用例
+    - _需求: 7.2, 7.4, 7.5, 7.6, 7.9_
 
-- [x] 9. Implement Sector API endpoints
-  - [x] 9.1 Create `app/api/v1/sector.py` with import management endpoints
-    - Implement `POST /api/v1/sector/import/full` triggering full import Celery task, accepting optional data_sources and base_dir params
-    - Implement `POST /api/v1/sector/import/incremental` triggering incremental import Celery task
-    - Implement `GET /api/v1/sector/import/status` returning import progress from Redis
-    - Implement `POST /api/v1/sector/import/stop` sending stop signal via `SectorImportService.request_stop()`
-    - Return 409 Conflict when import task is already running
-    - Define Pydantic request/response models for each endpoint
-    - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
+  - [x] 5.8 新增属性测试 P10（畸形行跳过）覆盖三个引擎
+    - **Property 10: Malformed CSV rows are skipped without affecting valid rows**
+    - **验证: 需求 8.6**
 
-  - [x] 9.2 Add data query endpoints to `app/api/v1/sector.py`
-    - Implement `GET /api/v1/sector/list` with optional sector_type and data_source query params
-    - Implement `GET /api/v1/sector/{code}/constituents` with data_source and optional trade_date params
-    - Implement `GET /api/v1/sector/by-stock/{symbol}` with optional trade_date param
-    - Implement `GET /api/v1/sector/{code}/kline` with data_source, freq, start, end params
-    - Default to latest trade_date when date param is not specified
-    - Return empty list (HTTP 200) when no data found
-    - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5_
+- [x] 6. 检查点 - 确保所有解析引擎测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
 
-  - [x] 9.3 Register sector router in the API module
-    - Import and include the sector router in `app/api/v1/__init__.py`
-    - Ensure prefix `/api/v1/sector` does not conflict with existing routes
-    - _Requirements: 11.6_
+- [x] 7. 重写 SectorImportService 文件扫描逻辑
+  - [x] 7.1 在 `app/services/data_engine/sector_import.py` 中重写 `SectorImportService.__init__` 和文件扫描方法
+    - 将 `self.parser = SectorCSVParser()` 替换为 `self.dc_engine = DCParsingEngine()`、`self.ti_engine = TIParsingEngine()`、`self.tdx_engine = TDXParsingEngine()`
+    - 更新 import 语句：从 `sector_csv_parser` 导入三个引擎类替代 `SectorCSVParser`
+    - 重写 `_scan_sector_list_files(source: DataSource) -> list[Path]`：
+      - DC: `东方财富/东方财富_板块列表.csv` + `东方财富_概念板块/概念板块列表.csv` + `东方财富_行业板块/行业板块列表.csv` + 增量 `东方财富_增量数据/东方财富_概念板块/YYYY-MM/*.csv`
+      - TI: `同花顺/同花顺_板块列表.csv`
+      - TDX: `通达信/通达信_板块列表.csv` + `通达信_板块信息汇总/*.csv` + 增量 `通达信_增量数据/通达信_板块信息/YYYY-MM/*.csv`
+    - 重写 `_scan_kline_files(source: DataSource) -> list[Path]`：
+      - DC: 三个散装 CSV 目录（`东方财富_概念板块/概念板块行情/*.csv`、`东方财富_行业板块/行业板块行情/*.csv`、`东方财富_地区板块/地区板块行情/*.csv`）+ 增量 `东方财富_增量数据/东方财富_板块行情/YYYY-MM/*.csv`
+      - TI: `同花顺_板块指数行情/*.csv` + 增量 `增量数据/同花顺_板块指数行情/YYYY-MM/*.csv`
+      - TDX: `通达信_板块行情汇总/*.csv` + 四个历史行情 ZIP 目录 + 增量 `通达信_增量数据/通达信_板块行情/YYYY-MM/*.csv`
+    - 重写 `_scan_constituent_files(source: DataSource) -> list[Path]`：
+      - DC: `东方财富_板块成分/YYYY-MM/*.zip`
+      - TI: 概念/行业板块成分汇总 CSV + 散装成分 CSV + 增量成分 CSV
+      - TDX: `通达信_板块成分汇总/YYYY-MM/*.zip`
+    - 数据源子目录不存在时记录警告并跳过，功能子目录不存在时返回空列表
+    - _需求: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 4.7, 4.8, 4.9, 4.10, 4.11, 4.12, 4.13, 4.14, 4.15_
 
-  - [x] 9.4 Write unit tests for Sector API endpoints
-    - Test file: `tests/api/test_sector_api.py`
-    - Test sector list query with type and source filters
-    - Test constituent query by sector code and date
-    - Test stock-to-sector reverse lookup
-    - Test kline query with date range
-    - Test default date behavior (latest trade date)
-    - Test 409 response when import already running
-    - _Requirements: 7.1–7.5, 8.1–8.5_
+  - [x] 7.2 更新 `tests/services/test_sector_import.py` 中 TestFileScanning 测试类
+    - 重写 `_build_dir_structure(base)` 辅助函数以匹配新目录结构（`东方财富/`、`同花顺/`、`通达信/` 子目录）
+    - 更新所有文件扫描测试的预期文件数量和路径
+    - 新增散装 CSV 目录扫描测试（验证 `*.csv` 文件被正确发现）
+    - 新增缺失数据源子目录的优雅降级测试
+    - _需求: 4.1, 4.14, 4.15_
 
-- [x] 10. Checkpoint — Ensure all API and task tests pass
-  - Ensure all tests pass, ask the user if questions arise.
+- [x] 8. 重写 SectorImportService 导入编排逻辑
+  - [x] 8.1 在 `app/services/data_engine/sector_import.py` 中重写导入方法，使用新引擎类
+    - 重写 `_import_sector_list(data_sources)`：根据数据源选择对应引擎调用 `parse_sector_list()`
+    - 重写 `_import_constituents(data_sources)`：
+      - DC: 调用 `dc_engine.iter_constituents_zip()` 流式处理
+      - TI: 区分汇总 CSV（`parse_constituents_summary`）和散装 CSV（`parse_constituents_per_sector`），逐文件处理散装目录
+      - TDX: 调用 `tdx_engine.parse_constituents_zip()`
+    - 重写 `_import_klines(data_sources)`：
+      - DC/TI 散装 CSV 目录：逐文件调用 `parse_kline_csv()`，每个文件处理完后写入数据库并释放内存
+      - TDX 散装 CSV：同上逐文件处理
+      - TDX 历史行情 ZIP：调用 `tdx_engine.iter_kline_zip()` 流式处理
+      - 增量 CSV：使用对应引擎的 `parse_kline_csv()`
+    - 新增 `_import_klines_from_dir(engine, csv_dir, source)` 方法：逐文件处理散装 CSV 目录
+    - 保持现有 `_bulk_upsert_sector_info`、`_bulk_insert_constituents`、`_bulk_insert_klines` 不变
+    - 保持现有进度追踪和停止信号逻辑不变
+    - 每个文件处理之间检查停止信号并更新进度
+    - _需求: 9.1, 9.2, 9.3, 9.4, 9.5, 9.6, 9.7, 11.1, 11.2, 11.3, 11.4_
 
-- [x] 11. Integrate sector data into risk controller
-  - [x] 11.1 Add sector concentration check to `app/services/risk_controller.py`
-    - Import `SectorRepository` from `app.services.data_engine.sector_repository`
-    - Add `check_sector_concentration(positions)` method that:
-      - Queries each position's stock sectors via `get_sectors_by_stock`
-      - Calculates per-sector holding count ratio (持仓股票数 / 成分股总数)
-      - Calculates per-sector holding market value ratio (板块持仓市值 / 总持仓市值)
-      - Generates concentration warning when either ratio exceeds configured threshold (default 30%)
-    - Wrap in try/except: if sector data unavailable, log warning and skip check without blocking other risk flows
-    - _Requirements: 9.1, 9.2, 9.3, 9.4, 9.5_
+  - [x] 8.2 更新 `tests/services/test_sector_import.py` 中错误处理和增量导入测试
+    - 更新 TestErrorHandling 测试类中的 mock 对象（`svc.parser.xxx` → `svc.dc_engine.xxx` / `svc.ti_engine.xxx` / `svc.tdx_engine.xxx`）
+    - 更新增量导入跳过已导入文件的测试
+    - 新增散装 CSV 目录逐文件处理的测试（验证每个文件独立处理、失败文件被跳过）
+    - _需求: 9.5, 9.6, 10.1, 10.2, 11.1_
 
-  - [x] 11.2 Write property test for sector concentration warning threshold (Property 11)
-    - **Property 11: Sector concentration warning threshold**
-    - For any portfolio and sector data, if holding count ratio OR market value ratio exceeds threshold, a warning SHALL be generated; if both below, no warning
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 9.2, 9.3**
+- [x] 9. 检查点 - 确保文件扫描和导入编排测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
 
-- [x] 12. Integrate sector data into screener
-  - [x] 12.1 Add sector strength filtering to screener module
-    - Import `SectorRepository` from `app.services.data_engine.sector_repository`
-    - Add sector strength calculation: load sector kline data, compute short-term change_pct (5d/10d), rank sectors by change_pct
-    - Add sector strength filter: retain only candidate stocks belonging to top-N sectors
-    - Wrap in try/except: if sector data unavailable, log warning and skip sector filter, continue with other conditions
-    - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
+- [x] 10. 更新剩余属性测试
+  - [x] 10.1 更新属性测试 P11（SectorInfo UPSERT 幂等性）确认仍通过
+    - **Property 11: SectorInfo UPSERT idempotence**
+    - **验证: 需求 1.2, 9.2**
 
-  - [x] 12.2 Write property test for sector strength ranking consistency (Property 12)
-    - **Property 12: Sector strength ranking consistency**
-    - For any set of sector kline data, a sector with higher change_pct SHALL rank higher (or equal) than one with lower change_pct
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 10.2**
+  - [x] 10.2 更新属性测试 P12（成分和行情 INSERT 幂等性）确认仍通过
+    - **Property 12: Insert idempotence for constituents and klines**
+    - **验证: 需求 2.2, 3.2, 9.3**
 
-  - [x] 12.3 Write property test for sector strength filtering correctness (Property 13)
-    - **Property 13: Sector strength filtering correctness**
-    - For any candidate stock list and top-N ranking, filtered result SHALL contain only stocks in at least one top-N sector
-    - Test file: `tests/properties/test_sector_import_properties.py`
-    - **Validates: Requirements 10.3**
+  - [x] 10.3 更新属性测试 P13（增量检测正确性）确认仍通过
+    - **Property 13: Incremental detection correctness**
+    - **验证: 需求 10.1, 10.2**
 
-- [x] 13. Final checkpoint — Ensure all tests pass
-  - Ensure all tests pass, ask the user if questions arise.
+- [x] 11. 最终检查点 - 确保所有测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
 
-- [x] 14. Adapt file scanning and parsing to actual file system layout
-  - [x] 14.1 Rewrite `_scan_sector_list_files` to match actual directory structure
-    - DC: scan `概念板块列表_东财.csv` from root, `东方财富*板块列表.csv` from historical kline dirs, `增量数据/概念板块_东财/YYYY-MM/YYYY-MM-DD.csv` for incremental
-    - TI: scan `行业概念板块_同花顺.csv` from root
-    - TDX: scan `通达信板块列表.csv` and `板块信息_通达信.zip` from root, `增量数据/板块信息_通达信/YYYY-MM/YYYY-MM-DD.csv` for incremental
-    - Remove dependency on `_SOURCE_DIR_MAP` subdirectory structure (files are in root, not in `东方财富/` etc.)
-    - _Requirements: 12.1, 12.14_
+- [x] 12. 实现导入错误统计与记录
+  - [x] 12.1 在 `app/services/data_engine/sector_import.py` 中新增错误统计功能
+    - 新增 `REDIS_ERRORS_KEY = "sector_import:errors"` 常量
+    - 新增 `_record_error(file, line, error_type, message, raw_data)` 方法：将错误详情 JSON 追加到 Redis 列表，递增进度中的 `error_count`
+    - 新增 `_clear_errors()` 方法：清空错误列表（在 `import_full` / `import_incremental` 开始时调用）
+    - 新增 `get_errors(offset, limit)` 方法：从 Redis 列表分页读取错误详情
+    - 新增 `get_error_count()` 方法：返回错误总数
+    - 在 `_import_sector_list`、`_import_constituents`、`_import_klines` 的 except 块中调用 `_record_error`
+    - 在 `_bulk_upsert_sector_info`、`_bulk_insert_constituents`、`_bulk_insert_klines` 的 except 块中调用 `_record_error`
+    - 错误类型枚举：`parse_error`（解析失败）、`ohlc_invalid`（OHLC 验证失败）、`db_error`（数据库写入失败）
+    - `raw_data` 字段截断至 200 字符
+    - _需求: 17.1, 17.2, 17.3, 17.9, 17.10_
 
-  - [x] 14.2 Rewrite `_scan_constituent_files` to match actual directory structure
-    - DC: scan `板块成分_东财/YYYY-MM/板块成分_DC_YYYYMMDD.zip`
-    - TI: scan root `概念板块成分汇总_同花顺.csv`, `行业板块成分汇总_同花顺.csv`, `概念板块成分_同花顺.zip`, and `板块成分_同花顺/*/YYYY-MM/*.csv` for incremental
-    - TDX: scan `板块成分_通达信/YYYY-MM/板块成分_TDX_YYYYMMDD.zip`
-    - _Requirements: 12.2_
+  - [x] 12.2 在 `app/api/v1/sector.py` 中新增错误查询和导出端点
+    - 更新 `ImportStatusResponse` 模型：新增 `error_count: int = 0` 和 `failed_files: list[dict] = []` 字段
+    - 新增 `GET /sector/import/errors` 端点：分页返回错误详情列表（query params: offset, limit）
+    - 新增 `GET /sector/import/errors/export` 端点：以 CSV 格式导出全部错误详情（StreamingResponse，列: file, line, error_type, message, raw_data）
+    - _需求: 17.4, 17.5, 17.6_
 
-  - [x] 14.3 Rewrite `_scan_kline_files` to match actual directory structure
-    - DC: scan `板块行情_东财.zip` from root, `增量数据/板块行情_东财/YYYY-MM/YYYY-MM-DD.csv` for incremental
-    - TI: scan `板块指数行情_同花顺.zip` from root, `增量数据/板块指数行情_同花顺/YYYY-MM/YYYY-MM-DD.csv` for incremental
-    - TDX: scan `板块行情_通达信.zip` from root, `通达信_*板块_历史行情数据/*.zip` for historical, `增量数据/板块行情_通达信/YYYY-MM/YYYY-MM-DD.csv` for incremental
-    - _Requirements: 12.3, 12.4_
+  - [x] 12.3 更新前端导入进度页面展示错误统计
+    - 更新 `frontend/src/stores/localImport.ts` 中 `SectorImportProgress` 接口：新增 `error_count: number | null` 和 `failed_files: Array<{file: string, error: string}> | null`
+    - 更新 `frontend/src/views/LocalImportView.vue` 板块导入进度区域：
+      - 在"已导入记录数"卡片右侧新增"出错记录数"卡片，使用红色高亮（`class="stat-value error"`）
+      - 当 `error_count > 0` 时显示"导出错误报告"按钮，点击调用 `/sector/import/errors/export` 下载 CSV
+    - _需求: 17.7, 17.8_
 
-  - [x] 14.4 Update `parse_kline_dc_csv` to handle ZIP files and actual CSV column order
-    - Add ZIP support: if file_path is `.zip`, extract and parse each internal CSV
-    - Fix column order: actual data has `板块代码,交易日期,收盘点位,开盘点位,...` (close before open)
-    - Extract to `_parse_kline_dc_text` helper for reuse between ZIP and CSV paths
-    - _Requirements: 12.5, 12.6_
+  - [x] 12.4 新增错误统计相关单元测试
+    - 在 `tests/services/test_sector_import.py` 中新增 `TestErrorTracking` 测试类
+    - 测试 `_record_error` 正确写入 Redis 列表
+    - 测试 `_clear_errors` 清空列表
+    - 测试 `get_errors` 分页读取
+    - 测试导入过程中解析失败时 `error_count` 递增
+    - _需求: 17.1, 17.2, 17.3_
 
-  - [x] 14.5 Update `parse_kline_ti_csv` to handle ZIP files
-    - Add ZIP support: if file_path is `.zip`, extract and parse each internal CSV
-    - Extract to `_parse_kline_ti_text` helper
-    - Handle optional empty fields gracefully
-    - _Requirements: 12.5_
+  - [x] 12.5 新增错误导出 API 测试
+    - 在 `tests/api/test_sector_api.py` 中新增错误查询和 CSV 导出端点测试
+    - _需求: 17.5, 17.6_
 
-  - [x] 14.6 Update `parse_kline_tdx_csv` to handle ZIP files and dual CSV formats
-    - Add ZIP support: if file_path is `.zip`, extract and parse each internal CSV
-    - Auto-detect format A (historical ZIP: `日期,代码,名称,开盘,收盘,...`) vs format B (incremental: `板块代码,交易日期,收盘点位,开盘点位,...`)
-    - Extract to `_parse_kline_tdx_text` helper
-    - _Requirements: 12.5, 12.7_
+- [x] 13. 检查点 - 确保错误统计功能测试通过
+  - 确保所有测试通过，如有问题请向用户确认。
 
-  - [x] 14.7 Update `parse_sector_list_dc` to handle fewer columns
-    - Relax minimum column requirement from 13 to 3
-    - Default to CONCEPT when `idx_type` column is missing
-    - _Requirements: 12.9_
+- [x] 14. 修复 TDX 历史行情 ZIP 解析缺少 .TDX 后缀问题
+  - [x] 14.1 修改 `TDXParsingEngine._parse_kline_text_format_a` 方法，追加 .TDX 后缀
+    - 在 `app/services/data_engine/sector_csv_parser.py` 中修改 `_parse_kline_text_format_a` 方法
+    - 在解析 `sector_code = row[1].strip()` 之后，检查是否已包含 `.TDX` 后缀
+    - 若不包含则自动追加 `.TDX` 后缀：`if not sector_code.endswith(".TDX"): sector_code += ".TDX"`
+    - 此修改同时影响 `parse_kline_zip` 和 `iter_kline_zip`（它们都调用 `_parse_kline_text_format_a`）
+    - _需求: 18.1, 18.2_
 
-  - [x] 14.8 Update `parse_sector_list_tdx` to handle ZIP files
-    - Add ZIP support: if file_path is `.zip`, extract and parse each internal CSV, then deduplicate by sector_code
-    - Extract to `_parse_sector_list_tdx_text` helper
-    - _Requirements: 12.10_
+  - [x] 14.2 编写 TDX 后缀修复属性测试 — Property 14: TDX sector_code 后缀不变量
+    - **Property 14: TDX sector_code suffix invariant**
+    - **验证: 需求 18.1, 18.2, 18.6**
+    - 在 `tests/properties/test_sector_parser_fix_properties.py` 中创建测试
+    - 使用 Hypothesis 生成随机 sector_code（带/不带 .TDX 后缀）
+    - 构造格式 A 的 CSV 文本，调用 `_parse_kline_text_format_a` 解析
+    - 验证所有输出的 sector_code 均以 `.TDX` 结尾
+    - 验证幂等性：已带 `.TDX` 后缀的不会变成 `.TDX.TDX`
+    - `@settings(max_examples=100)`
 
-  - [x] 14.9 Update `parse_constituents_ti_csv` to handle ZIP files and dual column formats
-    - Add ZIP support: if file_path is `.zip`, extract and parse each internal CSV
-    - Auto-detect 5-column format (summary CSV: `指数代码,指数名称,指数类型,股票代码,股票名称`) vs 3-column format (ZIP internal: `指数代码,股票代码,股票名称`)
-    - Extract to `_parse_constituents_ti_text` helper
-    - _Requirements: 12.11, 12.12_
+  - [x] 14.3 编写 TDX 后缀修复单元测试
+    - 在 `tests/services/test_sector_parser_fix.py` 中创建测试
+    - 测试不带后缀的 sector_code（如 `880201`）被追加为 `880201.TDX`
+    - 测试已带后缀的 sector_code（如 `880201.TDX`）保持不变
+    - 测试完整的 `parse_kline_zip` 流程（构造临时 ZIP 文件）
+    - _需求: 18.1, 18.2_
 
-  - [x] 14.10 Update `_infer_date_from_filename` to support YYYY-MM-DD format
-    - Add `_DATE_DASH_RE` regex for `YYYY-MM-DD` pattern
-    - Try YYYY-MM-DD first, then fall back to YYYYMMDD
-    - _Requirements: 12.8_
+- [x] 15. 修复 DC 简版板块列表解析错误
+  - [x] 15.1 修改 `DCParsingEngine.parse_sector_list` 方法，增加简版格式检测
+    - 在 `app/services/data_engine/sector_csv_parser.py` 中修改 `parse_sector_list` 方法
+    - 读取列头后检测格式：列数 ≤ 2 或列头为 `名称,代码` 时识别为简版格式
+    - 简版格式使用独立解析逻辑 `_parse_sector_list_simple`：第 1 列为 name，第 2 列为 sector_code
+    - 对 sector_code 进行 BK 前缀校验：不以 `BK` 开头的行跳过并记录 WARNING 日志
+    - 简版格式默认 sector_type 为 CONCEPT
+    - 确保 sector_code 带 `.DC` 后缀
+    - 标准格式（≥3 列）继续使用现有解析逻辑
+    - _需求: 19.1, 19.2_
 
-  - [x] 14.11 Update `_map_dc_sector_type` to use contains-matching
-    - Change from exact match (`idx_type == "概念"`) to contains match (`"概念" in idx_type`)
-    - Supports values like `概念板块`, `行业板块` etc.
-    - _Requirements: 12.13_
+  - [x] 15.2 编写 DC 简版格式解析属性测试 — Property 15: DC 简版格式 BK 校验
+    - **Property 15: DC simple format parsing with BK validation**
+    - **验证: 需求 19.1, 19.2, 19.5**
+    - 在 `tests/properties/test_sector_parser_fix_properties.py` 中添加测试
+    - 使用 Hypothesis 生成随机 2 列 CSV 数据（混合 BK 开头和非 BK 开头的 sector_code）
+    - 写入临时文件，调用 `parse_sector_list` 解析
+    - 验证所有输出的 sector_code 以 `BK` 开头且以 `.DC` 结尾
+    - 验证非 BK 开头的行被排除
+    - `@settings(max_examples=100)`
 
-## Notes
+  - [x] 15.3 编写 DC 简版格式解析单元测试
+    - 在 `tests/services/test_sector_parser_fix.py` 中添加测试
+    - 测试 2 列 CSV（`名称,代码`）被正确识别为简版格式
+    - 测试 BK 开头的代码被正确解析（如 `BK0001` → `BK0001.DC`）
+    - 测试非 BK 开头的代码被跳过（如日期格式 `2024-01-01`）
+    - 测试标准 13 列 CSV 不受影响（仍按原逻辑解析）
+    - _需求: 19.1, 19.2_
 
-- Tasks marked with `*` are optional and can be skipped for faster MVP
-- Each task references specific requirements for traceability
-- Checkpoints ensure incremental validation
-- Property tests validate universal correctness properties from the design document (13 properties)
-- Unit tests validate specific examples and edge cases
-- All new code is in independent files — no modifications to existing K-line import, data API, or model files
-- The actual file system layout has data files organized by function (板块列表/成分/行情) in the root directory, NOT by data source subdirectories (no `东方财富/`, `同花顺/`, `通达信/` dirs). Incremental data is under `增量数据/` with `YYYY-MM/YYYY-MM-DD.csv` naming
-- The project uses Python with Hypothesis for property-based tests and pytest for unit tests
-- All ORM models use the existing dual-database pattern: PGBase for PostgreSQL, TSBase for TimescaleDB
-- Redis keys use `sector_import:` prefix to avoid conflicts with existing `import:local_kline:` keys
+- [x] 16. 创建数据清理脚本
+  - [x] 16.1 创建 `scripts/cleanup_sector_data.py` 清理脚本
+    - 实现 `cleanup_tdx_kline_without_suffix()` 函数：删除 sector_kline 表中 data_source='TDX' 且 sector_code 不以 '.TDX' 结尾的记录
+    - 实现 `cleanup_dc_info_garbage()` 函数：删除 sector_info 表中 data_source='DC' 且 sector_code 不以 'BK' 开头的记录
+    - 每个函数输出删除的记录数量
+    - 实现 `main()` 函数，依次调用两个清理函数并输出汇总报告
+    - _需求: 18.3, 18.4, 19.3, 19.4_
+
+- [x] 17. 检查点 - 确保数据修复测试通过
+  - 运行 `tests/properties/test_sector_parser_fix_properties.py` 和 `tests/services/test_sector_parser_fix.py`
+  - 确保所有解析修复测试通过，如有问题请向用户确认。
+
+- [x] 18. 修复 DC 行业板块行情 sector_code 缺少 .DC 后缀问题
+  - [x] 18.1 修改 `DCParsingEngine._parse_kline_text` 方法，对格式 B 解析追加 .DC 后缀
+    - 在 `app/services/data_engine/sector_csv_parser.py` 中修改 `_parse_kline_text` 方法
+    - 在格式 B 分支中，解析 `sector_code = row[1].strip()` 之后，检查是否已包含 `.DC` 后缀
+    - 若不包含则自动追加 `.DC` 后缀：`if not sector_code.endswith(".DC"): sector_code += ".DC"`
+    - 同时对格式 A 分支增加相同的防御性后缀检查（格式 A 的 sector_code 通常已带 `.DC` 后缀）
+    - 此修改与需求 18（TDX 历史行情 ZIP 缺少 `.TDX` 后缀）的修复模式完全一致
+    - _需求: 20.1, 20.2_
+
+  - [x] 18.2 编写 DC 行情后缀修复属性测试 — Property 16: DC sector_code 行情后缀不变量
+    - **Property 16: DC sector_code kline suffix invariant**
+    - **验证: 需求 20.1, 20.2, 20.6**
+    - 在 `tests/properties/test_sector_parser_fix_properties.py` 中添加测试
+    - 使用 Hypothesis 生成随机 sector_code（带/不带 .DC 后缀）
+    - 分别构造格式 A 和格式 B 的 CSV 文本，调用 `_parse_kline_text` 解析
+    - 验证所有输出的 sector_code 均以 `.DC` 结尾
+    - 验证幂等性：已带 `.DC` 后缀的不会变成 `.DC.DC`
+    - `@settings(max_examples=100)`
+
+  - [x] 18.3 编写 DC 行情后缀修复单元测试
+    - 在 `tests/services/test_sector_parser_fix.py` 中添加 `TestDCKlineSuffixFix` 测试类
+    - 测试格式 B（行业板块行情）不带后缀的 sector_code（如 `BK0420`）被追加为 `BK0420.DC`
+    - 测试格式 B 已带后缀的 sector_code（如 `BK0420.DC`）保持不变
+    - 测试格式 A（地区板块/增量行情）的 sector_code 后缀处理
+    - 测试混合带/不带后缀的多行 CSV 均统一为 `.DC` 结尾
+    - 测试后缀修复不影响其他字段（日期、OHLCV 等）的解析
+    - _需求: 20.1, 20.2_
+
+  - [x] 18.4 更新 `scripts/cleanup_sector_data.py` 清理脚本，新增 DC 行情清理
+    - 新增 `cleanup_dc_kline_without_suffix()` 函数：删除 sector_kline 表中 data_source='DC' 且 sector_code 不以 '.DC' 结尾的记录
+    - 输出删除的记录数量
+    - 更新 `main()` 函数，将清理步骤从 2 步增加到 3 步（TDX kline → DC kline → DC info）
+    - 更新汇总报告输出
+    - _需求: 20.3, 20.4_
+
+- [x] 19. 检查点 - 确保 DC 行情后缀修复测试通过
+  - 运行 `tests/properties/test_sector_parser_fix_properties.py` 和 `tests/services/test_sector_parser_fix.py`
+  - 确保所有解析修复测试通过（包括需求 18、19、20 的修复），如有问题请向用户确认。
+
+## 备注
+
+- 标记 `*` 的子任务为可选，可跳过以加速交付
+- 每个任务引用了具体的需求编号以确保可追溯性
+- 属性测试验证设计文档中定义的正确性属性（Property 1–13）
+- 属性测试使用 Hypothesis（`tests/properties/test_sector_import_properties.py`）
+- 数据修复属性测试（Property 14–16）使用 Hypothesis（`tests/properties/test_sector_parser_fix_properties.py`）
+- 现有 ORM 模型（`app/models/sector.py`）、API 端点（`app/api/v1/sector.py`）、Celery 任务（`app/tasks/sector_sync.py`）、数据库迁移、查询仓储（`sector_repository.py`）均保持不变，不在任务范围内
+- 核心代码变更集中在两个文件：`sector_csv_parser.py`（解析引擎）和 `sector_import.py`（导入服务）
+- 数据清理脚本：`scripts/cleanup_sector_data.py`（需求 18.3-18.4、19.3-19.4、20.3-20.4）

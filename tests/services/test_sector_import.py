@@ -9,15 +9,17 @@ Tests:
 - Zombie task detection (heartbeat timeout)
 - Error handling: skip failed files, continue processing
 
-Requirements: 5.1–5.8, 6.1–6.6
+Requirements: 4.1–4.15, 5.1–5.8, 6.1–6.6, 7.1–7.10
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import tempfile
 import time
+import zipfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +42,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self._store: dict[str, str] = {}
         self._hashes: dict[str, dict[str, str]] = {}
+        self._lists: dict[str, list[str]] = {}
 
     async def get(self, key: str) -> str | None:
         return self._store.get(key)
@@ -53,6 +56,9 @@ class FakeRedis:
             if k in self._store:
                 del self._store[k]
                 count += 1
+            if k in self._lists:
+                del self._lists[k]
+                count += 1
         return count
 
     async def hget(self, name: str, key: str) -> str | None:
@@ -62,77 +68,161 @@ class FakeRedis:
         self._hashes.setdefault(name, {})[key] = value
         return 1
 
+    async def rpush(self, key: str, *values: str) -> int:
+        self._lists.setdefault(key, []).extend(values)
+        return len(self._lists[key])
+
+    async def lrange(self, key: str, start: int, stop: int) -> list[str]:
+        lst = self._lists.get(key, [])
+        return lst[start : stop + 1]
+
+    async def llen(self, key: str) -> int:
+        return len(self._lists.get(key, []))
+
     async def aclose(self) -> None:
         pass
 
 
+def _make_zip(path: Path) -> None:
+    """创建一个包含 dummy CSV 的最小有效 ZIP 文件。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("dummy.csv", "col1,col2\nval1,val2\n")
+    path.write_bytes(buf.getvalue())
+
+
 def _build_dir_structure(base: Path) -> None:
-    """Create a directory structure matching the actual file system layout."""
-    # DC sector list
-    (base / "概念板块列表_东财.csv").write_text("header\n", encoding="utf-8")
-    # DC historical kline dirs with sector lists
-    dc_concept = base / "东方财富_概念板块_历史行情数据"
-    dc_concept.mkdir(parents=True)
-    (dc_concept / "东方财富概念板块列表.csv").write_text("header\n", encoding="utf-8")
-    (dc_concept / "概念板块_日k.zip").write_bytes(b"PK\x03\x04dummy")
-    dc_industry = base / "东方财富_行业板块_历史行情数据"
-    dc_industry.mkdir(parents=True)
-    (dc_industry / "东方财富行业板块列表.csv").write_text("header\n", encoding="utf-8")
-    (dc_industry / "行业板块_日k.zip").write_bytes(b"PK\x03\x04dummy")
-    # DC incremental sector list
-    dc_incr_list = base / "增量数据" / "概念板块_东财" / "2024-01"
-    dc_incr_list.mkdir(parents=True)
-    (dc_incr_list / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+    """Create a directory structure matching the new per-source layout.
 
-    # DC constituents
-    (base / "概念板块_东财.zip").write_bytes(b"PK\x03\x04dummy")
-    dc_const = base / "板块成分_东财" / "2024-01"
+    东方财富/ (DC), 同花顺/ (TI), 通达信/ (TDX) 三个独立子目录。
+    """
+    # ==================================================================
+    # 东方财富 (DC)
+    # ==================================================================
+    dc = base / "东方财富"
+    dc.mkdir()
+
+    # --- 板块列表 ---
+    dc_list = dc / "东方财富_板块列表"
+    dc_list.mkdir()
+    (dc_list / "东方财富_板块列表1.csv").write_text("header\n", encoding="utf-8")
+    (dc_list / "东方财富_板块列表2.csv").write_text("header\n", encoding="utf-8")
+    dc_concept_list = dc_list / "东方财富_概念板块列表"
+    dc_concept_list.mkdir()
+    (dc_concept_list / "BK0001.DC.csv").write_text("header\n", encoding="utf-8")
+    (dc_concept_list / "BK0002.DC.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 板块行情 ---
+    dc_kline = dc / "东方财富_板块行情"
+    dc_kline.mkdir()
+    dc_region_kline = dc_kline / "东方财富_地区板块行情"
+    dc_region_kline.mkdir()
+    (dc_region_kline / "BK0004.DC.csv").write_text("header\n", encoding="utf-8")
+    dc_industry_kline = dc_kline / "东方财富_行业板块行情"
+    dc_industry_kline.mkdir()
+    (dc_industry_kline / "BK0003_daily.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 板块成分 ---
+    dc_const = dc / "东方财富_板块成分" / "2024-12"
     dc_const.mkdir(parents=True)
-    (dc_const / "板块成分_DC_20240115.zip").write_bytes(b"PK\x03\x04dummy")
+    _make_zip(dc_const / "板块成分_DC_20241215.zip")
 
-    # DC kline
-    (base / "板块行情_东财.zip").write_bytes(b"PK\x03\x04dummy")
-    dc_incr_kline = base / "增量数据" / "板块行情_东财" / "2024-01"
+    # --- 增量数据 ---
+    dc_incr_kline = dc / "东方财富_增量数据" / "东方财富_板块行情" / "2025-01"
     dc_incr_kline.mkdir(parents=True)
-    (dc_incr_kline / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+    (dc_incr_kline / "2025-01-15.csv").write_text("header\n", encoding="utf-8")
 
-    # TI sector list
-    (base / "行业概念板块_同花顺.csv").write_text("header\n", encoding="utf-8")
+    dc_incr_list = dc / "东方财富_增量数据" / "东方财富_板块列表" / "2025-01"
+    dc_incr_list.mkdir(parents=True)
+    (dc_incr_list / "2025-01-15.csv").write_text("header\n", encoding="utf-8")
 
-    # TI constituents
-    (base / "概念板块成分汇总_同花顺.csv").write_text("header\n", encoding="utf-8")
-    (base / "行业板块成分汇总_同花顺.csv").write_text("header\n", encoding="utf-8")
-    (base / "概念板块成分_同花顺.zip").write_bytes(b"PK\x03\x04dummy")
-    ti_const = base / "板块成分_同花顺" / "概念板块成分汇总_同花顺" / "2024-01"
-    ti_const.mkdir(parents=True)
-    (ti_const / "概念板块成分汇总_同花顺_20240115.csv").write_text("header\n", encoding="utf-8")
+    # ==================================================================
+    # 同花顺 (TI)
+    # ==================================================================
+    ti = base / "同花顺"
+    ti.mkdir()
 
-    # TI kline
-    (base / "板块指数行情_同花顺.zip").write_bytes(b"PK\x03\x04dummy")
-    ti_incr_kline = base / "增量数据" / "板块指数行情_同花顺" / "2024-01"
+    # --- 板块列表 ---
+    ti_list = ti / "同花顺_板块列表"
+    ti_list.mkdir()
+    (ti_list / "同花顺_板块列表.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 散装行情 ---
+    ti_kline = ti / "同花顺_板块行情"
+    ti_kline.mkdir()
+    (ti_kline / "700001.TI.csv").write_text("header\n", encoding="utf-8")
+    (ti_kline / "700002.TI.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 板块成分 ---
+    ti_const = ti / "同花顺_板块成分"
+    ti_const.mkdir()
+    (ti_const / "同花顺_概念板块成分汇总.csv").write_text("header\n", encoding="utf-8")
+    (ti_const / "同花顺_行业板块成分汇总.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 增量数据 ---
+    ti_incr_kline = ti / "同花顺_增量数据" / "同花顺_板块行情" / "2025-01"
     ti_incr_kline.mkdir(parents=True)
-    (ti_incr_kline / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+    (ti_incr_kline / "2025-01-15.csv").write_text("header\n", encoding="utf-8")
 
-    # TDX sector list
-    (base / "通达信板块列表.csv").write_text("header\n", encoding="utf-8")
-    (base / "板块信息_通达信.zip").write_bytes(b"PK\x03\x04dummy")
-    tdx_incr_info = base / "增量数据" / "板块信息_通达信" / "2024-01"
-    tdx_incr_info.mkdir(parents=True)
-    (tdx_incr_info / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+    ti_incr_concept = ti / "同花顺_增量数据" / "同花顺_概念板块成分" / "2026-01"
+    ti_incr_concept.mkdir(parents=True)
+    (ti_incr_concept / "概念板块成分_20260115.csv").write_text(
+        "header\n", encoding="utf-8",
+    )
 
-    # TDX constituents
-    tdx_const = base / "板块成分_通达信" / "2024-01"
+    ti_incr_industry = ti / "同花顺_增量数据" / "同花顺_行业板块成分" / "2026-01"
+    ti_incr_industry.mkdir(parents=True)
+    (ti_incr_industry / "行业板块成分汇总_同花顺_20260115.csv").write_text(
+        "header\n", encoding="utf-8",
+    )
+
+    # ==================================================================
+    # 通达信 (TDX)
+    # ==================================================================
+    tdx = base / "通达信"
+    tdx.mkdir()
+
+    # --- 板块列表 ---
+    tdx_list = tdx / "通达信_板块列表"
+    tdx_list.mkdir()
+    (tdx_list / "通达信_板块列表.csv").write_text("header\n", encoding="utf-8")
+    tdx_list_summary = tdx_list / "通达信_板块列表汇总"
+    tdx_list_summary.mkdir()
+    (tdx_list_summary / "880201.TDX.csv").write_text("header\n", encoding="utf-8")
+    (tdx_list_summary / "880202.TDX.csv").write_text("header\n", encoding="utf-8")
+
+    # --- 板块行情 ---
+    tdx_kline = tdx / "通达信_板块行情"
+    tdx_kline.mkdir()
+    tdx_kline_summary = tdx_kline / "通达信_板块行情汇总"
+    tdx_kline_summary.mkdir()
+    (tdx_kline_summary / "880201.TDX.csv").write_text("header\n", encoding="utf-8")
+    (tdx_kline_summary / "880202.TDX.csv").write_text("header\n", encoding="utf-8")
+
+    # 四个历史行情 ZIP 目录（嵌套在 通达信_板块行情 下）
+    for sub_name, zip_name in (
+        ("通达信_概念板块历史行情", "概念板块_日k_K线.zip"),
+        ("通达信_行业板块历史行情", "行业板块_日k_K线.zip"),
+        ("通达信_地区板块历史行情", "地区板块_日k_K线.zip"),
+        ("通达信_风格板块历史行情", "风格板块_日k_K线.zip"),
+    ):
+        d = tdx_kline / sub_name
+        d.mkdir()
+        _make_zip(d / zip_name)
+
+    # --- 板块成分 ---
+    tdx_const = tdx / "通达信_板块成分" / "2024-12"
     tdx_const.mkdir(parents=True)
-    (tdx_const / "板块成分_TDX_20240115.zip").write_bytes(b"PK\x03\x04dummy")
+    _make_zip(tdx_const / "板块成分_TDX_20241215.zip")
 
-    # TDX kline
-    (base / "板块行情_通达信.zip").write_bytes(b"PK\x03\x04dummy")
-    tdx_concept = base / "通达信_概念板块_历史行情数据"
-    tdx_concept.mkdir(parents=True)
-    (tdx_concept / "概念板块_日k_K线.zip").write_bytes(b"PK\x03\x04dummy")
-    tdx_incr_kline = base / "增量数据" / "板块行情_通达信" / "2024-01"
+    # --- 增量数据 ---
+    tdx_incr_list = tdx / "通达信_增量数据" / "通达信_板块列表" / "2025-01"
+    tdx_incr_list.mkdir(parents=True)
+    (tdx_incr_list / "2025-01-15.csv").write_text("header\n", encoding="utf-8")
+
+    tdx_incr_kline = tdx / "通达信_增量数据" / "通达信_板块行情" / "2025-01"
     tdx_incr_kline.mkdir(parents=True)
-    (tdx_incr_kline / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+    (tdx_incr_kline / "2025-01-15.csv").write_text("header\n", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -144,16 +234,20 @@ class TestFileScanning:
     """Test _scan_sector_list_files, _scan_constituent_files, _scan_kline_files."""
 
     def test_scan_sector_list_dc(self):
+        """DC 板块列表: 列表1 + 列表2 + 2 概念板块列表 CSV + 1 增量 = 5 files."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_sector_list_files(DataSource.DC)
-            # 概念板块列表_东财.csv + 2 historical dir lists + 1 incremental
-            assert len(files) == 4
+            # 东方财富_板块列表1.csv + 东方财富_板块列表2.csv
+            # + BK0001.DC.csv + BK0002.DC.csv (概念板块列表目录)
+            # + 1 incremental
+            assert len(files) == 5
 
     def test_scan_sector_list_ti(self):
+        """TI 板块列表: 仅根级 1 file."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
@@ -161,57 +255,88 @@ class TestFileScanning:
 
             files = svc._scan_sector_list_files(DataSource.TI)
             assert len(files) == 1
-            assert files[0].name == "行业概念板块_同花顺.csv"
+            assert files[0].name == "同花顺_板块列表.csv"
 
     def test_scan_sector_list_tdx(self):
+        """TDX 板块列表: 根级 + 2 散装列表汇总 CSV + 1 增量 = 4 files."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_sector_list_files(DataSource.TDX)
-            # 通达信板块列表.csv + 板块信息_通达信.zip + 1 incremental
-            assert len(files) == 3
+            # 通达信_板块列表.csv + 880201.TDX.csv + 880202.TDX.csv + 1 incremental
+            assert len(files) == 4
 
     def test_scan_constituent_files_dc(self):
+        """DC 板块成分: 1 ZIP."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_constituent_files(DataSource.DC)
-            # 概念板块_东财.zip + 板块成分_DC_20240115.zip
-            assert len(files) == 2
+            assert len(files) == 1
+            assert files[0].name == "板块成分_DC_20241215.zip"
 
     def test_scan_constituent_files_ti(self):
+        """TI 板块成分: 概念汇总 + 行业汇总 + 1 增量概念 + 1 增量行业 = 4 files."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_constituent_files(DataSource.TI)
-            # 2 root CSVs + 1 root ZIP + 1 incremental CSV
+            # 同花顺_概念板块成分汇总.csv + 同花顺_行业板块成分汇总.csv
+            # + 概念板块成分_20260115.csv + 行业板块成分汇总_同花顺_20260115.csv
             assert len(files) == 4
 
+    def test_scan_constituent_files_tdx(self):
+        """TDX 板块成分: 1 ZIP."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _build_dir_structure(base)
+            svc = SectorImportService(base_dir=str(base))
+
+            files = svc._scan_constituent_files(DataSource.TDX)
+            assert len(files) == 1
+            assert files[0].name == "板块成分_TDX_20241215.zip"
+
     def test_scan_kline_files_dc(self):
+        """DC 板块行情: 1 地区 + 1 行业 + 1 增量 = 3 files."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_kline_files(DataSource.DC)
-            # 板块行情_东财.zip + 2 historical ZIPs + 1 incremental CSV
-            assert len(files) == 4
+            # BK0004.DC.csv (地区) + BK0003_daily.csv (行业) + 1 incremental
+            assert len(files) == 3
 
     def test_scan_kline_files_ti(self):
+        """TI 板块行情: 2 散装 + 1 增量 = 3 files."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             _build_dir_structure(base)
             svc = SectorImportService(base_dir=str(base))
 
             files = svc._scan_kline_files(DataSource.TI)
-            # 板块指数行情_同花顺.zip + 1 incremental CSV
-            assert len(files) == 2
+            # 700001.TI.csv + 700002.TI.csv + 1 incremental
+            assert len(files) == 3
+
+    def test_scan_kline_files_tdx(self):
+        """TDX 板块行情: 2 散装 + 4 历史 ZIP + 1 增量 = 7 files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            _build_dir_structure(base)
+            svc = SectorImportService(base_dir=str(base))
+
+            files = svc._scan_kline_files(DataSource.TDX)
+            # 880201.TDX.csv + 880202.TDX.csv
+            # + 概念板块_日k_K线.zip + 行业板块_日k_K线.zip
+            # + 地区板块_日k_K线.zip + 风格板块_日k_K线.zip
+            # + 1 incremental
+            assert len(files) == 7
 
     def test_scan_empty_directory(self):
         """Scanning a non-existent source directory returns empty list."""
@@ -220,15 +345,17 @@ class TestFileScanning:
             files = svc._scan_sector_list_files(DataSource.DC)
             assert files == []
 
-    def test_scan_kline_files_tdx(self):
+    def test_scan_missing_source_dir(self):
+        """Scanning a source whose subdirectory doesn't exist returns empty list."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            _build_dir_structure(base)
+            # 只创建 东方财富 目录，不创建 同花顺 和 通达信
+            (base / "东方财富").mkdir()
             svc = SectorImportService(base_dir=str(base))
 
-            files = svc._scan_kline_files(DataSource.TDX)
-            # 板块行情_通达信.zip + 1 historical ZIP + 1 incremental CSV
-            assert len(files) == 3
+            assert svc._scan_sector_list_files(DataSource.TI) == []
+            assert svc._scan_kline_files(DataSource.TDX) == []
+            assert svc._scan_constituent_files(DataSource.TI) == []
 
 
 # ---------------------------------------------------------------------------
@@ -555,20 +682,24 @@ class TestErrorHandling:
         """If a parser raises an exception, the file is skipped and processing continues."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            (base / "概念板块列表_东财.csv").write_text("header\n", encoding="utf-8")
+            # Create file at the path _scan_sector_list_files(DC) expects
+            dc_dir = base / "东方财富"
+            dc_dir.mkdir()
+            dc_list = dc_dir / "东方财富_板块列表"
+            dc_list.mkdir()
+            (dc_list / "东方财富_板块列表1.csv").write_text("header\n", encoding="utf-8")
 
             svc = SectorImportService(base_dir=str(base))
 
-            # Mock parser to raise on first call
+            # Mock engine to raise on parse
             call_count = 0
-            original_parse = svc.parser.parse_sector_list_dc
 
             def failing_parser(f):
                 nonlocal call_count
                 call_count += 1
                 raise ValueError("Simulated parse error")
 
-            svc.parser.parse_sector_list_dc = failing_parser
+            svc.dc_engine.parse_sector_list = failing_parser
 
             fake_redis = FakeRedis()
 
@@ -594,13 +725,16 @@ class TestErrorHandling:
         """Kline import skips files that fail to parse."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            incr_dir = base / "增量数据" / "板块行情_东财" / "2024-01"
-            incr_dir.mkdir(parents=True)
-            (incr_dir / "2024-01-15.csv").write_text("header\n", encoding="utf-8")
+            # Create file at the path _scan_kline_files(DC) expects
+            dc_dir = base / "东方财富"
+            dc_dir.mkdir()
+            region_kline = dc_dir / "东方财富_板块行情" / "东方财富_地区板块行情"
+            region_kline.mkdir(parents=True)
+            (region_kline / "BK0001.DC.csv").write_text("header\n", encoding="utf-8")
 
             svc = SectorImportService(base_dir=str(base))
 
-            svc.parser.parse_kline_dc_csv = MagicMock(
+            svc.dc_engine.parse_kline_csv = MagicMock(
                 side_effect=ValueError("bad kline"),
             )
 
@@ -626,7 +760,12 @@ class TestErrorHandling:
         """Incremental import skips files that are already marked as imported."""
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            csv_file = base / "概念板块列表_东财.csv"
+            # Create file at the path _scan_sector_list_files(DC) expects
+            dc_dir = base / "东方财富"
+            dc_dir.mkdir()
+            dc_list = dc_dir / "东方财富_板块列表"
+            dc_list.mkdir()
+            csv_file = dc_list / "东方财富_板块列表1.csv"
             csv_file.write_text("header\n", encoding="utf-8")
 
             svc = SectorImportService(base_dir=str(base))
@@ -639,13 +778,13 @@ class TestErrorHandling:
             }
 
             parse_calls = []
-            original_parse = svc.parser.parse_sector_list_dc
+            original_parse = svc.dc_engine.parse_sector_list
 
             def tracking_parser(f):
                 parse_calls.append(f)
                 return original_parse(f)
 
-            svc.parser.parse_sector_list_dc = tracking_parser
+            svc.dc_engine.parse_sector_list = tracking_parser
 
             with patch(
                 "app.services.data_engine.sector_import.get_redis_client",
@@ -663,3 +802,318 @@ class TestErrorHandling:
             # Parser should NOT have been called since file was already imported
             assert len(parse_calls) == 0
             assert total == 0
+
+
+# ---------------------------------------------------------------------------
+# Test: 错误统计与记录
+# ---------------------------------------------------------------------------
+
+
+class TestErrorTracking:
+    """测试 _record_error、_clear_errors、get_errors、get_error_count 方法。
+
+    Requirements: 17.1, 17.2, 17.3
+    """
+
+    def _make_service_with_fake_redis(self):
+        """创建 SectorImportService 实例和共享 FakeRedis，返回 (svc, fake_redis, stored_values)。
+
+        stored_values 用于模拟 cache_get / cache_set（进度 JSON），
+        fake_redis 用于模拟 get_redis_client()（错误列表 rpush/lrange/llen/delete）。
+        """
+        svc = SectorImportService()
+        fake_redis = FakeRedis()
+        stored_values: dict[str, str] = {}
+
+        async def mock_cache_get(key):
+            return stored_values.get(key)
+
+        async def mock_cache_set(key, value, ex=None):
+            stored_values[key] = value
+
+        return svc, fake_redis, stored_values, mock_cache_get, mock_cache_set
+
+    @pytest.mark.asyncio
+    async def test_record_error_writes_to_redis(self):
+        """_record_error 将错误详情 JSON 追加到 Redis 列表。"""
+        svc, fake_redis, stored_values, mock_cg, mock_cs = (
+            self._make_service_with_fake_redis()
+        )
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_get",
+            side_effect=mock_cg,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_set",
+            side_effect=mock_cs,
+        ):
+            await svc._record_error(
+                file="test.csv",
+                line=10,
+                error_type="parse_error",
+                message="列数不匹配",
+                raw_data="some,raw,data",
+            )
+
+        # 验证 Redis 列表中有一条错误记录
+        items = fake_redis._lists.get(svc.REDIS_ERRORS_KEY, [])
+        assert len(items) == 1
+        detail = json.loads(items[0])
+        assert detail["file"] == "test.csv"
+        assert detail["line"] == 10
+        assert detail["error_type"] == "parse_error"
+        assert detail["message"] == "列数不匹配"
+        assert detail["raw_data"] == "some,raw,data"
+
+    @pytest.mark.asyncio
+    async def test_record_error_increments_error_count(self):
+        """多次调用 _record_error 后，进度 JSON 中 error_count 递增。"""
+        svc, fake_redis, stored_values, mock_cg, mock_cs = (
+            self._make_service_with_fake_redis()
+        )
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_get",
+            side_effect=mock_cg,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_set",
+            side_effect=mock_cs,
+        ):
+            await svc._record_error(
+                file="a.csv", line=1, error_type="parse_error",
+                message="err1", raw_data="",
+            )
+            await svc._record_error(
+                file="b.csv", line=2, error_type="db_error",
+                message="err2", raw_data="",
+            )
+            await svc._record_error(
+                file="c.csv", line=3, error_type="parse_error",
+                message="err3", raw_data="",
+            )
+
+        progress = json.loads(stored_values[svc.REDIS_PROGRESS_KEY])
+        assert progress["error_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_record_error_adds_to_failed_files(self):
+        """_record_error 将文件名添加到进度 JSON 的 failed_files 列表。"""
+        svc, fake_redis, stored_values, mock_cg, mock_cs = (
+            self._make_service_with_fake_redis()
+        )
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_get",
+            side_effect=mock_cg,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_set",
+            side_effect=mock_cs,
+        ):
+            await svc._record_error(
+                file="fail.csv", line=0, error_type="parse_error",
+                message="解析失败", raw_data="",
+            )
+
+        progress = json.loads(stored_values[svc.REDIS_PROGRESS_KEY])
+        failed_files = progress["failed_files"]
+        assert len(failed_files) == 1
+        assert failed_files[0]["file"] == "fail.csv"
+        assert "解析失败" in failed_files[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_record_error_deduplicates_failed_files(self):
+        """同一文件多次出错时，failed_files 中只保留一条记录。"""
+        svc, fake_redis, stored_values, mock_cg, mock_cs = (
+            self._make_service_with_fake_redis()
+        )
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_get",
+            side_effect=mock_cg,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_set",
+            side_effect=mock_cs,
+        ):
+            await svc._record_error(
+                file="same.csv", line=1, error_type="parse_error",
+                message="第一次出错", raw_data="",
+            )
+            await svc._record_error(
+                file="same.csv", line=5, error_type="parse_error",
+                message="第二次出错", raw_data="",
+            )
+
+        progress = json.loads(stored_values[svc.REDIS_PROGRESS_KEY])
+        failed_files = progress["failed_files"]
+        # 同一文件只出现一次
+        assert len(failed_files) == 1
+        assert failed_files[0]["file"] == "same.csv"
+        # error_count 仍然递增两次
+        assert progress["error_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_record_error_truncates_raw_data(self):
+        """raw_data 超过 200 字符时被截断。"""
+        svc, fake_redis, stored_values, mock_cg, mock_cs = (
+            self._make_service_with_fake_redis()
+        )
+
+        long_data = "x" * 500
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_get",
+            side_effect=mock_cg,
+        ), patch(
+            "app.services.data_engine.sector_import.cache_set",
+            side_effect=mock_cs,
+        ):
+            await svc._record_error(
+                file="big.csv", line=1, error_type="parse_error",
+                message="数据过长", raw_data=long_data,
+            )
+
+        items = fake_redis._lists.get(svc.REDIS_ERRORS_KEY, [])
+        detail = json.loads(items[0])
+        assert len(detail["raw_data"]) == 200
+
+    @pytest.mark.asyncio
+    async def test_clear_errors(self):
+        """_clear_errors 清空 Redis 错误列表。"""
+        svc = SectorImportService()
+        fake_redis = FakeRedis()
+        # 预填充一些错误
+        fake_redis._lists[svc.REDIS_ERRORS_KEY] = ["err1", "err2"]
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ):
+            await svc._clear_errors()
+
+        assert svc.REDIS_ERRORS_KEY not in fake_redis._lists
+
+    @pytest.mark.asyncio
+    async def test_get_errors_pagination(self):
+        """get_errors 按 offset/limit 分页读取错误详情。"""
+        svc = SectorImportService()
+        fake_redis = FakeRedis()
+
+        # 预填充 5 条错误
+        errors = []
+        for i in range(5):
+            err = json.dumps({"file": f"f{i}.csv", "line": i, "error_type": "parse_error",
+                              "message": f"err{i}", "raw_data": ""})
+            errors.append(err)
+        fake_redis._lists[svc.REDIS_ERRORS_KEY] = errors
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ):
+            # 第一页：offset=0, limit=2
+            page1 = await svc.get_errors(offset=0, limit=2)
+            assert len(page1) == 2
+            assert page1[0]["file"] == "f0.csv"
+            assert page1[1]["file"] == "f1.csv"
+
+            # 第二页：offset=2, limit=2
+            page2 = await svc.get_errors(offset=2, limit=2)
+            assert len(page2) == 2
+            assert page2[0]["file"] == "f2.csv"
+            assert page2[1]["file"] == "f3.csv"
+
+            # 第三页：offset=4, limit=2（只剩 1 条）
+            page3 = await svc.get_errors(offset=4, limit=2)
+            assert len(page3) == 1
+            assert page3[0]["file"] == "f4.csv"
+
+    @pytest.mark.asyncio
+    async def test_get_error_count(self):
+        """get_error_count 返回错误总数。"""
+        svc = SectorImportService()
+        fake_redis = FakeRedis()
+
+        # 空列表
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ):
+            assert await svc.get_error_count() == 0
+
+        # 添加 3 条错误
+        fake_redis._lists[svc.REDIS_ERRORS_KEY] = ["e1", "e2", "e3"]
+
+        with patch(
+            "app.services.data_engine.sector_import.get_redis_client",
+            return_value=fake_redis,
+        ):
+            assert await svc.get_error_count() == 3
+
+    @pytest.mark.asyncio
+    async def test_import_records_error_on_parse_failure(self):
+        """导入过程中解析失败时调用 _record_error，error_type 为 parse_error。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            # 创建 DC 板块列表文件
+            dc_dir = base / "东方财富"
+            dc_dir.mkdir()
+            dc_list = dc_dir / "东方财富_板块列表"
+            dc_list.mkdir()
+            (dc_list / "东方财富_板块列表1.csv").write_text("header\n", encoding="utf-8")
+
+            svc = SectorImportService(base_dir=str(base))
+
+            # 让解析引擎抛出异常
+            svc.dc_engine.parse_sector_list = MagicMock(
+                side_effect=ValueError("模拟解析失败"),
+            )
+
+            fake_redis = FakeRedis()
+            stored_values: dict[str, str] = {}
+
+            async def mock_cache_get(key):
+                return stored_values.get(key)
+
+            async def mock_cache_set(key, value, ex=None):
+                stored_values[key] = value
+
+            with patch(
+                "app.services.data_engine.sector_import.get_redis_client",
+                return_value=fake_redis,
+            ), patch(
+                "app.services.data_engine.sector_import.cache_get",
+                side_effect=mock_cache_get,
+            ), patch(
+                "app.services.data_engine.sector_import.cache_set",
+                side_effect=mock_cache_set,
+            ):
+                total = await svc._import_sector_list([DataSource.DC])
+
+            # 导入返回 0（解析失败）
+            assert total == 0
+
+            # 验证 _record_error 被调用：Redis 列表中有错误记录
+            items = fake_redis._lists.get(svc.REDIS_ERRORS_KEY, [])
+            assert len(items) == 1
+            detail = json.loads(items[0])
+            assert detail["error_type"] == "parse_error"
+            assert "模拟解析失败" in detail["message"]
+
+            # 验证进度 JSON 中 error_count 递增
+            progress = json.loads(stored_values[svc.REDIS_PROGRESS_KEY])
+            assert progress["error_count"] == 1

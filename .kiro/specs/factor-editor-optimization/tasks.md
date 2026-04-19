@@ -253,13 +253,83 @@
 - [x] 13. Final checkpoint - Ensure all tests pass
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 14. Implement SectorStrengthFilter change_pct fallback (Requirement 15)
+  - [x] 14.1 Modify `_aggregate_change_pct()` in `app/services/screener/sector_strength.py` to add close-price fallback
+    - When all change_pct are NULL for a sector, compute from close prices: `(latest_close - earliest_close) / earliest_close * 100`
+    - Prioritize change_pct when any valid records exist (> 0 non-NULL); only fallback when ALL are NULL
+    - If fewer than 2 valid close prices, set change to 0.0
+    - Add division-by-zero protection when earliest close is 0.0
+    - Return type remains float for both paths
+    - _Requirements: 15.1, 15.2, 15.3, 15.4_
+
+  - [x] 14.2 Write property test for change_pct fallback correctness
+    - **Property 10: change_pct fallback 正确性**
+    - Create test in `tests/properties/test_factor_editor_properties.py`
+    - Generate random kline data with mixed NULL/non-NULL change_pct and close values using Hypothesis
+    - Verify: when all change_pct NULL → close price formula used; when any change_pct non-NULL → sum of change_pct used; when < 2 valid closes → 0.0
+    - Minimum 100 iterations
+    - **Validates: Requirements 15.1, 15.2, 15.3, 15.4**
+
+  - [x] 14.3 Write unit tests for change_pct fallback edge cases
+    - Create test file `tests/services/test_sector_strength_fallback.py`
+    - Test all change_pct NULL with valid close prices (Req 15.1)
+    - Test partial change_pct NULL uses change_pct sum (Req 15.3)
+    - Test fewer than 2 valid close prices returns 0.0 (Req 15.2)
+    - Test earliest close = 0.0 returns 0.0 (division-by-zero protection)
+    - Test all close also NULL returns 0.0
+    - Test return type is always float (Req 15.4)
+    - _Requirements: 15.1, 15.2, 15.3, 15.4_
+
+- [x] 15. Implement sector coverage API endpoint (Requirement 16)
+  - [x] 15.1 Add GET /api/v1/sector/coverage endpoint to `app/api/v1/sector.py`
+    - Add `CoverageSourceStats` and `CoverageResponse` Pydantic models
+    - Query SectorInfo for total sector count per data source (DC/TI/TDX)
+    - Query SectorConstituent for sectors with constituent data and distinct stock count (latest trade_date)
+    - Compute coverage_ratio = sectors_with_constituents / total_sectors
+    - Handle empty data sources gracefully (return zero values)
+    - _Requirements: 16.2_
+
+  - [x] 15.2 Write unit/integration tests for sector coverage endpoint
+    - Create test file `tests/api/test_sector_coverage.py`
+    - Test endpoint returns all three data sources (DC/TI/TDX)
+    - Test response structure contains required fields
+    - Test empty data source returns zero values
+    - _Requirements: 16.2_
+
+- [x] 16. Add frontend sector coverage display and warning (Requirement 16)
+  - [x] 16.1 Update `frontend/src/stores/screener.ts` with coverage state and fetch method
+    - Add `CoverageSourceStats` interface
+    - Add `sectorCoverage` ref and `fetchSectorCoverage()` method calling GET /sector/coverage
+    - _Requirements: 16.1, 16.2_
+
+  - [x] 16.2 Update `frontend/src/views/ScreenerView.vue` sector data source selector
+    - Display coverage summary in data source dropdown options: "数据源名称（板块数 / 成分股覆盖数）"
+    - Show warning when selecting a data source with coverage_ratio < 0.5 (e.g., TI)
+    - Warning text: "该数据源成分股数据不完整，可能影响板块筛选效果，建议使用东方财富（DC）或通达信（TDX）"
+    - Call `fetchSectorCoverage()` on component mount
+    - _Requirements: 16.1, 16.3_
+
+  - [x] 16.3 Write frontend unit tests for coverage display
+    - Add tests to `frontend/src/views/__tests__/ScreenerView.test.ts`
+    - Test data source dropdown displays coverage info (Req 16.1)
+    - Test low-coverage warning appears for TI (Req 16.3)
+    - Test no warning for DC and TDX
+    - _Requirements: 16.1, 16.3_
+
+- [x] 17. Checkpoint - Ensure all new tests pass
+  - Run backend tests: `pytest tests/properties/test_factor_editor_properties.py tests/services/test_sector_strength_fallback.py tests/api/test_sector_coverage.py`
+  - Run frontend tests: `npm test` in frontend/
+  - Ensure all tests pass, ask the user if questions arise.
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP
 - Each task references specific requirements for traceability
 - Checkpoints ensure incremental validation
-- Property tests validate universal correctness properties (9 properties from design document, using Hypothesis for backend and fast-check for frontend)
+- Property tests validate universal correctness properties (10 properties from design document, using Hypothesis for backend and fast-check for frontend)
 - Unit tests validate specific examples, edge cases, and error handling
 - Backend uses Python 3.11+; frontend uses TypeScript with Vue 3 Composition API
 - All new backend modules follow existing project structure under `app/services/screener/`
 - All new tests follow existing conventions: `tests/properties/` for Hypothesis, `tests/services/` for unit tests, `frontend/src/views/__tests__/` for frontend tests
+- Tasks 1-13 cover requirements 1-14 (original scope)
+- Tasks 14-17 cover requirements 15-16 (change_pct fallback and coverage API/UI)

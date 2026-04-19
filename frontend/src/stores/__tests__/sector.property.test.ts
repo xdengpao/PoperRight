@@ -213,3 +213,128 @@ describe('Feature: sector-ranking-display, Property 5: Ranking item display form
     )
   })
 })
+
+
+// ─── Property 10: Browser tab state isolation ─────────────────────────────────
+
+/**
+ * 浏览面板标签页状态隔离属性测试
+ *
+ * Feature: sector-ranking-display, Property 10: Browser tab state isolation
+ *
+ * 对任意标签页切换序列，验证 setBrowserTab 仅修改 browserActiveTab，
+ * 不影响任何标签页的 items、total、page、filters、loading、error 状态。
+ *
+ * **Validates: Requirements 14.2, 14.3**
+ */
+import { createPinia, setActivePinia } from 'pinia'
+import { beforeEach } from 'vitest'
+import { useSectorStore, type BrowserTab } from '@/stores/sector'
+
+describe('Feature: sector-ranking-display, Property 10: Browser tab state isolation', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  /**
+   * 随机标签页切换序列不影响任何标签页的数据状态
+   * Validates: Requirements 14.2, 14.3
+   */
+  it('setBrowserTab 仅修改 browserActiveTab，不影响各标签页的 items/total/page/filters/loading/error', () => {
+    fc.assert(
+      fc.property(
+        fc.array(fc.constantFrom<BrowserTab>('info', 'constituent', 'kline'), { minLength: 1, maxLength: 20 }),
+        (tabSequence) => {
+          // 每次迭代创建新的 pinia 实例以隔离状态
+          setActivePinia(createPinia())
+          const store = useSectorStore()
+
+          // 设置各标签页的初始状态（模拟已有数据）
+          store.infoBrowse.items = [
+            { sector_code: 'BK0001', name: '测试板块', sector_type: 'CONCEPT', data_source: 'DC', list_date: '2024-01-01', constituent_count: 10 },
+          ]
+          store.infoBrowse.total = 100
+          store.infoBrowse.page = 3
+          store.infoBrowse.loading = false
+          store.infoBrowse.error = '测试错误'
+          store.infoBrowse.filters = { data_source: 'TI', sector_type: 'INDUSTRY', keyword: '银行' }
+
+          store.constituentBrowse.items = [
+            { trade_date: '2024-06-01', sector_code: 'BK0002', data_source: 'DC', symbol: '600000', stock_name: '浦发银行' },
+          ]
+          store.constituentBrowse.total = 200
+          store.constituentBrowse.page = 5
+          store.constituentBrowse.loading = false
+          store.constituentBrowse.error = ''
+          store.constituentBrowse.filters = { data_source: 'DC', sector_code: 'BK0002', trade_date: '2024-06-01', keyword: '' }
+
+          store.klineBrowse.items = [
+            { time: '2024-06-01', sector_code: 'BK0003', data_source: 'TDX', freq: '1d', open: 100, high: 110, low: 95, close: 105, volume: 1000, amount: 50000, change_pct: 2.5 },
+          ]
+          store.klineBrowse.total = 300
+          store.klineBrowse.page = 7
+          store.klineBrowse.loading = false
+          store.klineBrowse.error = 'K线错误'
+          store.klineBrowse.filters = { data_source: 'TDX', sector_code: 'BK0003', freq: '1w', start: '2024-01-01', end: '2024-06-30' }
+
+          // 快照各标签页状态
+          const infoSnapshot = {
+            items: JSON.parse(JSON.stringify(store.infoBrowse.items)),
+            total: store.infoBrowse.total,
+            page: store.infoBrowse.page,
+            loading: store.infoBrowse.loading,
+            error: store.infoBrowse.error,
+            filters: { ...store.infoBrowse.filters },
+          }
+          const constituentSnapshot = {
+            items: JSON.parse(JSON.stringify(store.constituentBrowse.items)),
+            total: store.constituentBrowse.total,
+            page: store.constituentBrowse.page,
+            loading: store.constituentBrowse.loading,
+            error: store.constituentBrowse.error,
+            filters: { ...store.constituentBrowse.filters },
+          }
+          const klineSnapshot = {
+            items: JSON.parse(JSON.stringify(store.klineBrowse.items)),
+            total: store.klineBrowse.total,
+            page: store.klineBrowse.page,
+            loading: store.klineBrowse.loading,
+            error: store.klineBrowse.error,
+            filters: { ...store.klineBrowse.filters },
+          }
+
+          // 执行随机标签页切换序列
+          for (const tab of tabSequence) {
+            store.setBrowserTab(tab)
+          }
+
+          // 验证最终 browserActiveTab 等于序列中最后一个标签页
+          expect(store.browserActiveTab).toBe(tabSequence[tabSequence.length - 1])
+
+          // 验证各标签页状态未被修改
+          expect(JSON.parse(JSON.stringify(store.infoBrowse.items))).toEqual(infoSnapshot.items)
+          expect(store.infoBrowse.total).toBe(infoSnapshot.total)
+          expect(store.infoBrowse.page).toBe(infoSnapshot.page)
+          expect(store.infoBrowse.loading).toBe(infoSnapshot.loading)
+          expect(store.infoBrowse.error).toBe(infoSnapshot.error)
+          expect({ ...store.infoBrowse.filters }).toEqual(infoSnapshot.filters)
+
+          expect(JSON.parse(JSON.stringify(store.constituentBrowse.items))).toEqual(constituentSnapshot.items)
+          expect(store.constituentBrowse.total).toBe(constituentSnapshot.total)
+          expect(store.constituentBrowse.page).toBe(constituentSnapshot.page)
+          expect(store.constituentBrowse.loading).toBe(constituentSnapshot.loading)
+          expect(store.constituentBrowse.error).toBe(constituentSnapshot.error)
+          expect({ ...store.constituentBrowse.filters }).toEqual(constituentSnapshot.filters)
+
+          expect(JSON.parse(JSON.stringify(store.klineBrowse.items))).toEqual(klineSnapshot.items)
+          expect(store.klineBrowse.total).toBe(klineSnapshot.total)
+          expect(store.klineBrowse.page).toBe(klineSnapshot.page)
+          expect(store.klineBrowse.loading).toBe(klineSnapshot.loading)
+          expect(store.klineBrowse.error).toBe(klineSnapshot.error)
+          expect({ ...store.klineBrowse.filters }).toEqual(klineSnapshot.filters)
+        },
+      ),
+      { numRuns: 100 },
+    )
+  })
+})

@@ -19,10 +19,13 @@ from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.core.redis_client import cache_delete, cache_get, cache_set, get_redis_client
 from app.models.sector import DataSource
 from app.services.data_engine.sector_csv_parser import (
+    BaseParsingEngine,
+    DCParsingEngine,
     ParsedConstituent,
     ParsedSectorInfo,
     ParsedSectorKline,
-    SectorCSVParser,
+    TDXParsingEngine,
+    TIParsingEngine,
 )
 
 logger = logging.getLogger(__name__)
@@ -45,12 +48,25 @@ class SectorImportService:
     REDIS_PROGRESS_KEY: str = "sector_import:progress"
     REDIS_INCREMENTAL_KEY: str = "sector_import:files"
     REDIS_STOP_KEY: str = "sector_import:stop"
+    REDIS_ERRORS_KEY: str = "sector_import:errors"
     PROGRESS_TTL: int = 86400       # 24h
     HEARTBEAT_TIMEOUT: int = 120    # 秒
 
     def __init__(self, base_dir: str = "/Volumes/light/行业概念板块") -> None:
         self.base_dir = Path(base_dir)
-        self.parser = SectorCSVParser()
+        self.dc_engine = DCParsingEngine()
+        self.ti_engine = TIParsingEngine()
+        self.tdx_engine = TDXParsingEngine()
+
+    def _get_engine(self, source: DataSource) -> BaseParsingEngine:
+        """根据数据源返回对应的解析引擎实例。"""
+        if source == DataSource.DC:
+            return self.dc_engine
+        elif source == DataSource.TI:
+            return self.ti_engine
+        elif source == DataSource.TDX:
+            return self.tdx_engine
+        raise ValueError(f"Unknown data source: {source}")
 
     # ------------------------------------------------------------------
     # 文件扫描
@@ -59,62 +75,56 @@ class SectorImportService:
     def _scan_sector_list_files(self, source: DataSource) -> list[Path]:
         """扫描指定数据源的板块列表文件。
 
-        实际文件系统布局：
-        - DC: 根目录/概念板块列表_东财.csv
-              根目录/东方财富_概念板块_历史行情数据/东方财富概念板块列表.csv
-              根目录/东方财富_行业板块_历史行情数据/东方财富行业板块列表.csv
-              增量: 根目录/增量数据/概念板块_东财/YYYY-MM/YYYY-MM-DD.csv
-        - TI: 根目录/行业概念板块_同花顺.csv
-        - TDX: 根目录/通达信板块列表.csv
-               根目录/板块信息_通达信.zip
-               增量: 根目录/增量数据/板块信息_通达信/YYYY-MM/YYYY-MM-DD.csv
+        按数据源子目录组织的实际文件系统布局：
+        - DC: 东方财富/东方财富_板块列表/东方财富_板块列表1.csv
+              东方财富/东方财富_板块列表/东方财富_板块列表2.csv
+              东方财富/东方财富_板块列表/东方财富_概念板块列表/*.csv
+              增量: 东方财富/东方财富_增量数据/东方财富_板块列表/YYYY-MM/*.csv
+        - TI: 同花顺/同花顺_板块列表/同花顺_板块列表.csv
+        - TDX: 通达信/通达信_板块列表/通达信_板块列表.csv
+               通达信/通达信_板块列表/通达信_板块列表汇总/*.csv
+               增量: 通达信/通达信_增量数据/通达信_板块列表/YYYY-MM/*.csv
         """
         results: list[Path] = []
-        base = self.base_dir
+        source_dir = self.base_dir / _SOURCE_DIR_MAP.get(source, "")
+
+        if not source_dir.is_dir():
+            logger.warning("数据源子目录不存在，跳过: %s", source_dir)
+            return results
 
         if source == DataSource.DC:
-            # 根目录板块列表
-            f = base / "概念板块列表_东财.csv"
-            if f.is_file():
-                results.append(f)
-            # 历史行情目录中的板块列表
-            for sub in ("东方财富_概念板块_历史行情数据", "东方财富_行业板块_历史行情数据"):
-                d = base / sub
-                if d.is_dir():
-                    for ff in sorted(d.iterdir()):
-                        if ff.is_file() and ff.name.endswith("板块列表.csv"):
-                            results.append(ff)
-            # 增量数据
-            incr_dir = base / "增量数据" / "概念板块_东财"
+            # 全量板块列表（简版）
+            for name in ("东方财富_板块列表1.csv", "东方财富_板块列表2.csv"):
+                f = source_dir / "东方财富_板块列表" / name
+                if f.is_file():
+                    results.append(f)
+            # 概念板块列表目录（散装 CSV，含 idx_type 等 13 列）
+            concept_list_dir = source_dir / "东方财富_板块列表" / "东方财富_概念板块列表"
+            if concept_list_dir.is_dir():
+                results.extend(sorted(concept_list_dir.glob("*.csv")))
+            # 增量板块列表
+            incr_dir = source_dir / "东方财富_增量数据" / "东方财富_板块列表"
             if incr_dir.is_dir():
-                for month_dir in sorted(incr_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for ff in sorted(month_dir.iterdir()):
-                        if ff.is_file() and ff.name.endswith(".csv"):
-                            results.append(ff)
+                results.extend(sorted(incr_dir.rglob("*.csv")))
 
         elif source == DataSource.TI:
-            f = base / "行业概念板块_同花顺.csv"
+            f = source_dir / "同花顺_板块列表" / "同花顺_板块列表.csv"
             if f.is_file():
                 results.append(f)
 
         elif source == DataSource.TDX:
-            f = base / "通达信板块列表.csv"
+            # 全量板块列表
+            f = source_dir / "通达信_板块列表" / "通达信_板块列表.csv"
             if f.is_file():
                 results.append(f)
-            zf = base / "板块信息_通达信.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 增量数据
-            incr_dir = base / "增量数据" / "板块信息_通达信"
+            # 散装板块列表汇总
+            info_dir = source_dir / "通达信_板块列表" / "通达信_板块列表汇总"
+            if info_dir.is_dir():
+                results.extend(sorted(info_dir.glob("*.csv")))
+            # 增量板块列表
+            incr_dir = source_dir / "通达信_增量数据" / "通达信_板块列表"
             if incr_dir.is_dir():
-                for month_dir in sorted(incr_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for ff in sorted(month_dir.iterdir()):
-                        if ff.is_file() and ff.name.endswith(".csv"):
-                            results.append(ff)
+                results.extend(sorted(incr_dir.rglob("*.csv")))
 
         logger.info("扫描 %s 板块列表文件，发现 %d 个", source.value, len(results))
         return results
@@ -122,67 +132,50 @@ class SectorImportService:
     def _scan_constituent_files(self, source: DataSource) -> list[Path]:
         """扫描指定数据源的板块成分文件。
 
-        实际文件系统布局：
-        - DC: 根目录/概念板块_东财.zip
-              根目录/板块成分_东财/YYYY-MM/板块成分_DC_YYYYMMDD.zip
-        - TI: 根目录/概念板块成分汇总_同花顺.csv
-              根目录/行业板块成分汇总_同花顺.csv
-              根目录/概念板块成分_同花顺.zip
-              根目录/板块成分_同花顺/概念板块成分汇总_同花顺/YYYY-MM/*.csv
-              根目录/板块成分_同花顺/行业板块成分汇总_同花顺/YYYY-MM/*.csv
-        - TDX: 根目录/板块成分_通达信/YYYY-MM/板块成分_TDX_YYYYMMDD.zip
+        按数据源子目录组织的实际文件系统布局：
+        - DC: 东方财富/东方财富_板块成分/YYYY-MM/*.zip
+        - TI: 同花顺/同花顺_板块成分/同花顺_概念板块成分汇总.csv
+              同花顺/同花顺_板块成分/同花顺_行业板块成分汇总.csv
+              同花顺/同花顺_增量数据/同花顺_概念板块成分/YYYY-MM/*.csv
+              同花顺/同花顺_增量数据/同花顺_行业板块成分/YYYY-MM/*.csv
+        - TDX: 通达信/通达信_板块成分/YYYY-MM/*.zip
         """
         results: list[Path] = []
-        base = self.base_dir
+        source_dir = self.base_dir / _SOURCE_DIR_MAP.get(source, "")
+
+        if not source_dir.is_dir():
+            logger.warning("数据源子目录不存在，跳过: %s", source_dir)
+            return results
 
         if source == DataSource.DC:
-            # 根目录 ZIP
-            zf = base / "概念板块_东财.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 板块成分_东财/ 目录下按月份组织的 ZIP 文件
-            dc_dir = base / "板块成分_东财"
+            # 东方财富_板块成分/YYYY-MM/*.zip
+            dc_dir = source_dir / "东方财富_板块成分"
             if dc_dir.is_dir():
-                for month_dir in sorted(dc_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for f in sorted(month_dir.iterdir()):
-                        if f.is_file() and f.name.startswith("板块成分_DC_") and f.name.endswith(".zip"):
-                            results.append(f)
+                results.extend(sorted(dc_dir.rglob("*.zip")))
 
         elif source == DataSource.TI:
-            # 根目录汇总 CSV
-            for name in ("概念板块成分汇总_同花顺.csv", "行业板块成分汇总_同花顺.csv"):
-                f = base / name
-                if f.is_file():
-                    results.append(f)
-            # 根目录 ZIP
-            zf = base / "概念板块成分_同花顺.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 增量成分目录
-            ti_dir = base / "板块成分_同花顺"
-            if ti_dir.is_dir():
-                for sub_dir in sorted(ti_dir.iterdir()):
-                    if not sub_dir.is_dir():
-                        continue
-                    for month_dir in sorted(sub_dir.iterdir()):
-                        if not month_dir.is_dir():
-                            continue
-                        for f in sorted(month_dir.iterdir()):
-                            if f.is_file() and f.name.endswith(".csv"):
-                                results.append(f)
+            # 概念板块成分汇总
+            f = source_dir / "同花顺_板块成分" / "同花顺_概念板块成分汇总.csv"
+            if f.is_file():
+                results.append(f)
+            # 行业板块成分汇总
+            f = source_dir / "同花顺_板块成分" / "同花顺_行业板块成分汇总.csv"
+            if f.is_file():
+                results.append(f)
+            # 增量概念板块成分
+            concept_incr_dir = source_dir / "同花顺_增量数据" / "同花顺_概念板块成分"
+            if concept_incr_dir.is_dir():
+                results.extend(sorted(concept_incr_dir.rglob("*.csv")))
+            # 增量行业板块成分
+            industry_incr_dir = source_dir / "同花顺_增量数据" / "同花顺_行业板块成分"
+            if industry_incr_dir.is_dir():
+                results.extend(sorted(industry_incr_dir.rglob("*.csv")))
 
         elif source == DataSource.TDX:
-            # 板块成分_通达信/ 目录下按月份组织的 ZIP 文件
-            tdx_dir = base / "板块成分_通达信"
+            # 通达信_板块成分/YYYY-MM/*.zip
+            tdx_dir = source_dir / "通达信_板块成分"
             if tdx_dir.is_dir():
-                for month_dir in sorted(tdx_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for f in sorted(month_dir.iterdir()):
-                        if f.is_file() and f.name.startswith("板块成分_TDX_") and f.name.endswith(".zip"):
-                            results.append(f)
+                results.extend(sorted(tdx_dir.rglob("*.zip")))
 
         logger.info("扫描 %s 板块成分文件，发现 %d 个", source.value, len(results))
         return results
@@ -190,80 +183,70 @@ class SectorImportService:
     def _scan_kline_files(self, source: DataSource) -> list[Path]:
         """扫描指定数据源的板块行情文件。
 
-        实际文件系统布局：
-        - DC: 根目录/板块行情_东财.zip
-              根目录/东方财富_概念板块_历史行情数据/概念板块_日k.zip
-              根目录/东方财富_行业板块_历史行情数据/行业板块_日k.zip
-              增量: 根目录/增量数据/板块行情_东财/YYYY-MM/YYYY-MM-DD.csv
-        - TI: 根目录/板块指数行情_同花顺.zip
-              增量: 根目录/增量数据/板块指数行情_同花顺/YYYY-MM/YYYY-MM-DD.csv
-        - TDX: 根目录/板块行情_通达信.zip
-               根目录/通达信_*板块_历史行情数据/*.zip
-               增量: 根目录/增量数据/板块行情_通达信/YYYY-MM/YYYY-MM-DD.csv
+        按数据源子目录组织的实际文件系统布局：
+        - DC: 东方财富_板块行情/东方财富_地区板块行情/*.csv
+              东方财富_板块行情/东方财富_行业板块行情/*.csv
+              增量: 东方财富_增量数据/东方财富_板块行情/YYYY-MM/*.csv
+              注意: 概念板块行情已移除（原目录包含的是板块列表数据而非行情数据）
+        - TI: 同花顺_板块行情/*.csv
+              增量: 同花顺_增量数据/同花顺_板块行情/YYYY-MM/*.csv
+        - TDX: 通达信_板块行情/通达信_板块行情汇总/*.csv
+               通达信_板块行情/通达信_概念板块历史行情/*.zip
+               通达信_板块行情/通达信_行业板块历史行情/*.zip
+               通达信_板块行情/通达信_地区板块历史行情/*.zip
+               通达信_板块行情/通达信_风格板块历史行情/*.zip
+               增量: 通达信_增量数据/通达信_板块行情/YYYY-MM/*.csv
         """
         results: list[Path] = []
-        base = self.base_dir
+        source_dir = self.base_dir / _SOURCE_DIR_MAP.get(source, "")
+
+        if not source_dir.is_dir():
+            logger.warning("数据源子目录不存在，跳过: %s", source_dir)
+            return results
 
         if source == DataSource.DC:
-            zf = base / "板块行情_东财.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 历史行情目录中的 ZIP
-            for sub in ("东方财富_概念板块_历史行情数据", "东方财富_行业板块_历史行情数据"):
-                d = base / sub
-                if d.is_dir():
-                    for f in sorted(d.iterdir()):
-                        if f.is_file() and f.name.endswith(".zip"):
-                            results.append(f)
-            # 增量数据
-            incr_dir = base / "增量数据" / "板块行情_东财"
+            # 两个散装 CSV 目录（概念板块行情已移除）
+            for kline_sub in (
+                "东方财富_地区板块行情",
+                "东方财富_行业板块行情",
+            ):
+                kline_dir = source_dir / "东方财富_板块行情" / kline_sub
+                if kline_dir.is_dir():
+                    results.extend(sorted(kline_dir.glob("*.csv")))
+            # 增量行情
+            incr_dir = source_dir / "东方财富_增量数据" / "东方财富_板块行情"
             if incr_dir.is_dir():
-                for month_dir in sorted(incr_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for f in sorted(month_dir.iterdir()):
-                        if f.is_file() and f.name.endswith(".csv"):
-                            results.append(f)
+                results.extend(sorted(incr_dir.rglob("*.csv")))
 
         elif source == DataSource.TI:
-            zf = base / "板块指数行情_同花顺.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 增量数据
-            incr_dir = base / "增量数据" / "板块指数行情_同花顺"
+            # 散装行情 CSV
+            kline_dir = source_dir / "同花顺_板块行情"
+            if kline_dir.is_dir():
+                results.extend(sorted(kline_dir.glob("*.csv")))
+            # 增量行情
+            incr_dir = source_dir / "同花顺_增量数据" / "同花顺_板块行情"
             if incr_dir.is_dir():
-                for month_dir in sorted(incr_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for f in sorted(month_dir.iterdir()):
-                        if f.is_file() and f.name.endswith(".csv"):
-                            results.append(f)
+                results.extend(sorted(incr_dir.rglob("*.csv")))
 
         elif source == DataSource.TDX:
-            zf = base / "板块行情_通达信.zip"
-            if zf.is_file():
-                results.append(zf)
-            # 按板块类型分目录的历史行情 ZIP
+            # 散装行情 CSV
+            kline_dir = source_dir / "通达信_板块行情" / "通达信_板块行情汇总"
+            if kline_dir.is_dir():
+                results.extend(sorted(kline_dir.glob("*.csv")))
+            # 四个历史行情 ZIP 目录
             for sub_name in (
-                "通达信_概念板块_历史行情数据",
-                "通达信_行业板块_历史行情数据",
-                "通达信_地区板块_历史行情数据",
-                "通达信_风格板块_历史行情数据",
+                "通达信_概念板块历史行情",
+                "通达信_行业板块历史行情",
+                "通达信_地区板块历史行情",
+                "通达信_风格板块历史行情",
             ):
-                sub_dir = base / sub_name
-                if sub_dir.is_dir():
-                    for f in sorted(sub_dir.iterdir()):
-                        if f.is_file() and f.name.endswith(".zip"):
-                            results.append(f)
-            # 增量数据
-            incr_dir = base / "增量数据" / "板块行情_通达信"
+                zip_dir = source_dir / "通达信_板块行情" / sub_name
+                if zip_dir.is_dir():
+                    results.extend(sorted(zip_dir.glob("*.zip")))
+            # 增量行情
+            incr_dir = source_dir / "通达信_增量数据" / "通达信_板块行情"
             if incr_dir.is_dir():
-                for month_dir in sorted(incr_dir.iterdir()):
-                    if not month_dir.is_dir():
-                        continue
-                    for f in sorted(month_dir.iterdir()):
-                        if f.is_file() and f.name.endswith(".csv"):
-                            results.append(f)
+                results.extend(sorted(incr_dir.rglob("*.csv")))
 
         logger.info("扫描 %s 板块行情文件，发现 %d 个", source.value, len(results))
         return results
@@ -329,6 +312,13 @@ class SectorImportService:
                     batch_start, batch_start + len(batch),
                     exc_info=True,
                 )
+                await self._record_error(
+                    file="bulk_upsert_sector_info",
+                    line=0,
+                    error_type="db_error",
+                    message=f"板块列表批量写入失败 (batch {batch_start}-{batch_start + len(batch)})",
+                    raw_data="",
+                )
 
         return total
 
@@ -380,6 +370,13 @@ class SectorImportService:
                     "板块成分批量写入失败 (batch %d-%d)",
                     batch_start, batch_start + len(batch),
                     exc_info=True,
+                )
+                await self._record_error(
+                    file="bulk_insert_constituents",
+                    line=0,
+                    error_type="db_error",
+                    message=f"板块成分批量写入失败 (batch {batch_start}-{batch_start + len(batch)})",
+                    raw_data="",
                 )
 
         return total
@@ -441,6 +438,13 @@ class SectorImportService:
                     "板块行情批量写入失败 (batch %d-%d)",
                     batch_start, batch_start + len(batch),
                     exc_info=True,
+                )
+                await self._record_error(
+                    file="bulk_insert_klines",
+                    line=0,
+                    error_type="db_error",
+                    message=f"板块行情批量写入失败 (batch {batch_start}-{batch_start + len(batch)})",
+                    raw_data="",
                 )
 
         return total
@@ -543,6 +547,110 @@ class SectorImportService:
         await cache_delete(self.REDIS_STOP_KEY)
 
     # ------------------------------------------------------------------
+    # 错误统计
+    # ------------------------------------------------------------------
+
+    async def _record_error(
+        self,
+        file: str,
+        line: int,
+        error_type: str,
+        message: str,
+        raw_data: str = "",
+    ) -> None:
+        """将错误详情 JSON 追加到 Redis 列表，并递增进度中的 error_count。
+
+        Args:
+            file: 出错的文件名
+            line: 出错的行号（批量写入失败时为 0）
+            error_type: 错误类型（parse_error / ohlc_invalid / db_error）
+            message: 错误信息
+            raw_data: 原始数据（截断至 200 字符）
+        """
+        truncated_raw = raw_data[:200] if raw_data else ""
+        error_detail = json.dumps(
+            {
+                "file": file,
+                "line": line,
+                "error_type": error_type,
+                "message": message,
+                "raw_data": truncated_raw,
+            },
+            ensure_ascii=False,
+        )
+        client = get_redis_client()
+        try:
+            await client.rpush(self.REDIS_ERRORS_KEY, error_detail)
+        except Exception:
+            logger.error("写入错误详情到 Redis 失败", exc_info=True)
+        finally:
+            await client.aclose()
+
+        # 递增进度中的 error_count
+        try:
+            raw = await cache_get(self.REDIS_PROGRESS_KEY)
+            progress: dict = json.loads(raw) if raw else {}
+            progress["error_count"] = progress.get("error_count", 0) + 1
+            # 更新 failed_files 列表
+            failed_files: list[dict] = progress.get("failed_files", [])
+            # 避免同一文件重复添加到 failed_files
+            existing_files = {entry["file"] for entry in failed_files}
+            if file not in existing_files:
+                failed_files.append({"file": file, "error": message[:100]})
+                progress["failed_files"] = failed_files
+            await cache_set(
+                self.REDIS_PROGRESS_KEY,
+                json.dumps(progress, ensure_ascii=False),
+                ex=self.PROGRESS_TTL,
+            )
+        except Exception:
+            logger.error("更新错误计数失败", exc_info=True)
+
+    async def _clear_errors(self) -> None:
+        """清空错误列表（在每次新导入开始时调用）。"""
+        client = get_redis_client()
+        try:
+            await client.delete(self.REDIS_ERRORS_KEY)
+        except Exception:
+            logger.error("清空错误列表失败", exc_info=True)
+        finally:
+            await client.aclose()
+
+    async def get_errors(self, offset: int = 0, limit: int = 50) -> list[dict]:
+        """从 Redis 列表分页读取错误详情。
+
+        Args:
+            offset: 起始偏移量
+            limit: 返回条数
+
+        Returns:
+            错误详情字典列表
+        """
+        client = get_redis_client()
+        try:
+            items = await client.lrange(
+                self.REDIS_ERRORS_KEY, offset, offset + limit - 1,
+            )
+            return [json.loads(item) for item in items]
+        except Exception:
+            logger.error("读取错误详情失败", exc_info=True)
+            return []
+        finally:
+            await client.aclose()
+
+    async def get_error_count(self) -> int:
+        """返回错误总数。"""
+        client = get_redis_client()
+        try:
+            count = await client.llen(self.REDIS_ERRORS_KEY)
+            return count or 0
+        except Exception:
+            logger.error("获取错误总数失败", exc_info=True)
+            return 0
+        finally:
+            await client.aclose()
+
+    # ------------------------------------------------------------------
     # 增量检测
     # ------------------------------------------------------------------
 
@@ -592,12 +700,8 @@ class SectorImportService:
                 return total
             await self.update_progress(current_file=f.name)
             try:
-                if source == DataSource.DC:
-                    items = self.parser.parse_sector_list_dc(f)
-                elif source == DataSource.TI:
-                    items = self.parser.parse_sector_list_ti(f)
-                else:
-                    items = self.parser.parse_sector_list_tdx(f)
+                engine = self._get_engine(source)
+                items = engine.parse_sector_list(f)
                 count = await self._bulk_upsert_sector_info(items)
                 total += count
                 processed_files += 1
@@ -606,8 +710,15 @@ class SectorImportService:
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块列表文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块列表文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
 
     async def _import_constituents(self, data_sources: list[DataSource]) -> int:
@@ -627,31 +738,48 @@ class SectorImportService:
             await self.update_progress(current_file=f.name)
             try:
                 if source == DataSource.DC:
-                    items = self.parser.parse_constituents_dc_zip(f)
+                    # DC: 流式处理 ZIP，逐个内部 CSV yield 解析结果
+                    for batch in self.dc_engine.iter_constituents_zip(f):
+                        if await self._check_stop_signal():
+                            return total
+                        count = await self._bulk_insert_constituents(batch)
+                        total += count
                 elif source == DataSource.TI:
-                    trade_date = self.parser._infer_date_from_filename(f.name)
-                    if trade_date is None:
-                        logger.error(
-                            "TI 成分文件名无法推断日期，跳过: %s", f,
-                        )
-                        continue
-                    items = self.parser.parse_constituents_ti_csv(f, trade_date)
+                    # TI: 区分汇总 CSV 和散装 CSV
+                    if "成分汇总" in f.name:
+                        items = self.ti_engine.parse_constituents_summary(f)
+                    else:
+                        items = self.ti_engine.parse_constituents_per_sector(f)
+                    count = await self._bulk_insert_constituents(items)
+                    total += count
                 else:
-                    items = self.parser.parse_constituents_tdx_zip(f)
-                count = await self._bulk_insert_constituents(items)
-                total += count
+                    # TDX: 解析成分 ZIP
+                    items = self.tdx_engine.parse_constituents_zip(f)
+                    count = await self._bulk_insert_constituents(items)
+                    total += count
                 processed_files += 1
                 await self.mark_imported(f)
                 await self.update_progress(
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块成分文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块成分文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
 
     async def _import_klines(self, data_sources: list[DataSource]) -> int:
-        """扫描并导入板块行情文件，返回导入记录总数。"""
+        """扫描并导入板块行情文件，返回导入记录总数。
+
+        对散装 CSV 逐文件处理：读取→解析→写入→释放内存。
+        对 TDX 历史行情 ZIP 采用流式处理以节省内存。
+        """
         total = 0
         processed_files = 0
         all_files: list[tuple[DataSource, Path]] = []
@@ -666,13 +794,15 @@ class SectorImportService:
                 return total
             await self.update_progress(current_file=f.name)
             try:
-                if source == DataSource.DC:
-                    items = self.parser.parse_kline_dc_csv(f)
-                elif source == DataSource.TI:
-                    items = self.parser.parse_kline_ti_csv(f)
+                if f.suffix.lower() == ".zip":
+                    # TDX 历史行情 ZIP：流式处理
+                    count = await self._import_kline_zip_streaming(source, f)
                 else:
-                    items = self.parser.parse_kline_tdx_csv(f)
-                count = await self._bulk_insert_klines(items)
+                    # 散装/增量 CSV：使用对应引擎解析
+                    engine = self._get_engine(source)
+                    items = engine.parse_kline_csv(f)
+                    count = await self._bulk_insert_klines(items)
+                    del items  # 释放内存
                 total += count
                 processed_files += 1
                 await self.mark_imported(f)
@@ -680,9 +810,34 @@ class SectorImportService:
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块行情文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块行情文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
+
+    async def _import_kline_zip_streaming(
+        self, source: DataSource, zip_path: Path
+    ) -> int:
+        """流式处理板块行情 ZIP 文件。
+
+        使用 TDX 引擎的 iter_kline_zip 逐个读取 ZIP 内部 CSV，
+        解析后立即写入数据库，写入完成后释放该批数据的内存，避免 OOM。
+        """
+        count = 0
+        for items in self.tdx_engine.iter_kline_zip(zip_path):
+            if await self._check_stop_signal():
+                return count
+            inserted = await self._bulk_insert_klines(items)
+            count += inserted
+            # 定期更新进度，让前端能看到 ZIP 内部的处理进展
+            await self.update_progress(imported_records=count)
+        return count
 
     # ------------------------------------------------------------------
     # 增量版各阶段导入（内部方法）
@@ -708,12 +863,8 @@ class SectorImportService:
                 continue
             await self.update_progress(current_file=f.name)
             try:
-                if source == DataSource.DC:
-                    items = self.parser.parse_sector_list_dc(f)
-                elif source == DataSource.TI:
-                    items = self.parser.parse_sector_list_ti(f)
-                else:
-                    items = self.parser.parse_sector_list_tdx(f)
+                engine = self._get_engine(source)
+                items = engine.parse_sector_list(f)
                 count = await self._bulk_upsert_sector_info(items)
                 total += count
                 processed_files += 1
@@ -722,8 +873,15 @@ class SectorImportService:
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块列表文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块列表文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
 
     async def _import_constituents_incremental(
@@ -747,33 +905,46 @@ class SectorImportService:
             await self.update_progress(current_file=f.name)
             try:
                 if source == DataSource.DC:
-                    items = self.parser.parse_constituents_dc_zip(f)
+                    for batch in self.dc_engine.iter_constituents_zip(f):
+                        if await self._check_stop_signal():
+                            return total
+                        count = await self._bulk_insert_constituents(batch)
+                        total += count
                 elif source == DataSource.TI:
-                    trade_date = self.parser._infer_date_from_filename(f.name)
-                    if trade_date is None:
-                        logger.error(
-                            "TI 成分文件名无法推断日期，跳过: %s", f,
-                        )
-                        continue
-                    items = self.parser.parse_constituents_ti_csv(f, trade_date)
+                    if "成分汇总" in f.name:
+                        items = self.ti_engine.parse_constituents_summary(f)
+                    else:
+                        items = self.ti_engine.parse_constituents_per_sector(f)
+                    count = await self._bulk_insert_constituents(items)
+                    total += count
                 else:
-                    items = self.parser.parse_constituents_tdx_zip(f)
-                count = await self._bulk_insert_constituents(items)
-                total += count
+                    items = self.tdx_engine.parse_constituents_zip(f)
+                    count = await self._bulk_insert_constituents(items)
+                    total += count
                 processed_files += 1
                 await self.mark_imported(f)
                 await self.update_progress(
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块成分文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块成分文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
 
     async def _import_klines_incremental(
         self, data_sources: list[DataSource],
     ) -> int:
-        """增量扫描并导入板块行情文件，跳过已导入文件。"""
+        """增量扫描并导入板块行情文件，跳过已导入文件。
+
+        对散装 CSV 逐文件处理，对 TDX 历史行情 ZIP 采用流式处理以节省内存。
+        """
         total = 0
         processed_files = 0
         all_files: list[tuple[DataSource, Path]] = []
@@ -790,13 +961,13 @@ class SectorImportService:
                 continue
             await self.update_progress(current_file=f.name)
             try:
-                if source == DataSource.DC:
-                    items = self.parser.parse_kline_dc_csv(f)
-                elif source == DataSource.TI:
-                    items = self.parser.parse_kline_ti_csv(f)
+                if f.suffix.lower() == ".zip":
+                    count = await self._import_kline_zip_streaming(source, f)
                 else:
-                    items = self.parser.parse_kline_tdx_csv(f)
-                count = await self._bulk_insert_klines(items)
+                    engine = self._get_engine(source)
+                    items = engine.parse_kline_csv(f)
+                    count = await self._bulk_insert_klines(items)
+                    del items  # 释放内存
                 total += count
                 processed_files += 1
                 await self.mark_imported(f)
@@ -804,8 +975,15 @@ class SectorImportService:
                     processed_files=processed_files,
                     imported_records=total,
                 )
-            except Exception:
+            except Exception as exc:
                 logger.error("板块行情文件处理失败: %s", f, exc_info=True)
+                await self._record_error(
+                    file=f.name,
+                    line=0,
+                    error_type="parse_error",
+                    message=f"板块行情文件处理失败: {exc}",
+                    raw_data="",
+                )
         return total
 
     # ------------------------------------------------------------------
@@ -819,12 +997,15 @@ class SectorImportService:
         """全量导入：板块列表 → 成分 → 行情"""
         data_sources = data_sources or list(DataSource)
         await self._clear_stop_signal()
+        await self._clear_errors()
 
         await self.update_progress(
             status="running",
             stage="板块列表",
             processed_files=0,
             imported_records=0,
+            error_count=0,
+            failed_files=[],
         )
 
         sector_count = await self._import_sector_list(data_sources)
@@ -874,12 +1055,15 @@ class SectorImportService:
         """增量导入：仅处理尚未导入的新数据文件"""
         data_sources = data_sources or list(DataSource)
         await self._clear_stop_signal()
+        await self._clear_errors()
 
         await self.update_progress(
             status="running",
             stage="板块列表",
             processed_files=0,
             imported_records=0,
+            error_count=0,
+            failed_files=[],
         )
 
         sector_count = await self._import_sector_list_incremental(data_sources)

@@ -499,21 +499,50 @@ class SectorStrengthFilter:
         """
         计算每个板块的累计涨跌幅。
 
-        对每个板块取最近的 K 线记录，累加 change_pct。
+        优先使用 change_pct 字段累加。当某板块所有 K 线的 change_pct 均为 NULL 时，
+        使用收盘价序列 fallback：(最新收盘价 - 最早收盘价) / 最早收盘价 × 100。
+
+        对应需求：
+        - 需求 15.1：change_pct 全 NULL 时使用收盘价 fallback
+        - 需求 15.2：有效收盘价 < 2 时设为 0.0
+        - 需求 15.3：优先使用 change_pct（有效记录 > 0 时）
+        - 需求 15.4：返回 float 类型
 
         Args:
-            kline_data: sector_code → [SectorKline, ...] 映射
+            kline_data: sector_code → [SectorKline, ...] 映射（按时间升序）
 
         Returns:
             sector_code → 累计涨跌幅
         """
         result: dict[str, float] = {}
         for code, klines in kline_data.items():
-            total = 0.0
-            for k in klines:
-                if k.change_pct is not None:
-                    total += float(k.change_pct)
-            result[code] = total
+            # 收集有效的 change_pct 值
+            valid_pcts = [
+                float(k.change_pct)
+                for k in klines
+                if k.change_pct is not None
+            ]
+
+            if valid_pcts:
+                # 优先路径：有有效 change_pct，直接累加
+                result[code] = sum(valid_pcts)
+            else:
+                # Fallback 路径：所有 change_pct 为 NULL，使用收盘价计算
+                valid_closes = [
+                    float(k.close)
+                    for k in klines
+                    if k.close is not None
+                ]
+                if len(valid_closes) >= 2:
+                    earliest = valid_closes[0]   # klines 按时间升序
+                    latest = valid_closes[-1]
+                    if earliest != 0.0:
+                        result[code] = (latest - earliest) / earliest * 100
+                    else:
+                        result[code] = 0.0
+                else:
+                    result[code] = 0.0
+
         return result
 
     @staticmethod

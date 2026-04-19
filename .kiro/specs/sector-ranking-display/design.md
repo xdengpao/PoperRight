@@ -4,14 +4,23 @@
 
 本功能将 Dashboard 首页的"板块涨幅排行"模块从外部 AkShare API 数据源切换为本地数据库（sector-data-import 已导入的板块数据），并增加板块类型标签页切换、涨跌幅降序排列等功能。
 
-核心设计决策：
+**第一阶段（需求 1-8，已实现）** 核心设计决策：
 - **双查询合并策略**：SectorInfo 存储在 PostgreSQL，SectorKline 存储在 TimescaleDB，两者使用不同的数据库引擎，无法直接 SQL JOIN。设计采用"先查 TS 获取行情 → 再查 PG 获取板块名称 → Python 内存合并"的两步查询方案
 - **新增仓储方法**：在现有 `SectorRepository` 中新增 `get_sector_ranking` 方法，封装双查询逻辑
 - **新增 API 端点**：在现有 `app/api/v1/sector.py` 中新增 `GET /sector/ranking` 端点
 - **新增 Pinia Store**：创建 `frontend/src/stores/sector.ts`，管理板块排行数据和标签页状态
 - **改造 DashboardView**：替换现有 AkShare 数据源调用，增加板块类型标签页
 
+**第二阶段（需求 9-16，新增）** 核心设计决策：
+- **双面板布局**：板块区域从单列改为左右双面板（排行表格 + 数据浏览面板），响应式 900px 断点堆叠
+- **分页浏览 API**：新增 3 个 `/browse` 端点，支持 sector_info / sector_constituent / sector_kline 的分页查询，应对千万级数据量
+- **SectorStore 扩展**：在现有 store 中新增浏览面板状态管理（browserActiveTab、每标签页独立状态）
+- **SectorBrowserPanel 组件**：新建独立 Vue 组件，包含 3 个标签页（板块数据/板块成分/板块行情）
+- **数据修复**：修复 TDX 历史行情 ZIP 解析缺少 `.TDX` 后缀问题，修复 DC 简版板块列表 2 列格式误解析问题，提供清理脚本
+
 ## Architecture
+
+### 第一阶段架构（需求 1-8，已实现）
 
 ```mermaid
 graph TB
@@ -38,6 +47,82 @@ graph TB
     Repo -->|"① 查最新交易日行情"| TS
     Repo -->|"② 查板块名称/类型"| PG
     Repo -->|"③ Python 内存合并"| EP
+```
+
+### 第二阶段架构（需求 9-16，新增）
+
+```mermaid
+graph TB
+    subgraph "前端 Vue 3"
+        DV["DashboardView.vue<br/>双面板布局容器"]
+        SRP["左侧: 板块排行表格<br/>(已有)"]
+        SBP["右侧: SectorBrowserPanel.vue<br/>(新增组件)"]
+        SS["SectorStore (Pinia)<br/>排行 + 浏览面板状态"]
+        API_C["apiClient (Axios)"]
+    end
+
+    subgraph "后端 FastAPI"
+        EP1["GET /sector/ranking<br/>(已有)"]
+        EP2["GET /sector/info/browse<br/>(新增)"]
+        EP3["GET /sector/constituent/browse<br/>(新增)"]
+        EP4["GET /sector/kline/browse<br/>(新增)"]
+        Repo["SectorRepository<br/>(新增 browse 方法)"]
+    end
+
+    subgraph "数据库"
+        PG["PostgreSQL<br/>sector_info<br/>sector_constituent"]
+        TS["TimescaleDB<br/>sector_kline"]
+    end
+
+    subgraph "数据修复"
+        FIX1["TDXParsingEngine<br/>ZIP 解析补 .TDX 后缀"]
+        FIX2["DCParsingEngine<br/>2列格式检测 + BK校验"]
+        CLEAN["清理脚本<br/>scripts/cleanup_sector_data.py"]
+    end
+
+    DV --> SRP
+    DV --> SBP
+    SRP --> SS
+    SBP --> SS
+    SS --> API_C
+    API_C --> EP1
+    API_C --> EP2
+    API_C --> EP3
+    API_C --> EP4
+    EP2 --> Repo
+    EP3 --> Repo
+    EP4 --> Repo
+    Repo --> PG
+    Repo --> TS
+    FIX1 --> TS
+    FIX2 --> PG
+    CLEAN --> PG
+    CLEAN --> TS
+```
+
+### 浏览面板数据流时序图
+
+```mermaid
+sequenceDiagram
+    participant User as 用户
+    participant SBP as SectorBrowserPanel
+    participant SS as SectorStore
+    participant Axios as apiClient
+    participant API as Browse API
+    participant Repo as SectorRepository
+    participant DB as PostgreSQL/TimescaleDB
+
+    User->>SBP: 切换标签页 / 修改筛选条件
+    SBP->>SS: fetchSectorInfoBrowse(params)
+    SS->>Axios: GET /sector/info/browse?page=1&...
+    Axios->>API: HTTP Request
+    API->>Repo: browse_sector_info(filters, page, page_size)
+    Repo->>DB: SELECT ... WHERE ... LIMIT/OFFSET
+    DB-->>Repo: 分页结果 + COUNT
+    Repo-->>API: {total, items}
+    API-->>Axios: JSON {total, page, page_size, items}
+    Axios-->>SS: 更新对应标签页状态
+    SS-->>SBP: 响应式渲染表格 + 分页控件
 ```
 
 ### 数据流时序图
@@ -468,6 +553,368 @@ async function toggleSectorKline(sectorCode: string, dataSource?: string) {
 
 **ECharts 渲染**：复用现有 `renderKline` 的配置模式（蜡烛图 + 成交量双轴），红涨绿跌配色。图表高度 300px，在 `expandedKlineData` 变化时通过 `watch` 或 `nextTick` 初始化。
 
+### 6. 分页浏览仓储层方法（需求 10，新增）
+
+**文件**：`app/services/data_engine/sector_repository.py`
+
+```python
+@dataclass
+class PaginatedResult:
+    """分页查询结果"""
+    total: int
+    items: list
+
+class SectorRepository:
+    # ... 现有方法 ...
+
+    async def browse_sector_info(
+        self,
+        data_source: DataSource | None = None,
+        sector_type: SectorType | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块信息。
+
+        keyword 对 sector_code 和 name 执行 LIKE '%keyword%' 模糊匹配。
+        返回 PaginatedResult(total=总数, items=SectorInfo 列表)。
+        """
+        ...
+
+    async def browse_sector_constituent(
+        self,
+        data_source: DataSource,
+        sector_code: str | None = None,
+        trade_date: date | None = None,
+        keyword: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块成分股。
+
+        data_source 必填。trade_date 默认最新交易日。
+        keyword 对 symbol 和 stock_name 执行模糊匹配。
+        """
+        ...
+
+    async def browse_sector_kline(
+        self,
+        data_source: DataSource,
+        sector_code: str | None = None,
+        freq: str = "1d",
+        start: date | None = None,
+        end: date | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> PaginatedResult:
+        """分页查询板块行情。
+
+        data_source 必填。按 time DESC 排序。
+        """
+        ...
+```
+
+**分页查询实现策略**：
+
+```python
+async def browse_sector_info(self, ...) -> PaginatedResult:
+    stmt = select(SectorInfo)
+    count_stmt = select(func.count()).select_from(SectorInfo)
+
+    # 构建 WHERE 条件
+    conditions = []
+    if data_source is not None:
+        conditions.append(SectorInfo.data_source == data_source.value)
+    if sector_type is not None:
+        conditions.append(SectorInfo.sector_type == sector_type.value)
+    if keyword:
+        like_pattern = f"%{keyword}%"
+        conditions.append(
+            or_(
+                SectorInfo.sector_code.ilike(like_pattern),
+                SectorInfo.name.ilike(like_pattern),
+            )
+        )
+
+    if conditions:
+        stmt = stmt.where(and_(*conditions))
+        count_stmt = count_stmt.where(and_(*conditions))
+
+    # 分页
+    offset = (page - 1) * page_size
+    stmt = stmt.order_by(SectorInfo.sector_code).offset(offset).limit(page_size)
+
+    async with AsyncSessionPG() as session:
+        total = (await session.execute(count_stmt)).scalar_one()
+        items = list((await session.execute(stmt)).scalars().all())
+
+    return PaginatedResult(total=total, items=items)
+```
+
+**数据量与性能考量**：
+- sector_info（~9,733 条）：直接 OFFSET/LIMIT 分页，无性能问题
+- sector_constituent（~38M 条）：必须有 WHERE 条件（data_source + sector_code 或 trade_date），利用现有复合索引 `ix_sector_constituent_code_source_date`
+- sector_kline（~7.7M 条）：必须有 WHERE 条件（data_source + sector_code），利用现有索引 `ix_sector_kline_code_source_freq_time`
+
+### 7. 分页浏览 API 端点（需求 10，新增）
+
+**文件**：`app/api/v1/sector.py`
+
+```python
+class BrowseResponse(BaseModel):
+    """通用分页响应"""
+    total: int
+    page: int
+    page_size: int
+    items: list
+
+
+class SectorInfoBrowseItem(BaseModel):
+    sector_code: str
+    name: str
+    sector_type: str
+    data_source: str
+    list_date: str | None = None
+    constituent_count: int | None = None
+
+
+class ConstituentBrowseItem(BaseModel):
+    trade_date: str
+    sector_code: str
+    data_source: str
+    symbol: str
+    stock_name: str | None = None
+
+
+class KlineBrowseItem(BaseModel):
+    time: str
+    sector_code: str
+    data_source: str
+    freq: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    amount: float | None = None
+    change_pct: float | None = None
+
+
+@router.get("/info/browse")
+async def browse_sector_info(
+    data_source: str | None = Query(None),
+    sector_type: str | None = Query(None),
+    keyword: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> dict:
+    """分页浏览板块信息。"""
+    ...
+
+
+@router.get("/constituent/browse")
+async def browse_sector_constituent(
+    data_source: str = Query(..., description="数据来源: DC/TI/TDX"),
+    sector_code: str | None = Query(None),
+    trade_date: str | None = Query(None),
+    keyword: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> dict:
+    """分页浏览板块成分股。"""
+    ...
+
+
+@router.get("/kline/browse")
+async def browse_sector_kline(
+    data_source: str = Query(..., description="数据来源: DC/TI/TDX"),
+    sector_code: str | None = Query(None),
+    freq: str = Query("1d"),
+    start: str | None = Query(None),
+    end: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+) -> dict:
+    """分页浏览板块行情。"""
+    ...
+```
+
+### 8. SectorBrowserPanel 组件（需求 9/11/12/13，新增）
+
+**文件**：`frontend/src/components/SectorBrowserPanel.vue`
+
+独立 Vue 组件，包含 3 个标签页，从 SectorStore 读取浏览面板状态。
+
+```vue
+<template>
+  <div class="sector-browser-panel">
+    <!-- 标签页导航 -->
+    <div class="browser-tabs" role="tablist" aria-label="板块数据浏览">
+      <button
+        v-for="tab in browserTabs"
+        :key="tab.key"
+        role="tab"
+        :aria-selected="sectorStore.browserActiveTab === tab.key"
+        :class="['tab-btn', { active: sectorStore.browserActiveTab === tab.key }]"
+        @click="sectorStore.setBrowserTab(tab.key)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <!-- 板块数据标签页 -->
+    <div v-show="sectorStore.browserActiveTab === 'info'" role="tabpanel">
+      <!-- 筛选条件：数据源选择器 + 板块类型下拉 + 搜索框 -->
+      <!-- 数据表格：sector_code, name, sector_type, data_source, list_date, constituent_count -->
+      <!-- 分页控件 -->
+    </div>
+
+    <!-- 板块成分标签页 -->
+    <div v-show="sectorStore.browserActiveTab === 'constituent'" role="tabpanel">
+      <!-- 筛选条件：数据源选择器 + 板块代码输入 + 交易日期 + 搜索框 -->
+      <!-- 数据表格：trade_date, sector_code, data_source, symbol, stock_name -->
+      <!-- 分页控件 -->
+    </div>
+
+    <!-- 板块行情标签页 -->
+    <div v-show="sectorStore.browserActiveTab === 'kline'" role="tabpanel">
+      <!-- 筛选条件：数据源选择器 + 板块代码输入 + 频率选择 + 日期范围 -->
+      <!-- 数据表格：time, sector_code, open, high, low, close, volume, amount, change_pct -->
+      <!-- 分页控件（change_pct 红涨绿跌） -->
+    </div>
+  </div>
+</template>
+```
+
+**分页控件设计**：
+
+```vue
+<div class="pagination">
+  <button :disabled="currentPage <= 1" @click="goPage(currentPage - 1)">上一页</button>
+  <span>第 {{ currentPage }} / {{ totalPages }} 页（共 {{ total }} 条）</span>
+  <button :disabled="currentPage >= totalPages" @click="goPage(currentPage + 1)">下一页</button>
+</div>
+```
+
+### 9. SectorStore 浏览面板状态扩展（需求 14，新增）
+
+**文件**：`frontend/src/stores/sector.ts`（扩展现有 store）
+
+```typescript
+// 浏览面板标签页类型
+export type BrowserTab = 'info' | 'constituent' | 'kline'
+
+// 每个标签页的独立状态
+export interface BrowseTabState<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+  loading: boolean
+  error: string
+  // 各标签页特有的查询条件
+  filters: Record<string, string>
+}
+
+// Store 新增状态
+const browserActiveTab = ref<BrowserTab>('info')
+
+// 板块数据标签页状态
+const infoBrowse = ref<BrowseTabState<SectorInfoBrowseItem>>({
+  items: [], total: 0, page: 1, pageSize: 50,
+  loading: false, error: '',
+  filters: { data_source: 'DC', sector_type: '', keyword: '' },
+})
+
+// 板块成分标签页状态
+const constituentBrowse = ref<BrowseTabState<ConstituentBrowseItem>>({
+  items: [], total: 0, page: 1, pageSize: 50,
+  loading: false, error: '',
+  filters: { data_source: 'DC', sector_code: '', trade_date: '', keyword: '' },
+})
+
+// 板块行情标签页状态
+const klineBrowse = ref<BrowseTabState<KlineBrowseItem>>({
+  items: [], total: 0, page: 1, pageSize: 50,
+  loading: false, error: '',
+  filters: { data_source: 'DC', sector_code: '', freq: '1d', start: '', end: '' },
+})
+
+function setBrowserTab(tab: BrowserTab) {
+  browserActiveTab.value = tab
+}
+
+async function fetchSectorInfoBrowse(page?: number) { ... }
+async function fetchConstituentBrowse(page?: number) { ... }
+async function fetchKlineBrowse(page?: number) { ... }
+```
+
+**状态隔离设计**：每个标签页拥有完全独立的 `BrowseTabState`，切换标签页时不清空其他标签页的数据和查询条件。修改筛选条件时自动重置 page=1 并重新请求。
+
+### 10. DashboardView 双面板布局改造（需求 9，新增）
+
+**文件**：`frontend/src/views/DashboardView.vue`（修改现有文件）
+
+将板块区域 `<section class="sector-section">` 内部改为 flex 双面板布局：
+
+```vue
+<section class="sector-section" aria-label="板块数据">
+  <h2 class="section-title">板块涨幅排行</h2>
+  <div class="sector-panels">
+    <!-- 左侧：排行面板（已有内容） -->
+    <div class="sector-panel-left">
+      <!-- 板块类型标签页 + 数据源选择器 + 排行表格（保持不变） -->
+    </div>
+    <!-- 右侧：浏览面板（新增） -->
+    <div class="sector-panel-right">
+      <SectorBrowserPanel />
+    </div>
+  </div>
+</section>
+```
+
+**CSS 布局**：
+
+```css
+.sector-panels {
+  display: flex;
+  gap: 16px;
+}
+.sector-panel-left,
+.sector-panel-right {
+  flex: 1;
+  min-width: 0;
+}
+@media (max-width: 900px) {
+  .sector-panels {
+    flex-direction: column;
+  }
+}
+```
+
+### 11. TDXParsingEngine 修复（需求 15，新增）
+
+> **已移至 sector-data-import spec**：TDX 历史行情 ZIP 解析 .TDX 后缀修复、DC 简版板块列表格式检测、数据清理脚本的设计详见 `.kiro/specs/sector-data-import/design.md`（需求 18-19）。
+
+### 组件交互关系（更新）
+
+| 组件 | 职责 | 依赖 |
+|------|------|------|
+| `SectorRepository.get_sector_ranking` | 双查询合并，返回排行数据 | AsyncSessionTS, AsyncSessionPG |
+| `SectorRepository.browse_sector_info` | 分页查询板块信息 | AsyncSessionPG |
+| `SectorRepository.browse_sector_constituent` | 分页查询板块成分 | AsyncSessionPG |
+| `SectorRepository.browse_sector_kline` | 分页查询板块行情 | AsyncSessionTS |
+| `GET /sector/ranking` | 排行查询（已有） | SectorRepository |
+| `GET /sector/info/browse` | 板块信息分页浏览（新增） | SectorRepository |
+| `GET /sector/constituent/browse` | 板块成分分页浏览（新增） | SectorRepository |
+| `GET /sector/kline/browse` | 板块行情分页浏览（新增） | SectorRepository |
+| `SectorStore` | 排行 + 浏览面板全部状态管理 | apiClient |
+| `DashboardView` | 双面板布局容器 | SectorStore, SectorBrowserPanel |
+| `SectorBrowserPanel` | 3 标签页浏览面板 | SectorStore |
+
+> **注意**：数据修复相关组件（TDXParsingEngine 修复、DCParsingEngine 修复、cleanup_sector_data.py 清理脚本）已移至 sector-data-import spec（需求 18-19）。
+
 ## Data Models
 
 ### 新增数据类：SectorRankingItem
@@ -527,7 +974,107 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 
 - `SectorInfo`（PGBase, PostgreSQL）：板块元数据，提供 name 和 sector_type
 - `SectorKline`（TSBase, TimescaleDB）：板块行情，提供 change_pct、close、volume、amount、turnover
+- `SectorConstituent`（PGBase, PostgreSQL）：板块成分股快照
 - `DataSource` / `SectorType` 枚举：复用现有定义
+
+### 新增数据类（需求 10，新增）
+
+```python
+@dataclass
+class PaginatedResult:
+    """通用分页查询结果"""
+    total: int       # 总记录数
+    items: list      # 当前页数据列表
+```
+
+### 新增 Pydantic 模型（需求 10，新增）
+
+```python
+class SectorInfoBrowseItem(BaseModel):
+    """板块信息浏览响应项"""
+    sector_code: str
+    name: str
+    sector_type: str
+    data_source: str
+    list_date: str | None = None
+    constituent_count: int | None = None
+
+class ConstituentBrowseItem(BaseModel):
+    """板块成分浏览响应项"""
+    trade_date: str
+    sector_code: str
+    data_source: str
+    symbol: str
+    stock_name: str | None = None
+
+class KlineBrowseItem(BaseModel):
+    """板块行情浏览响应项"""
+    time: str
+    sector_code: str
+    data_source: str
+    freq: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    amount: float | None = None
+    change_pct: float | None = None
+```
+
+### 新增前端 TypeScript 接口（需求 11-14，新增）
+
+```typescript
+export type BrowserTab = 'info' | 'constituent' | 'kline'
+
+export interface SectorInfoBrowseItem {
+  sector_code: string
+  name: string
+  sector_type: string
+  data_source: string
+  list_date: string | null
+  constituent_count: number | null
+}
+
+export interface ConstituentBrowseItem {
+  trade_date: string
+  sector_code: string
+  data_source: string
+  symbol: string
+  stock_name: string | null
+}
+
+export interface KlineBrowseItem {
+  time: string
+  sector_code: string
+  data_source: string
+  freq: string
+  open: number | null
+  high: number | null
+  low: number | null
+  close: number | null
+  volume: number | null
+  amount: number | null
+  change_pct: number | null
+}
+
+export interface BrowseTabState<T> {
+  items: T[]
+  total: number
+  page: number
+  pageSize: number
+  loading: boolean
+  error: string
+  filters: Record<string, string>
+}
+
+export interface BrowseResponse<T> {
+  total: number
+  page: number
+  page_size: number
+  items: T[]
+}
+```
 
 
 ## Correctness Properties
@@ -570,6 +1117,32 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 
 **Validates: Requirements 8.1, 8.5, 8.6**
 
+### Property 7: Browse pagination response structure invariant
+
+*For any* valid combination of query parameters (data_source, sector_type, keyword, page, page_size) sent to any of the three browse endpoints (`/sector/info/browse`, `/sector/constituent/browse`, `/sector/kline/browse`), the response SHALL contain `total` (integer >= 0), `page` (integer >= 1), `page_size` (integer >= 1), and `items` (array with length <= page_size). The `total` SHALL be consistent across pages for the same filter conditions.
+
+**Validates: Requirements 10.1, 10.2, 10.3, 10.4**
+
+### Property 8: Browse endpoint invalid parameter rejection
+
+*For any* string that is not a valid DataSource value (not in {DC, TI, TDX}), the browse endpoints SHALL return HTTP 422. *For any* string that is not a valid SectorType value (not in {CONCEPT, INDUSTRY, REGION, STYLE}), the `/sector/info/browse` endpoint SHALL return HTTP 422. *For any* invalid date format string, the endpoints accepting date parameters SHALL return HTTP 422.
+
+**Validates: Requirements 10.5**
+
+### Property 9: Keyword search filtering correctness
+
+*For any* keyword string and any set of sector_info records, when `/sector/info/browse` is called with that keyword, all returned items SHALL have either `sector_code` or `name` containing the keyword (case-insensitive). Similarly, for `/sector/constituent/browse`, all returned items SHALL have either `symbol` or `stock_name` containing the keyword.
+
+**Validates: Requirements 10.7**
+
+### Property 10: Browser tab state isolation
+
+*For any* sequence of tab switches and data fetches in the SectorStore browser panel, modifying one tab's filters, pagination, or data SHALL NOT affect any other tab's state. Specifically, after switching from tab A to tab B and back to tab A, tab A's items, total, page, filters, loading, and error SHALL remain unchanged from before the switch.
+
+**Validates: Requirements 14.2, 14.3**
+
+> **注意**：Property 11（TDX sector_code suffix invariant）和 Property 12（DC simple format BK validation）已移至 sector-data-import spec 设计文档。
+
 ## Error Handling
 
 ### 后端错误处理
@@ -578,8 +1151,11 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 |---------|---------|------------|
 | 无效的 `sector_type` 参数 | 返回描述性错误信息 | 422 |
 | 无效的 `data_source` 参数 | 返回描述性错误信息 | 422 |
+| 无效的日期格式参数 | 返回描述性错误信息 | 422 |
+| `page_size` 超出范围（<1 或 >200） | FastAPI 自动校验返回错误 | 422 |
 | SectorKline 表无数据（最新交易日为空） | 返回空列表 | 200 |
 | SectorInfo 表中无匹配的板块信息 | 跳过该板块，不包含在结果中 | 200 |
+| 浏览端点查询结果为空 | 返回 `{total: 0, page: 1, page_size: 50, items: []}` | 200 |
 | TimescaleDB 连接失败 | 抛出 500 Internal Server Error | 500 |
 | PostgreSQL 连接失败 | 抛出 500 Internal Server Error | 500 |
 
@@ -593,11 +1169,15 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 | 数据字段为 null | 显示"--"占位符 |
 | 板块K线数据加载失败 | 在展开面板中显示错误提示和"重试"按钮 |
 | 板块K线数据为空 | 展开面板显示空图表 |
+| 浏览面板数据加载失败 | 对应标签页显示错误提示和"重试"按钮，保留上次数据 |
+| 浏览面板分页越界 | 前端禁用上一页/下一页按钮，后端返回空 items |
 
 ### 降级策略
 
 - 板块排行模块的加载失败不影响 Dashboard 其他模块（大盘指数、K线图等）的正常展示
 - 标签页切换失败时保留当前已展示的数据，不清空表格
+- 浏览面板加载失败不影响左侧排行面板的正常展示
+- 各浏览标签页之间互不影响，一个标签页加载失败不影响其他标签页
 
 ## Testing Strategy
 
@@ -612,7 +1192,7 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 
 #### 后端属性测试
 
-**测试文件**：`tests/properties/test_sector_ranking_properties.py`
+**测试文件**：`tests/properties/test_sector_ranking_properties.py`（已有，扩展）
 
 使用 Hypothesis 库实现，每个属性测试对应设计文档中的一个 Correctness Property。
 
@@ -628,19 +1208,28 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 | P3: Sector type filtering correctness | 生成混合类型的板块数据，验证过滤结果 | 自定义 strategy 生成多类型板块 |
 | P4: Invalid parameter rejection | 生成随机非枚举字符串，验证 422 响应 | `st.text().filter(lambda s: s not in valid_values)` |
 
+**新增测试文件**：`tests/properties/test_sector_browse_properties.py`
+
+| Property | 测试内容 | 生成器策略 |
+|----------|---------|-----------|
+| P7: Browse pagination response structure | 生成随机分页参数，验证响应结构不变量 | `st.integers(1, 100)` for page, `st.integers(1, 200)` for page_size |
+| P8: Browse invalid parameter rejection | 生成随机非枚举字符串，验证 422 响应 | `st.text().filter(lambda s: s not in valid_values)` |
+| P9: Keyword search filtering | 生成随机 keyword 和板块数据，验证返回结果包含 keyword | 自定义 strategy 生成板块数据 + 随机 keyword |
+
 #### 前端属性测试
 
-**测试文件**：`frontend/src/stores/__tests__/sector.property.test.ts`
+**测试文件**：`frontend/src/stores/__tests__/sector.property.test.ts`（已有，扩展）
 
 使用 fast-check 库实现。
 
 | Property | 测试内容 | 生成器策略 |
 |----------|---------|-----------|
 | P5: Ranking item display formatting | 生成随机 SectorRankingItem，验证格式化输出 | `fc.record({ change_pct: fc.oneof(fc.constant(null), fc.float()), ... })` |
+| P10: Browser tab state isolation | 生成随机标签页切换序列和状态变更，验证标签页状态互不影响 | `fc.array(fc.constantFrom('info', 'constituent', 'kline'))` |
 
 ### 单元测试
 
-#### 后端单元测试
+#### 后端单元测试（已有）
 
 **测试文件**：`tests/services/test_sector_ranking.py`
 
@@ -662,7 +1251,32 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 | 无效参数 422 | 验证无效枚举值返回 422 |
 | 空数据 200 | 验证无数据时返回空列表 |
 
-#### 前端单元测试
+#### 后端单元测试（新增）
+
+**测试文件**：`tests/services/test_sector_browse.py`
+
+| 测试范围 | 测试内容 |
+|---------|---------|
+| browse_sector_info 基本功能 | 正常分页查询 |
+| browse_sector_info 筛选 | data_source + sector_type + keyword 组合筛选 |
+| browse_sector_info 空结果 | 无匹配数据返回 total=0 |
+| browse_sector_constituent 基本功能 | 正常分页查询 |
+| browse_sector_constituent 默认交易日 | 未指定 trade_date 使用最新 |
+| browse_sector_kline 基本功能 | 正常分页查询 |
+| browse_sector_kline 日期范围 | start/end 日期过滤 |
+
+**测试文件**：`tests/api/test_sector_browse_api.py`
+
+| 测试范围 | 测试内容 |
+|---------|---------|
+| GET /sector/info/browse 正常响应 | 验证分页响应格式 |
+| GET /sector/constituent/browse 正常响应 | 验证分页响应格式 |
+| GET /sector/kline/browse 正常响应 | 验证分页响应格式 |
+| 无效参数 422 | 验证各端点无效参数返回 422 |
+| page_size 边界 | 验证 page_size=1 和 page_size=200 |
+| keyword 模糊搜索 | 验证搜索结果包含关键词 |
+
+#### 前端单元测试（已有）
 
 **测试文件**：`frontend/src/stores/__tests__/sector.test.ts`
 
@@ -686,3 +1300,40 @@ type SectorTypeFilter = '' | 'CONCEPT' | 'INDUSTRY' | 'REGION' | 'STYLE'
 | 空数据 | 验证"暂无数据"提示 |
 | ARIA 属性 | 验证 role="tab"、aria-selected、aria-label |
 | 旧代码移除 | 验证 loadSectors 和 SectorData 不再存在 |
+
+#### 前端单元测试（新增）
+
+**测试文件**：`frontend/src/stores/__tests__/sectorBrowse.test.ts`
+
+| 测试范围 | 测试内容 |
+|---------|---------|
+| browserActiveTab 初始状态 | 验证默认为 'info' |
+| setBrowserTab | 验证标签页切换 |
+| fetchSectorInfoBrowse 成功 | 验证数据和分页状态更新 |
+| fetchSectorInfoBrowse 失败 | 验证错误状态和数据保留 |
+| fetchConstituentBrowse 成功 | 验证数据和分页状态更新 |
+| fetchKlineBrowse 成功 | 验证数据和分页状态更新 |
+| 标签页状态隔离 | 验证修改一个标签页不影响其他标签页 |
+| 筛选条件变更重置页码 | 验证修改筛选条件后 page 重置为 1 |
+
+**测试文件**：`frontend/src/components/__tests__/SectorBrowserPanel.test.ts`
+
+| 测试范围 | 测试内容 |
+|---------|---------|
+| 3 个标签页渲染 | 验证"板块数据"、"板块成分"、"板块行情"按钮存在 |
+| 默认选中"板块数据" | 验证初始 active 标签页 |
+| 标签页 ARIA 属性 | 验证 role="tab"、aria-selected |
+| 板块数据表格列 | 验证 6 列表头 |
+| 板块成分表格列 | 验证 5 列表头 |
+| 板块行情表格列 | 验证 9 列表头 |
+| 分页控件 | 验证上一页/下一页按钮和页码信息 |
+| 加载状态 | 验证加载提示 |
+| 空数据 | 验证"暂无数据"提示 |
+| 涨跌幅颜色 | 验证行情标签页 change_pct 红涨绿跌 |
+
+**测试文件**：`frontend/src/views/__tests__/DashboardDualPanel.test.ts`
+
+| 测试范围 | 测试内容 |
+|---------|---------|
+| 双面板布局 | 验证 .sector-panel-left 和 .sector-panel-right 存在 |
+| SectorBrowserPanel 渲染 | 验证右侧面板包含 SectorBrowserPanel 组件 |

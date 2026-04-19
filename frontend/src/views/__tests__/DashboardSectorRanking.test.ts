@@ -83,10 +83,41 @@ const mockSetSectorType = vi.fn()
 const mockStoreState = reactive({
   rankings: [] as SectorRankingItem[],
   currentType: '' as SectorTypeFilter,
+  currentDataSource: '' as string,
   loading: false,
   error: '',
   fetchRanking: mockFetchRanking,
   setSectorType: mockSetSectorType,
+  setDataSource: vi.fn(),
+  expandedSectorCode: null as string | null,
+  expandedKlineData: [] as any[],
+  expandedKlineLoading: false,
+  expandedKlineError: '',
+  toggleSectorKline: vi.fn(),
+  // Browse panel state needed by SectorBrowserPanel
+  browserActiveTab: 'info' as string,
+  setBrowserTab: vi.fn(),
+  infoBrowse: {
+    items: [], total: 0, page: 1, pageSize: 50,
+    loading: false, error: '',
+    filters: { data_source: 'DC', sector_type: '', keyword: '' },
+  },
+  constituentBrowse: {
+    items: [], total: 0, page: 1, pageSize: 50,
+    loading: false, error: '',
+    filters: { data_source: 'DC', sector_code: '', trade_date: '', keyword: '' },
+  },
+  klineBrowse: {
+    items: [], total: 0, page: 1, pageSize: 50,
+    loading: false, error: '',
+    filters: { data_source: 'DC', sector_code: '', freq: '1d', start: '', end: '' },
+  },
+  updateInfoFilters: vi.fn(),
+  updateConstituentFilters: vi.fn(),
+  updateKlineFilters: vi.fn(),
+  fetchSectorInfoBrowse: vi.fn(),
+  fetchConstituentBrowse: vi.fn(),
+  fetchKlineBrowse: vi.fn(),
 })
 
 vi.mock('@/stores/sector', () => ({

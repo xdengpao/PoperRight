@@ -4,17 +4,24 @@
 
 首页大盘概况中的"板块涨幅排行"模块当前通过外部 AkShare API（`/data/market/sectors`）获取板块数据，展示为一个简单的表格，无分类筛选和排序控制。本功能将该模块替换为基于本地数据库（sector-data-import 已导入的板块数据）的分类展示与强弱排序，使量化交易员能够按板块类型（行业、概念、地区、风格）切换查看，并按涨跌幅从强到弱排列板块，快速识别当日强势板块。
 
+此外，在板块排行表格的右侧新增数据浏览面板，通过标签页切换展示板块数据（sector_info）、板块成分（sector_constituent）和板块行情（sector_kline）三类原始数据，支持按数据源切换和条件查询，方便量化交易员直接浏览和检索已导入的板块底层数据。
+
 ## 术语表
 
 - **Dashboard（首页大盘概况）**：系统首页视图 DashboardView.vue，展示大盘指数、市场情绪、K线图和板块涨幅排行等模块
 - **Sector_Ranking_Module（板块涨幅排行模块）**：Dashboard 中展示板块涨跌幅排行的区域，本功能的改造目标
+- **Sector_Browser_Panel（板块数据浏览面板）**：位于板块排行表格右侧的数据浏览区域，包含板块数据、板块成分、板块行情三个标签页
 - **SectorInfo（板块信息）**：存储于 PostgreSQL 的板块元数据，包含 sector_code、name、sector_type、data_source 等字段
+- **SectorConstituent（板块成分股）**：存储于 PostgreSQL 的板块成分股快照数据，包含 trade_date、sector_code、data_source、symbol、stock_name 字段
 - **SectorKline（板块行情）**：存储于 TimescaleDB 的板块指数 OHLCV 行情数据，包含 change_pct（涨跌幅）字段
 - **SectorType（板块类型）**：板块分类枚举，取值为 CONCEPT（概念板块）、INDUSTRY（行业板块）、REGION（地区板块）、STYLE（风格板块）
 - **DataSource（数据来源）**：板块数据提供方枚举，取值为 DC（东方财富）、TI（同花顺）、TDX（通达信）
 - **Sector_Ranking_API（板块排行接口）**：后端提供的聚合查询接口，返回指定板块类型下各板块的最新涨跌幅数据并按强弱排序
 - **SectorStore（板块状态管理）**：前端 Pinia store，负责管理板块排行数据的获取、缓存和状态
 - **Latest_Trade_Date（最新交易日）**：数据库中已有行情数据的最近一个交易日期
+- **Sector_Info_Tab（板块数据标签页）**：Sector_Browser_Panel 中展示 sector_info 记录的标签页
+- **Sector_Constituent_Tab（板块成分标签页）**：Sector_Browser_Panel 中展示 sector_constituent 记录的标签页
+- **Sector_Kline_Tab（板块行情标签页）**：Sector_Browser_Panel 中展示 sector_kline 记录的标签页
 
 ## 需求
 
@@ -126,3 +133,93 @@
 7. THE SectorStore SHALL 管理当前展开的板块代码状态（expandedSectorCode），以及展开板块的K线数据、加载状态和错误状态
 8. IF K线数据加载失败，THEN THE Sector_Ranking_Module SHALL 在展开面板中显示错误提示和"重试"按钮
 9. THE Sector_Ranking_Module SHALL 将板块名称单元格渲染为可点击样式（cursor: pointer、hover 下划线），提示用户可以交互
+
+---
+
+### 需求 9：板块区域双面板布局
+
+**用户故事：** 作为量化交易员，我需要在板块涨幅排行表格的右侧同时展示板块数据浏览面板，以便在查看排行的同时检索板块底层数据，提高数据分析效率。
+
+#### 验收标准
+
+1. THE Sector_Ranking_Module SHALL 将板块区域从单列布局改为左右双面板布局：左侧为现有的板块涨幅排行表格，右侧为 Sector_Browser_Panel
+2. THE Sector_Ranking_Module SHALL 将左侧排行面板宽度设置为约 50%，右侧浏览面板宽度设置为约 50%，两面板之间保留 16px 间距
+3. WHILE 浏览器窗口宽度小于 900px 时，THE Sector_Ranking_Module SHALL 将双面板布局切换为上下堆叠布局，排行表格在上、浏览面板在下
+4. THE Sector_Browser_Panel SHALL 在顶部展示三个标签页按钮："板块数据"、"板块成分"、"板块行情"
+5. WHEN 页面首次加载时，THE Sector_Browser_Panel SHALL 默认选中"板块数据"标签页
+6. THE Sector_Browser_Panel SHALL 为每个标签页按钮设置 `role="tab"` 和 `aria-selected` 属性，确保无障碍访问
+
+### 需求 10：板块数据浏览面板后端分页查询接口
+
+**用户故事：** 作为量化交易员，我需要后端提供分页查询接口，以便前端能够高效浏览数量庞大的板块数据（sector_info 近万条、sector_constituent 数千万条、sector_kline 数百万条）。
+
+#### 验收标准
+
+1. THE Sector_Ranking_API SHALL 提供 GET `/sector/info/browse` 端点，接受可选的 `data_source`（DC/TI/TDX）、`sector_type`（CONCEPT/INDUSTRY/REGION/STYLE）、`keyword`（板块名称或代码模糊搜索）、`page`（页码，默认 1）和 `page_size`（每页条数，默认 50，最大 200）查询参数
+2. THE Sector_Ranking_API SHALL 提供 GET `/sector/constituent/browse` 端点，接受必填的 `data_source`（DC/TI/TDX）、可选的 `sector_code`（板块代码精确匹配）、`trade_date`（交易日期 YYYY-MM-DD，默认最新）、`keyword`（股票代码或名称模糊搜索）、`page`（默认 1）和 `page_size`（默认 50，最大 200）查询参数
+3. THE Sector_Ranking_API SHALL 提供 GET `/sector/kline/browse` 端点，接受必填的 `data_source`（DC/TI/TDX）、可选的 `sector_code`（板块代码精确匹配）、`freq`（K线频率，默认 1d）、`start`（开始日期 YYYY-MM-DD）、`end`（结束日期 YYYY-MM-DD）、`page`（默认 1）和 `page_size`（默认 50，最大 200）查询参数
+4. THE Sector_Ranking_API SHALL 在每个浏览端点的响应中包含 `total`（总记录数）、`page`（当前页码）、`page_size`（每页条数）和 `items`（数据列表）字段
+5. WHEN 传入无效的 `data_source`、`sector_type` 或日期格式参数时，THE Sector_Ranking_API SHALL 返回 HTTP 422 状态码和描述性错误信息
+6. IF 查询结果为空，THEN THE Sector_Ranking_API SHALL 返回 `total=0` 和空的 `items` 列表，HTTP 200 状态码
+7. THE Sector_Ranking_API SHALL 对 `keyword` 参数执行模糊匹配（LIKE '%keyword%'），匹配板块名称或板块代码（info 端点）、股票代码或股票名称（constituent 端点）
+
+### 需求 11：板块数据标签页（板块数据）
+
+**用户故事：** 作为量化交易员，我需要在板块数据标签页中浏览 sector_info 表的记录，支持按数据源和板块类型筛选以及关键词搜索，以便快速查找特定板块的元数据信息。
+
+#### 验收标准
+
+1. THE Sector_Info_Tab SHALL 在标签页顶部展示数据源选择器（东方财富/同花顺/通达信），默认选中"东方财富"（DC）
+2. THE Sector_Info_Tab SHALL 在数据源选择器旁展示板块类型筛选下拉框（全部/行业/概念/地区/风格），默认选中"全部"
+3. THE Sector_Info_Tab SHALL 提供搜索输入框，支持按板块名称或板块代码进行模糊搜索
+4. WHEN 用户修改数据源、板块类型或搜索关键词时，THE Sector_Info_Tab SHALL 重置到第 1 页并重新请求数据
+5. THE Sector_Info_Tab SHALL 以表格形式展示查询结果，包含以下列：板块代码（sector_code）、板块名称（name）、板块类型（sector_type）、数据来源（data_source）、上市日期（list_date）、成分股数量（constituent_count）
+6. THE Sector_Info_Tab SHALL 在表格下方展示分页控件，包含上一页/下一页按钮和当前页码/总页数信息
+7. WHILE 数据正在加载时，THE Sector_Info_Tab SHALL 展示加载状态提示
+8. WHEN 查询结果为空时，THE Sector_Info_Tab SHALL 显示"暂无数据"提示
+
+### 需求 12：板块成分标签页（板块成分）
+
+**用户故事：** 作为量化交易员，我需要在板块成分标签页中浏览 sector_constituent 表的记录，支持按板块代码和交易日期查询，以便了解特定板块在特定日期的成分股构成。
+
+#### 验收标准
+
+1. THE Sector_Constituent_Tab SHALL 在标签页顶部展示数据源选择器（东方财富/同花顺/通达信），默认选中"东方财富"（DC）
+2. THE Sector_Constituent_Tab SHALL 提供板块代码输入框，支持按板块代码精确查询
+3. THE Sector_Constituent_Tab SHALL 提供交易日期选择器（date input），默认使用最新交易日
+4. THE Sector_Constituent_Tab SHALL 提供搜索输入框，支持按股票代码或股票名称进行模糊搜索
+5. WHEN 用户修改数据源、板块代码、交易日期或搜索关键词时，THE Sector_Constituent_Tab SHALL 重置到第 1 页并重新请求数据
+6. THE Sector_Constituent_Tab SHALL 以表格形式展示查询结果，包含以下列：交易日期（trade_date）、板块代码（sector_code）、数据来源（data_source）、股票代码（symbol）、股票名称（stock_name）
+7. THE Sector_Constituent_Tab SHALL 在表格下方展示分页控件，包含上一页/下一页按钮和当前页码/总页数信息
+8. WHILE 数据正在加载时，THE Sector_Constituent_Tab SHALL 展示加载状态提示
+9. WHEN 查询结果为空时，THE Sector_Constituent_Tab SHALL 显示"暂无数据"提示
+
+### 需求 13：板块行情标签页（板块行情）
+
+**用户故事：** 作为量化交易员，我需要在板块行情标签页中浏览 sector_kline 表的记录，支持按板块代码、日期范围和K线频率查询，以便分析特定板块的历史行情走势数据。
+
+#### 验收标准
+
+1. THE Sector_Kline_Tab SHALL 在标签页顶部展示数据源选择器（东方财富/同花顺/通达信），默认选中"东方财富"（DC）
+2. THE Sector_Kline_Tab SHALL 提供板块代码输入框，支持按板块代码精确查询
+3. THE Sector_Kline_Tab SHALL 提供K线频率选择器（日K/周K/月K），默认选中"日K"（1d）
+4. THE Sector_Kline_Tab SHALL 提供开始日期和结束日期选择器（date input），用于指定查询的时间范围
+5. WHEN 用户修改数据源、板块代码、频率或日期范围时，THE Sector_Kline_Tab SHALL 重置到第 1 页并重新请求数据
+6. THE Sector_Kline_Tab SHALL 以表格形式展示查询结果，包含以下列：时间（time）、板块代码（sector_code）、开盘价（open）、最高价（high）、最低价（low）、收盘价（close）、成交量（volume）、成交额（amount）、涨跌幅（change_pct）
+7. THE Sector_Kline_Tab SHALL 将涨跌幅为正值的单元格显示为红色（class="up"），负值显示为绿色（class="down"）
+8. THE Sector_Kline_Tab SHALL 在表格下方展示分页控件，包含上一页/下一页按钮和当前页码/总页数信息
+9. WHILE 数据正在加载时，THE Sector_Kline_Tab SHALL 展示加载状态提示
+10. WHEN 查询结果为空时，THE Sector_Kline_Tab SHALL 显示"暂无数据"提示
+
+### 需求 14：板块数据浏览面板状态管理
+
+**用户故事：** 作为量化交易员，我需要前端对板块数据浏览面板的查询条件、分页状态和数据进行集中管理，以便在标签页切换和条件变更时保持良好的用户体验。
+
+#### 验收标准
+
+1. THE SectorStore SHALL 管理 Sector_Browser_Panel 的当前活动标签页状态（browserActiveTab），取值为 'info'、'constituent'、'kline'
+2. THE SectorStore SHALL 为每个浏览标签页分别管理独立的查询条件状态（数据源、搜索关键词、板块代码、日期等）、分页状态（当前页码、每页条数、总记录数）、数据列表、加载状态和错误信息
+3. WHEN 用户切换浏览标签页时，THE SectorStore SHALL 保留每个标签页的查询条件和数据状态，切换回来时恢复上次的查询结果
+4. THE SectorStore SHALL 提供各标签页的数据获取方法（fetchSectorInfoBrowse、fetchConstituentBrowse、fetchKlineBrowse），调用对应的后端分页查询接口
+5. WHEN 数据获取请求失败时，THE SectorStore SHALL 将错误信息存储到对应标签页的 error 状态，并保留上一次成功获取的数据
+6. IF 网络请求失败，THEN THE Sector_Browser_Panel SHALL 在对应标签页中展示错误提示信息和"重试"按钮

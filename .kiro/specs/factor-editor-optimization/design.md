@@ -577,6 +577,201 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
 | `SectorInfo` | PostgreSQL | 板块元数据，用于获取板块名称和类型 |
 | `StockInfo` | PostgreSQL | 股票基本面数据（PE/PB/ROE/市值） |
 
+### 9. SectorStrengthFilter change_pct 缺失 fallback（需求 15）
+
+#### 背景
+
+`SectorStrengthFilter._aggregate_change_pct()` 当前通过累加 `SectorKline.change_pct` 计算板块累计涨跌幅。但 TDX 数据源的 change_pct 字段 91.5%-100% 为 NULL，导致所有板块累计涨跌幅为 0.0，排名失去意义。
+
+#### 设计方案
+
+修改 `_aggregate_change_pct()` 静态方法，增加收盘价 fallback 逻辑：
+
+```python
+# 修改: app/services/screener/sector_strength.py
+
+@staticmethod
+def _aggregate_change_pct(
+    kline_data: dict[str, list[SectorKline]],
+) -> dict[str, float]:
+    """
+    计算每个板块的累计涨跌幅。
+
+    优先使用 change_pct 字段累加。当某板块所有 K 线的 change_pct 均为 NULL 时，
+    使用收盘价序列 fallback：(最新收盘价 - 最早收盘价) / 最早收盘价 × 100。
+
+    对应需求：
+    - 需求 15.1：change_pct 全 NULL 时使用收盘价 fallback
+    - 需求 15.2：有效收盘价 < 2 时设为 0.0
+    - 需求 15.3：优先使用 change_pct（有效记录 > 0 时）
+    - 需求 15.4：返回 float 类型
+    """
+    result: dict[str, float] = {}
+    for code, klines in kline_data.items():
+        # 收集有效的 change_pct 值
+        valid_pcts = [
+            float(k.change_pct)
+            for k in klines
+            if k.change_pct is not None
+        ]
+
+        if valid_pcts:
+            # 优先路径：有有效 change_pct，直接累加
+            result[code] = sum(valid_pcts)
+        else:
+            # Fallback 路径：所有 change_pct 为 NULL，使用收盘价计算
+            valid_closes = [
+                float(k.close)
+                for k in klines
+                if k.close is not None
+            ]
+            if len(valid_closes) >= 2:
+                earliest = valid_closes[0]   # klines 按时间升序
+                latest = valid_closes[-1]
+                if earliest != 0.0:
+                    result[code] = (latest - earliest) / earliest * 100
+                else:
+                    result[code] = 0.0
+            else:
+                result[code] = 0.0
+
+    return result
+```
+
+#### 关键设计决策
+
+1. **优先级**：当有效 change_pct 记录数 > 0 时使用 change_pct 累加，仅在全部为 NULL 时才 fallback。这确保 DC/TI 等数据源行为不变。
+2. **收盘价顺序**：klines 列表已按时间升序排列（由 `_load_sector_klines` 保证），因此 `valid_closes[0]` 为最早收盘价，`valid_closes[-1]` 为最新收盘价。
+3. **除零保护**：当最早收盘价为 0.0 时，设涨跌幅为 0.0。
+4. **最少数据要求**：有效收盘价少于 2 个时无法计算涨跌幅，设为 0.0。
+5. **返回类型一致**：两条路径均返回 `float`，后续排名逻辑无需修改。
+
+### 10. 板块数据源覆盖率 API 与前端提示（需求 16）
+
+#### 后端：GET /api/v1/sector/coverage 端点
+
+在 `app/api/v1/sector.py` 中新增端点，查询每个数据源的板块数量和成分股覆盖统计。
+
+```python
+# 新增: app/api/v1/sector.py
+
+class CoverageSourceStats(BaseModel):
+    """单个数据源的覆盖率统计"""
+    data_source: str                    # "DC" / "TI" / "TDX"
+    total_sectors: int                  # 该数据源的板块总数
+    sectors_with_constituents: int      # 有成分股数据的板块数
+    total_stocks: int                   # 成分股覆盖的不同股票数
+    coverage_ratio: float               # sectors_with_constituents / total_sectors
+
+class CoverageResponse(BaseModel):
+    """覆盖率响应"""
+    sources: list[CoverageSourceStats]
+
+@router.get("/sector/coverage", response_model=CoverageResponse)
+async def get_sector_coverage(
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> CoverageResponse:
+    """
+    返回每个数据源的板块数量和成分股覆盖数量统计。
+
+    对应需求 16.2。
+    """
+    sources = []
+    for ds in ["DC", "TI", "TDX"]:
+        # 查询该数据源的板块总数
+        total_stmt = (
+            select(func.count())
+            .select_from(SectorInfo)
+            .where(SectorInfo.data_source == ds)
+        )
+        total_sectors = (await pg_session.execute(total_stmt)).scalar() or 0
+
+        # 查询有成分股数据的板块数（最新交易日）
+        latest_date_stmt = (
+            select(func.max(SectorConstituent.trade_date))
+            .where(SectorConstituent.data_source == ds)
+        )
+        latest_date = (await pg_session.execute(latest_date_stmt)).scalar()
+
+        if latest_date:
+            sectors_with_stmt = (
+                select(func.count(func.distinct(SectorConstituent.sector_code)))
+                .where(
+                    SectorConstituent.data_source == ds,
+                    SectorConstituent.trade_date == latest_date,
+                )
+            )
+            sectors_with = (await pg_session.execute(sectors_with_stmt)).scalar() or 0
+
+            stocks_stmt = (
+                select(func.count(func.distinct(SectorConstituent.symbol)))
+                .where(
+                    SectorConstituent.data_source == ds,
+                    SectorConstituent.trade_date == latest_date,
+                )
+            )
+            total_stocks = (await pg_session.execute(stocks_stmt)).scalar() or 0
+        else:
+            sectors_with = 0
+            total_stocks = 0
+
+        coverage_ratio = (
+            sectors_with / total_sectors if total_sectors > 0 else 0.0
+        )
+
+        sources.append(CoverageSourceStats(
+            data_source=ds,
+            total_sectors=total_sectors,
+            sectors_with_constituents=sectors_with,
+            total_stocks=total_stocks,
+            coverage_ratio=round(coverage_ratio, 4),
+        ))
+
+    return CoverageResponse(sources=sources)
+```
+
+#### 前端：数据源选择器覆盖率提示
+
+修改 `frontend/src/stores/screener.ts` 和 `frontend/src/views/ScreenerView.vue`：
+
+**screener.ts 新增**：
+
+```typescript
+// 新增接口
+export interface CoverageSourceStats {
+  data_source: string
+  total_sectors: number
+  sectors_with_constituents: number
+  total_stocks: number
+  coverage_ratio: number
+}
+
+// store 中新增
+const sectorCoverage = ref<CoverageSourceStats[]>([])
+
+async function fetchSectorCoverage() {
+  const res = await apiClient.get<{ sources: CoverageSourceStats[] }>(
+    '/sector/coverage'
+  )
+  sectorCoverage.value = res.data.sources
+}
+```
+
+**ScreenerView.vue 修改**：
+
+1. 数据源下拉选择器中，每个选项显示覆盖率摘要：
+   - `东方财富 DC（1030 板块 / 5882 股票）`
+   - `通达信 TDX（615 板块 / 7122 股票）`
+   - `同花顺 TI（90 板块 / 5755 股票）⚠️`
+
+2. 当用户选择 coverage_ratio < 0.5 的数据源时，显示警告：
+   ```
+   ⚠️ 该数据源成分股数据不完整（仅 90/1724 板块有成分股数据），
+   可能影响板块筛选效果，建议使用东方财富（DC）或通达信（TDX）
+   ```
+
+3. 组件挂载时调用 `fetchSectorCoverage()` 获取最新覆盖率数据。
+
 
 
 ## 正确性属性
@@ -647,6 +842,16 @@ and the evaluation result SHALL be consistent with the comparison operator appli
 
 **Validates: Requirements 14.5, 14.8**
 
+### Property 10: change_pct fallback 正确性
+
+*For any* sector kline dataset where each sector has a list of kline records (each with optional change_pct and optional close price):
+1. If a sector has at least one non-NULL change_pct, the aggregated result SHALL equal the sum of all non-NULL change_pct values (fallback NOT used)
+2. If a sector has ALL change_pct as NULL and at least 2 valid close prices, the aggregated result SHALL equal `(latest_close - earliest_close) / earliest_close × 100`
+3. If a sector has ALL change_pct as NULL and fewer than 2 valid close prices, the aggregated result SHALL be 0.0
+4. The return type SHALL always be float
+
+**Validates: Requirements 15.1, 15.2, 15.3, 15.4**
+
 ## 错误处理
 
 ### 板块数据不可用
@@ -688,13 +893,30 @@ and the evaluation result SHALL be consistent with the comparison operator appli
 | GET /factor-registry 的 category 参数无效 | 返回空列表（不报错，宽容处理） |
 | GET /strategy-examples 无数据 | 返回空列表 |
 
+### change_pct fallback（需求 15）
+
+| 场景 | 处理方式 |
+|------|----------|
+| 板块所有 change_pct 为 NULL，有 ≥2 个有效收盘价 | 使用收盘价 fallback 计算涨跌幅 |
+| 板块所有 change_pct 为 NULL，有效收盘价 < 2 | 涨跌幅设为 0.0 |
+| 板块所有 change_pct 为 NULL，最早收盘价为 0.0 | 涨跌幅设为 0.0（除零保护） |
+| 板块有部分 change_pct 非 NULL | 使用 change_pct 累加（不触发 fallback） |
+
+### 板块覆盖率 API（需求 16）
+
+| 场景 | 处理方式 |
+|------|----------|
+| 某数据源无 SectorInfo 记录 | total_sectors = 0，coverage_ratio = 0.0 |
+| 某数据源无 SectorConstituent 记录 | sectors_with_constituents = 0，total_stocks = 0 |
+| 数据库查询异常 | 捕获异常，记录 ERROR 日志，返回空 sources 列表 |
+
 ## 测试策略
 
 ### 双重测试方法
 
 本功能采用单元测试 + 属性测试的双重测试策略：
 
-- **属性测试（Property-Based Testing）**：使用 Hypothesis 库验证上述 9 个正确性属性，每个属性至少运行 100 次迭代
+- **属性测试（Property-Based Testing）**：使用 Hypothesis 库验证上述 10 个正确性属性，每个属性至少运行 100 次迭代
 - **单元测试（Example-Based Testing）**：验证具体的因子元数据定义、API 响应格式、边界条件和错误处理
 
 ### 后端属性测试（Hypothesis）
@@ -712,6 +934,7 @@ and the evaluation result SHALL be consistent with the comparison operator appli
 | Property 7 | StrategyConfig 往返 | 自定义 StrategyConfig 生成器 |
 | Property 8 | 向后兼容默认值 | `st.dictionaries()` 生成旧格式配置 |
 | Property 9 | 策略示例一致性 | 遍历 STRATEGY_EXAMPLES |
+| Property 10 | change_pct fallback 正确性 | `st.lists(st.tuples(st.floats() \| st.none(), st.floats() \| st.none()))` 生成 kline 数据 |
 
 每个属性测试标注格式：
 ```python
@@ -747,6 +970,25 @@ def test_percentile_ranking_invariants(values):
 | `test_industry_relative_zero_median` | 行业中位数为零时（边界） |
 | `test_sector_data_unavailable` | 板块数据不可用时的降级处理（需求 5.6） |
 
+测试文件：`tests/services/test_sector_strength_fallback.py`
+
+| 测试 | 描述 |
+|------|------|
+| `test_aggregate_change_pct_all_null_uses_close_fallback` | 所有 change_pct 为 NULL 时使用收盘价 fallback（需求 15.1） |
+| `test_aggregate_change_pct_partial_null_uses_pct` | 部分 change_pct 非 NULL 时使用 change_pct 累加（需求 15.3） |
+| `test_aggregate_change_pct_fallback_less_than_2_closes` | 有效收盘价 < 2 时设为 0.0（需求 15.2） |
+| `test_aggregate_change_pct_fallback_zero_earliest_close` | 最早收盘价为 0.0 时设为 0.0（除零保护） |
+| `test_aggregate_change_pct_fallback_all_close_null` | 所有 close 也为 NULL 时设为 0.0 |
+| `test_aggregate_change_pct_returns_float` | 返回类型始终为 float（需求 15.4） |
+
+测试文件：`tests/api/test_sector_coverage.py`
+
+| 测试 | 描述 |
+|------|------|
+| `test_sector_coverage_endpoint_returns_all_sources` | 验证返回 DC/TI/TDX 三个数据源的统计（需求 16.2） |
+| `test_sector_coverage_response_structure` | 验证响应包含 total_sectors、sectors_with_constituents、total_stocks、coverage_ratio 字段 |
+| `test_sector_coverage_empty_source` | 某数据源无数据时返回零值 |
+
 测试文件：`tests/services/test_factor_evaluator_enhanced.py`
 
 | 测试 | 描述 |
@@ -780,9 +1022,12 @@ def test_percentile_ranking_invariants(values):
 | `test_reset_default_button` | 恢复默认按钮功能 |
 | `test_sector_selector_rendering` | 板块数据来源/类型选择器渲染 |
 | `test_strategy_example_loader` | 策略示例加载功能 |
+| `test_sector_coverage_display` | 数据源下拉显示覆盖率信息（需求 16.1） |
+| `test_sector_low_coverage_warning` | 选择低覆盖率数据源时显示警告（需求 16.3） |
 
 ### 测试配置
 
 - 后端属性测试：Hypothesis，每个属性最少 100 次迭代
 - 前端属性测试：fast-check，每个属性最少 100 次迭代
 - 属性测试标注格式：`Feature: factor-editor-optimization, Property {number}: {property_text}`
+- Property 10 测试标注：`Feature: factor-editor-optimization, Property 10: change_pct fallback 正确性`

@@ -6,13 +6,21 @@
 - POST /sector/import/incremental   — 触发增量导入
 - GET  /sector/import/status        — 查询导入进度
 - POST /sector/import/stop          — 停止导入任务
+- GET  /sector/import/errors        — 查询错误详情（分页）
+- GET  /sector/import/errors/export — 导出错误报告（CSV 下载）
 
 数据查询：
 - GET  /sector/list                 — 板块列表
 - GET  /sector/ranking              — 板块涨跌幅排行
+- GET  /sector/info/browse          — 分页浏览板块信息（需求 10.1）
+- GET  /sector/constituent/browse   — 分页浏览板块成分股（需求 10.2）
+- GET  /sector/kline/browse         — 分页浏览板块行情（需求 10.3）
 - GET  /sector/{code}/constituents  — 板块成分股
 - GET  /sector/by-stock/{symbol}    — 股票所属板块
 - GET  /sector/{code}/kline         — 板块行情K线
+
+覆盖率统计：
+- GET  /sector/coverage             — 数据源覆盖率统计（需求 16.2）
 """
 
 from __future__ import annotations
@@ -21,11 +29,15 @@ import json
 import logging
 from datetime import date
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import get_pg_session
 from app.core.redis_client import cache_delete, cache_get
-from app.models.sector import DataSource, SectorType
+from app.models.sector import DataSource, SectorConstituent, SectorInfo, SectorType
 from app.services.data_engine.sector_import import SectorImportService
 from app.services.data_engine.sector_repository import SectorRepository
 from app.tasks.sector_sync import sector_import_full, sector_import_incremental
@@ -58,6 +70,8 @@ class ImportStatusResponse(BaseModel):
     current_file: str | None = None
     heartbeat: float | None = None
     error: str | None = None
+    error_count: int = 0
+    failed_files: list[dict] = []
 
 
 class SectorInfoResponse(BaseModel):
@@ -103,6 +117,133 @@ class SectorRankingResponse(BaseModel):
     volume: int | None = None
     amount: float | None = None
     turnover: float | None = None
+
+
+class SectorInfoBrowseItem(BaseModel):
+    """板块信息浏览响应项"""
+
+    sector_code: str
+    name: str
+    sector_type: str
+    data_source: str
+    list_date: str | None = None
+    constituent_count: int | None = None
+
+
+class ConstituentBrowseItem(BaseModel):
+    """板块成分浏览响应项"""
+
+    trade_date: str
+    sector_code: str
+    data_source: str
+    symbol: str
+    stock_name: str | None = None
+
+
+class KlineBrowseItem(BaseModel):
+    """板块行情浏览响应项"""
+
+    time: str
+    sector_code: str
+    data_source: str
+    freq: str
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+    close: float | None = None
+    volume: int | None = None
+    amount: float | None = None
+    change_pct: float | None = None
+
+
+class CoverageSourceStats(BaseModel):
+    """单个数据源的覆盖率统计"""
+
+    data_source: str  # "DC" / "TI" / "TDX"
+    total_sectors: int  # 该数据源的板块总数
+    sectors_with_constituents: int  # 有成分股数据的板块数
+    total_stocks: int  # 成分股覆盖的不同股票数
+    coverage_ratio: float  # sectors_with_constituents / total_sectors
+
+
+class CoverageResponse(BaseModel):
+    """覆盖率响应"""
+
+    sources: list[CoverageSourceStats]
+
+
+# ---------------------------------------------------------------------------
+# 覆盖率统计端点（需求 16.2）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/coverage", response_model=CoverageResponse)
+async def get_sector_coverage(
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> CoverageResponse:
+    """
+    返回每个数据源的板块数量和成分股覆盖数量统计。
+
+    对应需求 16.2。
+    """
+    sources = []
+    for ds in ["DC", "TI", "TDX"]:
+        # 查询该数据源的板块总数
+        total_stmt = (
+            select(func.count())
+            .select_from(SectorInfo)
+            .where(SectorInfo.data_source == ds)
+        )
+        total_sectors = (await pg_session.execute(total_stmt)).scalar() or 0
+
+        # 查询有成分股数据的板块数（最新交易日）
+        latest_date_stmt = (
+            select(func.max(SectorConstituent.trade_date))
+            .where(SectorConstituent.data_source == ds)
+        )
+        latest_date = (await pg_session.execute(latest_date_stmt)).scalar()
+
+        if latest_date:
+            sectors_with_stmt = (
+                select(func.count(func.distinct(SectorConstituent.sector_code)))
+                .where(
+                    SectorConstituent.data_source == ds,
+                    SectorConstituent.trade_date == latest_date,
+                )
+            )
+            sectors_with = (
+                await pg_session.execute(sectors_with_stmt)
+            ).scalar() or 0
+
+            stocks_stmt = (
+                select(func.count(func.distinct(SectorConstituent.symbol)))
+                .where(
+                    SectorConstituent.data_source == ds,
+                    SectorConstituent.trade_date == latest_date,
+                )
+            )
+            total_stocks = (
+                await pg_session.execute(stocks_stmt)
+            ).scalar() or 0
+        else:
+            sectors_with = 0
+            total_stocks = 0
+
+        coverage_ratio = (
+            sectors_with / total_sectors if total_sectors > 0 else 0.0
+        )
+
+        sources.append(
+            CoverageSourceStats(
+                data_source=ds,
+                total_sectors=total_sectors,
+                sectors_with_constituents=sectors_with,
+                total_stocks=total_stocks,
+                coverage_ratio=round(coverage_ratio, 4),
+            )
+        )
+
+    return CoverageResponse(sources=sources)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +323,8 @@ async def get_import_status():
         current_file=progress.get("current_file"),
         heartbeat=progress.get("heartbeat"),
         error=progress.get("error"),
+        error_count=progress.get("error_count", 0),
+        failed_files=progress.get("failed_files", []),
     )
 
 
@@ -226,6 +369,64 @@ async def reset_import_status():
     await cache_delete(SectorImportService.REDIS_PROGRESS_KEY)
     await cache_delete(SectorImportService.REDIS_STOP_KEY)
     return {"message": "板块导入状态已清除"}
+
+
+@router.get("/import/errors")
+async def get_import_errors(
+    offset: int = Query(0, ge=0, description="起始偏移量"),
+    limit: int = Query(50, ge=1, le=500, description="返回条数"),
+):
+    """分页查询导入错误详情列表。"""
+    svc = SectorImportService()
+    errors = await svc.get_errors(offset=offset, limit=limit)
+    total = await svc.get_error_count()
+    return {"total": total, "offset": offset, "limit": limit, "items": errors}
+
+
+@router.get("/import/errors/export")
+async def export_import_errors():
+    """以 CSV 格式导出全部导入错误详情。"""
+    import csv
+    import io
+
+    svc = SectorImportService()
+    total = await svc.get_error_count()
+    # 分批读取所有错误
+    all_errors: list[dict] = []
+    batch_size = 500
+    for offset in range(0, max(total, 1), batch_size):
+        batch = await svc.get_errors(offset=offset, limit=batch_size)
+        if not batch:
+            break
+        all_errors.extend(batch)
+
+    def generate_csv():
+        """生成 CSV 内容的生成器。"""
+        output = io.StringIO()
+        writer = csv.writer(output)
+        # 写入表头
+        writer.writerow(["file", "line", "error_type", "message", "raw_data"])
+        yield output.getvalue()
+        output.seek(0)
+        output.truncate(0)
+        # 写入数据行
+        for err in all_errors:
+            writer.writerow([
+                err.get("file", ""),
+                err.get("line", 0),
+                err.get("error_type", ""),
+                err.get("message", ""),
+                err.get("raw_data", ""),
+            ])
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+
+    return StreamingResponse(
+        generate_csv(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=import_errors.csv"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +517,198 @@ async def get_sector_ranking(
         )
         for item in items
     ]
+
+
+# ---------------------------------------------------------------------------
+# 分页浏览端点（需求 10）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/info/browse")
+async def browse_sector_info(
+    data_source: str | None = Query(None, description="数据来源: DC/TI/TDX"),
+    sector_type: str | None = Query(None, description="板块类型: CONCEPT/INDUSTRY/REGION/STYLE"),
+    keyword: str | None = Query(None, description="板块名称或代码模糊搜索"),
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(50, ge=1, le=200, description="每页条数，1-200"),
+) -> dict:
+    """分页浏览板块信息。"""
+    ds = None
+    if data_source is not None:
+        try:
+            ds = DataSource(data_source)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无效的数据来源: {data_source}，可选值: {[e.value for e in DataSource]}",
+            )
+
+    st = None
+    if sector_type is not None:
+        try:
+            st = SectorType(sector_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无效的板块类型: {sector_type}，可选值: {[e.value for e in SectorType]}",
+            )
+
+    repo = SectorRepository()
+    result = await repo.browse_sector_info(
+        data_source=ds,
+        sector_type=st,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "total": result.total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            SectorInfoBrowseItem(
+                sector_code=r.sector_code,
+                name=r.name,
+                sector_type=r.sector_type,
+                data_source=r.data_source,
+                list_date=r.list_date.isoformat() if r.list_date else None,
+                constituent_count=r.constituent_count,
+            ).model_dump()
+            for r in result.items
+        ],
+    }
+
+
+@router.get("/constituent/browse")
+async def browse_sector_constituent(
+    data_source: str = Query(..., description="数据来源: DC/TI/TDX"),
+    sector_code: str | None = Query(None, description="板块代码精确匹配"),
+    trade_date: str | None = Query(None, description="交易日期 YYYY-MM-DD，默认最新"),
+    keyword: str | None = Query(None, description="股票代码或名称模糊搜索"),
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(50, ge=1, le=200, description="每页条数，1-200"),
+) -> dict:
+    """分页浏览板块成分股。"""
+    try:
+        ds = DataSource(data_source)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"无效的数据来源: {data_source}，可选值: {[e.value for e in DataSource]}",
+        )
+
+    td: date | None = None
+    if trade_date is not None:
+        try:
+            td = date.fromisoformat(trade_date)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无效的日期格式: {trade_date}，请使用 YYYY-MM-DD",
+            )
+
+    repo = SectorRepository()
+    result = await repo.browse_sector_constituent(
+        data_source=ds,
+        sector_code=sector_code,
+        trade_date=td,
+        keyword=keyword,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "total": result.total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            ConstituentBrowseItem(
+                trade_date=r.trade_date.isoformat(),
+                sector_code=r.sector_code,
+                data_source=r.data_source,
+                symbol=r.symbol,
+                stock_name=r.stock_name,
+            ).model_dump()
+            for r in result.items
+        ],
+    }
+
+
+@router.get("/kline/browse")
+async def browse_sector_kline(
+    data_source: str = Query(..., description="数据来源: DC/TI/TDX"),
+    sector_code: str | None = Query(None, description="板块代码精确匹配"),
+    freq: str = Query("1d", description="K线频率: 1d/1w/1M"),
+    start: str | None = Query(None, description="开始日期 YYYY-MM-DD"),
+    end: str | None = Query(None, description="结束日期 YYYY-MM-DD"),
+    page: int = Query(1, ge=1, description="页码，从 1 开始"),
+    page_size: int = Query(50, ge=1, le=200, description="每页条数，1-200"),
+) -> dict:
+    """分页浏览板块行情。"""
+    try:
+        ds = DataSource(data_source)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail=f"无效的数据来源: {data_source}，可选值: {[e.value for e in DataSource]}",
+        )
+
+    start_date: date | None = None
+    end_date: date | None = None
+
+    if start is not None:
+        try:
+            start_date = date.fromisoformat(start)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无效的开始日期格式: {start}，请使用 YYYY-MM-DD",
+            )
+
+    if end is not None:
+        try:
+            end_date = date.fromisoformat(end)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail=f"无效的结束日期格式: {end}，请使用 YYYY-MM-DD",
+            )
+
+    repo = SectorRepository()
+    result = await repo.browse_sector_kline(
+        data_source=ds,
+        sector_code=sector_code,
+        freq=freq,
+        start=start_date,
+        end=end_date,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "total": result.total,
+        "page": page,
+        "page_size": page_size,
+        "items": [
+            KlineBrowseItem(
+                time=r.time.isoformat(),
+                sector_code=r.sector_code,
+                data_source=r.data_source,
+                freq=r.freq,
+                open=float(r.open) if r.open is not None else None,
+                high=float(r.high) if r.high is not None else None,
+                low=float(r.low) if r.low is not None else None,
+                close=float(r.close) if r.close is not None else None,
+                volume=r.volume,
+                amount=float(r.amount) if r.amount is not None else None,
+                change_pct=float(r.change_pct) if r.change_pct is not None else None,
+            ).model_dump()
+            for r in result.items
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# 数据查询端点（路径参数路由）
+# ---------------------------------------------------------------------------
 
 
 @router.get("/{code}/constituents", response_model=list[ConstituentResponse])

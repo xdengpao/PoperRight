@@ -30,6 +30,8 @@ export interface SectorImportProgress {
   current_file: string | null
   heartbeat: number | null
   error: string | null
+  error_count: number | null
+  failed_files: Array<{file: string, error: string}> | null
 }
 
 /** 缓存在 Redis 中的导入页面参数 */
@@ -127,7 +129,7 @@ export const useLocalImportStore = defineStore('localImport', () => {
 
   // 板块数据导入状态
   const sectorLoading = ref(false)
-  const sectorProgress = reactive<SectorImportProgress>({ status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+  const sectorProgress = reactive<SectorImportProgress>({ status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null, error_count: null, failed_files: null })
   const sectorError = ref('')
   const sectorPolling = ref(false)
   const sectorTaskId = ref<string | null>(null)
@@ -325,7 +327,7 @@ export const useLocalImportStore = defineStore('localImport', () => {
       const res = await apiClient.post<{ task_id: string; message: string }>(endpoint, body)
       sectorTaskId.value = res.data.task_id
       // 重置进度
-      Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+      Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null, error_count: null, failed_files: null })
     } catch (err: unknown) {
       sectorError.value = extractErrorMessage(err, '触发板块导入失败')
     } finally {
@@ -388,7 +390,7 @@ export const useLocalImportStore = defineStore('localImport', () => {
     } catch {
       // 静默忽略，仍然清前端状态
     }
-    Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null })
+    Object.assign(sectorProgress, { status: 'idle', stage: null, total_files: null, processed_files: null, imported_records: null, current_file: null, heartbeat: null, error: null, error_count: null, failed_files: null })
     sectorTaskId.value = null
     sectorError.value = ''
   }

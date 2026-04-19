@@ -100,9 +100,13 @@ from datetime import date
 from pathlib import Path
 
 from app.services.data_engine.sector_csv_parser import (
+    BaseParsingEngine,
+    DCParsingEngine,
     ParsedSectorInfo,
     ParsedSectorKline,
     SectorCSVParser,
+    TDXParsingEngine,
+    TIParsingEngine,
 )
 
 # --- Reverse mapping dicts for constructing CSV rows ---
@@ -182,8 +186,8 @@ def test_sector_list_dc_round_trip(sector_code, name, sector_type):
         csv_file = Path(tmp_dir) / "dc_sector_list.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_sector_list_dc(csv_file)
+        engine = DCParsingEngine()
+        results = engine.parse_sector_list(csv_file)
 
     assert len(results) == 1
     parsed = results[0]
@@ -228,8 +232,8 @@ def test_sector_list_ti_round_trip(
         csv_file = Path(tmp_dir) / "ti_sector_list.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_sector_list_ti(csv_file)
+        engine = TIParsingEngine()
+        results = engine.parse_sector_list(csv_file)
 
     assert len(results) == 1
     parsed = results[0]
@@ -272,8 +276,8 @@ def test_sector_list_tdx_round_trip(
         csv_file = Path(tmp_dir) / "tdx_sector_list.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_sector_list_tdx(csv_file)
+        engine = TDXParsingEngine()
+        results = engine.parse_sector_list(csv_file)
 
     assert len(results) == 1
     parsed = results[0]
@@ -321,14 +325,14 @@ def test_encoding_detection_preserves_content(name, value):
     """
     csv_content = f"header1,header2\n{name},{value}\n"
 
-    parser = SectorCSVParser()
+    engine = BaseParsingEngine()
     results: dict[str, str] = {}
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         for encoding in ("utf-8", "gbk", "gb2312"):
             csv_file = Path(tmp_dir) / f"test_{encoding}.csv"
             csv_file.write_bytes(csv_content.encode(encoding))
-            results[encoding] = parser._read_csv(csv_file)
+            results[encoding] = engine._read_csv(csv_file)
 
     # All three encodings must produce identical content
     assert results["utf-8"] == results["gbk"], (
@@ -385,8 +389,8 @@ def test_ohlc_validation_invariant(open_, high, low, close):
         close=close,
     )
 
-    parser = SectorCSVParser()
-    result = parser._validate_ohlc(kline)
+    engine = BaseParsingEngine()
+    result = engine._validate_ohlc(kline)
 
     # Manual check of the invariant
     expected = (
@@ -434,9 +438,57 @@ def test_ohlc_valid_data_always_passes(a, b, c, d):
         close=close,
     )
 
-    parser = SectorCSVParser()
-    assert parser._validate_ohlc(kline) is True, (
+    engine = BaseParsingEngine()
+    assert engine._validate_ohlc(kline) is True, (
         f"Valid OHLC should pass: open={open_}, high={high}, low={low}, close={close}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Property 7 (Design): Date inference round-trip from filename
+# Feature: sector-data-import, Property 7: Date inference round-trip from filename
+# ---------------------------------------------------------------------------
+
+
+@settings(max_examples=100)
+@given(
+    d=st.dates(min_value=date(2000, 1, 1), max_value=date(2099, 12, 31)),
+)
+def test_date_inference_yyyymmdd_round_trip(d):
+    """
+    # Feature: sector-data-import, Property 7: Date inference round-trip from filename
+
+    **Validates: Requirements 8.3, 6.6**
+
+    For any valid date, formatting it as YYYYMMDD within a filename string
+    and calling _infer_date_from_filename SHALL recover the original date.
+    """
+    filename = f"板块成分_DC_{d.strftime('%Y%m%d')}.zip"
+    engine = BaseParsingEngine()
+    result = engine._infer_date_from_filename(filename)
+    assert result == d, (
+        f"YYYYMMDD round-trip failed: date={d}, filename={filename!r}, got={result}"
+    )
+
+
+@settings(max_examples=100)
+@given(
+    d=st.dates(min_value=date(2000, 1, 1), max_value=date(2099, 12, 31)),
+)
+def test_date_inference_yyyy_mm_dd_round_trip(d):
+    """
+    # Feature: sector-data-import, Property 7: Date inference round-trip from filename
+
+    **Validates: Requirements 8.3, 6.6**
+
+    For any valid date, formatting it as YYYY-MM-DD within a filename string
+    and calling _infer_date_from_filename SHALL recover the original date.
+    """
+    filename = f"{d.strftime('%Y-%m-%d')}.csv"
+    engine = BaseParsingEngine()
+    result = engine._infer_date_from_filename(filename)
+    assert result == d, (
+        f"YYYY-MM-DD round-trip failed: date={d}, filename={filename!r}, got={result}"
     )
 
 
@@ -491,8 +543,8 @@ def test_constituent_dc_zip_round_trip(sector_code, symbol, stock_name, trade_da
         zip_path = Path(tmp_dir) / zip_filename
         zip_path.write_bytes(zip_bytes)
 
-        parser = SectorCSVParser()
-        results = parser.parse_constituents_dc_zip(zip_path)
+        engine = DCParsingEngine()
+        results = engine.parse_constituents_zip(zip_path)
 
     assert len(results) == 1
     parsed = results[0]
@@ -530,8 +582,8 @@ def test_constituent_ti_csv_round_trip(sector_code, symbol, stock_name, trade_da
         csv_file = Path(tmp_dir) / "constituents_ti.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_constituents_ti_csv(csv_file, trade_date)
+        engine = TIParsingEngine()
+        results = engine.parse_constituents_summary(csv_file, trade_date)
 
     assert len(results) == 1
     parsed = results[0]
@@ -580,8 +632,8 @@ def test_constituent_tdx_zip_round_trip(sector_code, symbol, stock_name, trade_d
         zip_path = Path(tmp_dir) / zip_filename
         zip_path.write_bytes(zip_bytes)
 
-        parser = SectorCSVParser()
-        results = parser.parse_constituents_tdx_zip(zip_path)
+        engine = TDXParsingEngine()
+        results = engine.parse_constituents_zip(zip_path)
 
     assert len(results) == 1
     parsed = results[0]
@@ -676,13 +728,15 @@ def test_kline_dc_csv_round_trip(
         csv_file = Path(tmp_dir) / "kline_dc.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_kline_dc_csv(csv_file)
+        engine = DCParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
 
     assert len(results) == 1
     parsed = results[0]
     assert parsed.time == trade_date
-    assert parsed.sector_code == sector_code
+    # _parse_kline_text now ensures .DC suffix
+    expected_code = sector_code if sector_code.endswith(".DC") else sector_code + ".DC"
+    assert parsed.sector_code == expected_code
     assert parsed.data_source == DataSource.DC
     assert parsed.open == open_
     assert parsed.close == close
@@ -729,8 +783,8 @@ def test_kline_ti_csv_round_trip(
         csv_file = Path(tmp_dir) / "kline_ti.csv"
         csv_file.write_text(csv_content, encoding="utf-8")
 
-        parser = SectorCSVParser()
-        results = parser.parse_kline_ti_csv(csv_file)
+        engine = TIParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
 
     assert len(results) == 1
     parsed = results[0]
@@ -746,7 +800,7 @@ def test_kline_ti_csv_round_trip(
     assert parsed.turnover == turnover
 
 
-# --- TDX kline round-trip ---
+# --- TDX kline round-trip (Format A — 历史 ZIP) ---
 
 
 @settings(max_examples=100)
@@ -766,8 +820,9 @@ def test_kline_tdx_csv_round_trip(
     **Validates: Requirements 4.7, 4.8, 4.9**
 
     For any valid sector kline data where OHLC invariant holds, generating a
-    TDX CSV row and parsing it back SHALL recover the original OHLCV values.
-    TDX format does not include change_pct and turnover (they will be None).
+    TDX Format A CSV row, wrapping it in a ZIP, and parsing it back with
+    TDXParsingEngine.parse_kline_zip SHALL recover the original OHLCV values.
+    TDX Format A does not include change_pct and turnover (they will be None).
     """
     low, high, open_, close = ohlc
     date_str = trade_date.strftime("%Y-%m-%d")
@@ -776,18 +831,27 @@ def test_kline_tdx_csv_round_trip(
     row = f"{date_str},{sector_code},名称,{open_},{close},{high},{low},{volume},{amount},0,0"
     csv_content = f"{header}\n{row}\n"
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        csv_file = Path(tmp_dir) / "kline_tdx.csv"
-        csv_file.write_text(csv_content, encoding="utf-8")
+    # Wrap in ZIP with filename containing "日k" for freq inference
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("kline.csv", csv_content.encode("utf-8"))
+    zip_bytes = buf.getvalue()
 
-        parser = SectorCSVParser()
-        results = parser.parse_kline_tdx_csv(csv_file)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = Path(tmp_dir) / "概念板块_日k_K线.zip"
+        zip_path.write_bytes(zip_bytes)
+
+        engine = TDXParsingEngine()
+        results = engine.parse_kline_zip(zip_path)
 
     assert len(results) == 1
     parsed = results[0]
     assert parsed.time == trade_date
-    assert parsed.sector_code == sector_code
+    # _parse_kline_text_format_a now ensures .TDX suffix
+    expected_code = sector_code if sector_code.endswith(".TDX") else sector_code + ".TDX"
+    assert parsed.sector_code == expected_code
     assert parsed.data_source == DataSource.TDX
+    assert parsed.freq == "1d"
     assert parsed.open == open_
     assert parsed.close == close
     assert parsed.high == high
@@ -796,6 +860,60 @@ def test_kline_tdx_csv_round_trip(
     assert parsed.amount == amount
     assert parsed.change_pct is None
     assert parsed.turnover is None
+
+
+# --- TDX kline round-trip (Format B — 散装/增量 38列) ---
+
+
+@settings(max_examples=100)
+@given(
+    sector_code=_sector_code_st,
+    ohlc=_valid_ohlc_st(),
+    volume=_volume_st,
+    amount=_amount_st,
+    change_pct=_change_pct_st,
+    trade_date=_trade_date_st,
+)
+def test_kline_tdx_format_b_round_trip(
+    sector_code, ohlc, volume, amount, change_pct, trade_date
+):
+    """
+    # Feature: sector-data-import, Property 4: Kline CSV parsing round-trip
+
+    **Validates: Requirements 7.4, 7.5, 7.6**
+
+    For any valid sector kline data where OHLC invariant holds, generating a
+    TDX Format B CSV row and parsing it back with TDXParsingEngine.parse_kline_csv
+    SHALL recover the original OHLCV + change_pct values.
+    """
+    low, high, open_, close = ohlc
+    date_str = trade_date.strftime("%Y-%m-%d")
+
+    # Format B: 板块代码,交易日期,收盘点位,开盘点位,最高点位,最低点位,昨日收盘点,涨跌点位,涨跌幅%,成交量,成交额,...
+    header = "板块代码,交易日期,收盘点位,开盘点位,最高点位,最低点位,昨日收盘点,涨跌点位,涨跌幅%,成交量,成交额,振幅%,换手%,量比"
+    row = f"{sector_code},{date_str},{close},{open_},{high},{low},0,0,{change_pct},{volume},{amount},0,0,0"
+    csv_content = f"{header}\n{row}\n"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        csv_file = Path(tmp_dir) / "kline_tdx_format_b.csv"
+        csv_file.write_text(csv_content, encoding="utf-8")
+
+        engine = TDXParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
+
+    assert len(results) == 1
+    parsed = results[0]
+    assert parsed.time == trade_date
+    assert parsed.sector_code == sector_code
+    assert parsed.data_source == DataSource.TDX
+    assert parsed.freq == "1d"
+    assert parsed.open == open_
+    assert parsed.close == close
+    assert parsed.high == high
+    assert parsed.low == low
+    assert parsed.volume == volume
+    assert parsed.amount == amount
+    assert parsed.change_pct == change_pct
 
 
 # ---------------------------------------------------------------------------
@@ -1456,3 +1574,239 @@ def test_property_13_sector_strength_filtering_correctness(data):
 
     # 4. No duplicates in filtered result
     assert len(filtered) == len(set(filtered)), "Filtered result contains duplicates"
+
+# ---------------------------------------------------------------------------
+# Property 8 (Design): Frequency inference from ZIP filename
+# Feature: sector-data-import, Property 8: Frequency inference from ZIP filename
+# ---------------------------------------------------------------------------
+
+
+@settings(max_examples=100)
+@given(
+    freq_indicator=st.sampled_from(["日k", "周k", "月k"]),
+    prefix=st.text(
+        alphabet=string.ascii_letters + "板块概念行业地区风格_",
+        min_size=1,
+        max_size=20,
+    ).filter(lambda s: "日k" not in s and "周k" not in s and "月k" not in s),
+)
+def test_frequency_inference_from_zip_filename(freq_indicator, prefix):
+    """
+    # Feature: sector-data-import, Property 8: Frequency inference from ZIP filename
+
+    **Validates: Requirements 7.7**
+
+    For any TDX historical kline ZIP filename containing a frequency indicator
+    (日k, 周k, 月k), the _infer_freq_from_filename method SHALL return the
+    correct frequency string (1d, 1w, 1M respectively).
+    """
+    expected = {"日k": "1d", "周k": "1w", "月k": "1M"}[freq_indicator]
+    filename = f"{prefix}_{freq_indicator}_K线.zip"
+    engine = TDXParsingEngine()
+    result = engine._infer_freq_from_filename(filename)
+    assert result == expected, (
+        f"Frequency inference failed: filename={filename!r}, "
+        f"expected={expected!r}, got={result!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Property 9 (Design): Streaming ZIP produces identical results
+# Feature: sector-data-import, Property 9: Streaming ZIP produces identical results
+# ---------------------------------------------------------------------------
+
+
+@settings(max_examples=100)
+@given(
+    sector_code=_sector_code_st,
+    ohlc=_valid_ohlc_st(),
+    volume=_volume_st,
+    amount=_amount_st,
+    trade_date=_trade_date_st,
+)
+def test_streaming_zip_produces_identical_results(
+    sector_code, ohlc, volume, amount, trade_date
+):
+    """
+    # Feature: sector-data-import, Property 9: Streaming ZIP produces identical results
+
+    **Validates: Requirements 7.8, 8.4, 11.2**
+
+    For any valid kline ZIP file, the streaming method (iter_kline_zip) SHALL
+    produce the same set of parsed records as the non-streaming batch method
+    (parse_kline_zip). The total count and field values of all yielded records
+    SHALL be identical.
+    """
+    low, high, open_, close = ohlc
+    date_str = trade_date.strftime("%Y-%m-%d")
+
+    # Create Format A kline CSV
+    header = "日期,代码,名称,开盘,收盘,最高,最低,成交量,成交额,上涨家数,下跌家数"
+    row = f"{date_str},{sector_code},名称,{open_},{close},{high},{low},{volume},{amount},0,0"
+    csv_content = f"{header}\n{row}\n"
+
+    # Wrap in ZIP with "日k" for freq inference
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("kline.csv", csv_content.encode("utf-8"))
+    zip_bytes = buf.getvalue()
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        zip_path = Path(tmp_dir) / "概念板块_日k_K线.zip"
+        zip_path.write_bytes(zip_bytes)
+
+        engine = TDXParsingEngine()
+
+        # Batch method
+        batch_results = engine.parse_kline_zip(zip_path)
+
+        # Streaming method
+        stream_results: list[ParsedSectorKline] = []
+        for chunk in engine.iter_kline_zip(zip_path):
+            stream_results.extend(chunk)
+
+    # Verify identical count
+    assert len(batch_results) == len(stream_results), (
+        f"Count mismatch: batch={len(batch_results)}, stream={len(stream_results)}"
+    )
+
+    # Verify identical field values
+    for b, s in zip(batch_results, stream_results):
+        assert b.time == s.time
+        assert b.sector_code == s.sector_code
+        assert b.data_source == s.data_source
+        assert b.freq == s.freq
+        assert b.open == s.open
+        assert b.high == s.high
+        assert b.low == s.low
+        assert b.close == s.close
+        assert b.volume == s.volume
+        assert b.amount == s.amount
+        assert b.change_pct == s.change_pct
+        assert b.turnover == s.turnover
+
+
+# ---------------------------------------------------------------------------
+# Property 10 (Design): Malformed CSV rows are skipped without affecting valid rows
+# Feature: sector-data-import, Property 10: Malformed CSV rows are skipped
+# ---------------------------------------------------------------------------
+
+
+@settings(max_examples=100)
+@given(
+    valid_count=st.integers(min_value=1, max_value=5),
+    malformed_count=st.integers(min_value=1, max_value=5),
+)
+def test_malformed_rows_skipped_dc(valid_count, malformed_count):
+    """
+    # Feature: sector-data-import, Property 10: Malformed CSV rows are skipped
+
+    **Validates: Requirements 8.6**
+
+    For any CSV content containing a mix of valid and malformed rows, the DC
+    parser SHALL skip all malformed rows and correctly parse all valid rows.
+    """
+    header = "板块代码,交易日期,收盘点位,开盘点位,最高点位,最低点位,涨跌点位,涨跌幅%,成交量,成交额,振幅%,换手%"
+    lines = [header]
+
+    # Generate valid rows
+    for i in range(valid_count):
+        code = f"BK{i:04d}"
+        lines.append(f"{code},2024-01-15,105.0,100.0,108.0,98.0,5.0,5.0,500000,52000000,10.0,1.2")
+
+    # Generate malformed rows (insufficient fields)
+    for _ in range(malformed_count):
+        lines.append("BADCODE,2024-01-15,not_a_number")
+
+    csv_content = "\n".join(lines) + "\n"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        csv_file = Path(tmp_dir) / "kline_dc.csv"
+        csv_file.write_text(csv_content, encoding="utf-8")
+
+        engine = DCParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
+
+    assert len(results) == valid_count, (
+        f"Expected {valid_count} valid rows, got {len(results)}"
+    )
+
+
+@settings(max_examples=100)
+@given(
+    valid_count=st.integers(min_value=1, max_value=5),
+    malformed_count=st.integers(min_value=1, max_value=5),
+)
+def test_malformed_rows_skipped_ti(valid_count, malformed_count):
+    """
+    # Feature: sector-data-import, Property 10: Malformed CSV rows are skipped
+
+    **Validates: Requirements 8.6**
+
+    For any CSV content containing a mix of valid and malformed rows, the TI
+    parser SHALL skip all malformed rows and correctly parse all valid rows.
+    """
+    header = "指数代码,交易日期,开盘点位,最高点位,最低点位,收盘点位,昨日收盘点,平均价,涨跌点位,涨跌幅,成交量,换手率"
+    lines = [header]
+
+    # Generate valid rows
+    for i in range(valid_count):
+        code = f"88{i:04d}"
+        lines.append(f"{code},2024-01-15,1000.0,1080.0,980.0,1050.0,1000.0,1030.0,50.0,5.0,500000,1.2")
+
+    # Generate malformed rows (insufficient fields)
+    for _ in range(malformed_count):
+        lines.append("BADCODE,2024-01-15,not_a_number")
+
+    csv_content = "\n".join(lines) + "\n"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        csv_file = Path(tmp_dir) / "kline_ti.csv"
+        csv_file.write_text(csv_content, encoding="utf-8")
+
+        engine = TIParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
+
+    assert len(results) == valid_count, (
+        f"Expected {valid_count} valid rows, got {len(results)}"
+    )
+
+
+@settings(max_examples=100)
+@given(
+    valid_count=st.integers(min_value=1, max_value=5),
+    malformed_count=st.integers(min_value=1, max_value=5),
+)
+def test_malformed_rows_skipped_tdx(valid_count, malformed_count):
+    """
+    # Feature: sector-data-import, Property 10: Malformed CSV rows are skipped
+
+    **Validates: Requirements 8.6**
+
+    For any CSV content containing a mix of valid and malformed rows, the TDX
+    parser SHALL skip all malformed rows and correctly parse all valid rows.
+    """
+    header = "板块代码,交易日期,收盘点位,开盘点位,最高点位,最低点位,昨日收盘点,涨跌点位,涨跌幅%,成交量,成交额,振幅%,换手%,量比"
+    lines = [header]
+
+    # Generate valid rows (Format B)
+    for i in range(valid_count):
+        code = f"88{i:04d}"
+        lines.append(f"{code},2024-01-15,105.0,100.0,108.0,98.0,100.0,5.0,5.0,500000,52000000,10.0,1.2,1.0")
+
+    # Generate malformed rows (insufficient fields)
+    for _ in range(malformed_count):
+        lines.append("BADCODE,2024-01-15,not_a_number")
+
+    csv_content = "\n".join(lines) + "\n"
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        csv_file = Path(tmp_dir) / "kline_tdx.csv"
+        csv_file.write_text(csv_content, encoding="utf-8")
+
+        engine = TDXParsingEngine()
+        results = engine.parse_kline_csv(csv_file)
+
+    assert len(results) == valid_count, (
+        f"Expected {valid_count} valid rows, got {len(results)}"
+    )

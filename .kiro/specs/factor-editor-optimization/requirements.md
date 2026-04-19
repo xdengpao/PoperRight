@@ -341,3 +341,43 @@
 6. THE STRATEGY_EXAMPLES SHALL 作为后端 Python 模块中的常量列表定义，并通过 GET /api/v1/screen/strategy-examples 端点暴露给前端
 7. WHEN 用户加载一个策略示例时，THE Factor_Editor SHALL 自动启用该示例所需的模块（enabled_modules），并填充所有因子条件、权重和板块筛选配置
 8. THE STRATEGY_EXAMPLES 中的所有因子条件 SHALL 使用 FACTOR_REGISTRY 中定义的阈值类型和取值范围，确保示例配置与因子元数据一致
+
+### 需求 15：SectorStrengthFilter 板块涨跌幅计算容错（change_pct 缺失 fallback）
+
+**用户故事：** 作为量化交易员，我发现部分数据源（尤其是 TDX）的板块行情数据中 change_pct 字段大量为 NULL（TDX 散装 CSV 来源 91.5% 为 NULL，TDX 历史 ZIP 来源 100% 为 NULL），导致 SectorStrengthFilter 计算板块涨跌幅排名时所有板块的累计涨跌幅为 0.0，排名失去意义。我需要系统在 change_pct 缺失时能够基于收盘价序列自动计算涨跌幅，确保板块排名功能在所有数据源下都可用。
+
+#### 背景
+
+当前 `SectorStrengthFilter._aggregate_change_pct()` 方法通过累加 SectorKline 的 `change_pct` 字段计算板块累计涨跌幅。但实际数据库中：
+- **DC**：change_pct 100% 有值（3,287,622 条全部非 NULL）— 正常
+- **TI**：change_pct 99.9% 有值（仅 1,333 条为 NULL）— 基本正常
+- **TDX 散装 CSV**：change_pct 91.5% 为 NULL（1,566,851 / 1,712,878）— 严重缺失
+- **TDX 历史 ZIP**：change_pct 100% 为 NULL（1,708,879 / 1,708,879）— 完全缺失
+
+这意味着使用 TDX 数据源的板块筛选策略（如策略示例 4、11）的板块排名功能基本不可用。
+
+#### 验收标准
+
+1. WHEN `_aggregate_change_pct` 计算某个板块的累计涨跌幅时，IF 该板块所有 K 线记录的 change_pct 均为 NULL，THEN THE SectorStrengthFilter SHALL 使用收盘价序列计算涨跌幅作为 fallback：`(最新收盘价 - 最早收盘价) / 最早收盘价 × 100`
+2. WHEN 使用收盘价 fallback 计算时，THE SectorStrengthFilter SHALL 仅使用 close 字段不为 NULL 的 K 线记录，若有效收盘价少于 2 个则该板块涨跌幅设为 0.0
+3. THE SectorStrengthFilter SHALL 优先使用 change_pct 字段（当有效 change_pct 记录数 > 0 时），仅在 change_pct 全部为 NULL 时才使用收盘价 fallback
+4. THE 收盘价 fallback 计算结果 SHALL 与 change_pct 累加结果使用相同的数据类型（float），确保后续排名逻辑无需修改
+
+### 需求 16：前端板块数据源选择器数据覆盖率提示
+
+**用户故事：** 作为量化交易员，我需要在选择板块数据源时了解各数据源的数据覆盖情况（板块数量、成分股覆盖率），以便选择数据最完整的数据源进行板块筛选。
+
+#### 背景
+
+各数据源的成分股数据覆盖率差异显著：
+- **DC（东方财富）**：1,030 个板块，覆盖 5,882 只股票 — 覆盖率最高
+- **TDX（通达信）**：615 个板块，覆盖 7,122 只股票 — 股票覆盖广但板块数少
+- **TI（同花顺）**：仅 90 个板块有成分股数据（总共 1,724 个板块），覆盖 5,755 只股票 — 成分股数据严重不完整
+
+使用 TI 数据源的板块筛选策略（如策略示例 4、12）的成分股覆盖率很低，可能导致大量股票因无法映射到板块而被错误过滤。
+
+#### 验收标准
+
+1. THE Factor_Editor SHALL 在板块数据源下拉选择器中，为每个数据源选项显示数据覆盖率摘要信息，格式为"数据源名称（板块数 / 成分股覆盖数）"
+2. THE Sector_API SHALL 提供 GET /api/v1/sector/coverage 端点，返回每个数据源的板块数量和成分股覆盖数量统计
+3. WHEN 用户选择成分股覆盖率较低的数据源（如 TI，成分股板块数 < 总板块数的 50%）时，THE Factor_Editor SHALL 显示警告提示："该数据源成分股数据不完整，可能影响板块筛选效果，建议使用东方财富（DC）或通达信（TDX）"

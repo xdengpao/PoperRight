@@ -381,7 +381,22 @@
           <div class="stat-label">已导入记录数</div>
           <div class="stat-value highlight">{{ (store.sectorProgress.imported_records ?? 0).toLocaleString() }}</div>
         </div>
+        <div v-if="store.sectorProgress.error_count != null" class="stat-card">
+          <div class="stat-label">出错记录数</div>
+          <div class="stat-value error">{{ (store.sectorProgress.error_count ?? 0).toLocaleString() }}</div>
+        </div>
       </div>
+
+      <!-- 导出错误报告按钮 -->
+      <button
+        v-if="store.sectorProgress.error_count != null && store.sectorProgress.error_count > 0"
+        class="btn btn-secondary"
+        style="margin-top: 12px;"
+        @click="handleExportErrors"
+        aria-label="导出错误报告"
+      >
+        导出错误报告
+      </button>
 
       <!-- 当前处理文件 -->
       <div v-if="store.sectorProgress.current_file && store.sectorProgress.status === 'running'" class="current-file-info" style="margin-top: 8px; font-size: 0.85em; color: var(--text-secondary, #888);">
@@ -398,6 +413,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useLocalImportStore } from '@/stores/localImport'
+import { apiClient } from '@/api'
 import DatePicker from '@/components/DatePicker.vue'
 
 const store = useLocalImportStore()
@@ -507,6 +523,24 @@ async function handleStartSectorImport() {
 
 async function handleResetSectorImport() {
   await store.resetSectorImportStatus()
+}
+
+/** 导出板块导入错误报告 CSV */
+async function handleExportErrors() {
+  try {
+    const res = await apiClient.get('/sector/import/errors/export', { responseType: 'blob' })
+    const blob = new Blob([res.data], { type: 'text/csv;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'sector_import_errors.csv'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch {
+    // 静默忽略
+  }
 }
 
 const sectorStatusLabel = computed(() => {
@@ -748,6 +782,7 @@ onUnmounted(() => {
 .stat-label { font-size: 12px; color: #8b949e; margin-bottom: 6px; }
 .stat-value { font-size: 22px; font-weight: 600; color: #e6edf3; }
 .stat-value.highlight { color: #3fb950; }
+.stat-value.error { color: #f85149; }
 .stat-value.warn { color: #d29922; }
 .stat-value.muted { color: #8b949e; }
 .stat-detail { font-size: 12px; color: #8b949e; margin-top: 4px; }

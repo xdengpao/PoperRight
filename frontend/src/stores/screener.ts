@@ -42,6 +42,14 @@ export interface SectorScreenConfig {
   sector_top_n: number
 }
 
+export interface CoverageSourceStats {
+  data_source: string
+  total_sectors: number
+  sectors_with_constituents: number
+  total_stocks: number
+  coverage_ratio: number
+}
+
 export interface StrategyExample {
   name: string
   description: string
@@ -64,6 +72,7 @@ export const useScreenerStore = defineStore('screener', () => {
   const lastUpdated = ref<Date | null>(null)
   const factorRegistry = ref<Record<string, FactorMeta[]>>({})
   const strategyExamples = ref<StrategyExample[]>([])
+  const sectorCoverage = ref<CoverageSourceStats[]>([])
 
   async function fetchResults() {
     loading.value = true
@@ -97,6 +106,13 @@ export const useScreenerStore = defineStore('screener', () => {
     strategyExamples.value = res.data
   }
 
+  async function fetchSectorCoverage() {
+    const res = await apiClient.get<{ sources: CoverageSourceStats[] }>(
+      '/sector/coverage'
+    )
+    sectorCoverage.value = res.data.sources
+  }
+
   return {
     results,
     strategies,
@@ -109,5 +125,7 @@ export const useScreenerStore = defineStore('screener', () => {
     activateStrategy,
     fetchFactorRegistry,
     fetchStrategyExamples,
+    sectorCoverage,
+    fetchSectorCoverage,
   }
 })

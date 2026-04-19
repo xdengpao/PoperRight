@@ -176,10 +176,8 @@
 
           <!-- Sector-specific selectors -->
           <div v-if="factor.type === 'sector'" class="sector-selectors">
-            <select v-model="sectorConfig.sector_data_source" class="input sector-select" aria-label="数据来源">
-              <option value="DC">东方财富</option>
-              <option value="TI">同花顺</option>
-              <option value="TDX">通达信</option>
+            <select v-model="sectorConfig.sector_data_source" class="input sector-select sector-source-select" aria-label="数据来源">
+              <option v-for="opt in sectorDataSourceOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
             <select v-model="sectorConfig.sector_type" class="input sector-select" aria-label="板块类型">
               <option value="INDUSTRY">行业板块</option>
@@ -191,6 +189,9 @@
               <input v-model.number="sectorConfig.sector_period" type="number" min="1" max="60" class="input param-input" aria-label="涨幅周期" />
               <span class="param-hint">天</span>
             </div>
+          </div>
+          <div v-if="factor.type === 'sector' && selectedSourceCoverage && selectedSourceCoverage.coverage_ratio < 0.5" class="sector-coverage-warning" role="alert">
+            ⚠️ 该数据源成分股数据不完整（仅 {{ selectedSourceCoverage.sectors_with_constituents }}/{{ selectedSourceCoverage.total_sectors }} 板块有成分股数据），可能影响板块筛选效果，建议使用东方财富（DC）或通达信（TDX）
           </div>
 
           <!-- 权重滑块 -->
@@ -1240,6 +1241,43 @@ const sectorConfig = reactive({
   sector_top_n: 30,
 })
 
+// ─── 板块数据源覆盖率 ────────────────────────────────────────────────────────
+
+const DATA_SOURCE_LABELS: Record<string, string> = {
+  DC: '东方财富 DC',
+  TI: '同花顺 TI',
+  TDX: '通达信 TDX',
+}
+
+/** 当前选中数据源的覆盖率统计 */
+const selectedSourceCoverage = computed(() => {
+  const coverage = screenerStore.sectorCoverage
+  if (!Array.isArray(coverage)) return null
+  return coverage.find(
+    (s) => s.data_source === sectorConfig.sector_data_source
+  ) ?? null
+})
+
+/** 数据源下拉选项（含覆盖率摘要） */
+const sectorDataSourceOptions = computed(() => {
+  const sources = ['DC', 'TI', 'TDX']
+  const coverage = screenerStore.sectorCoverage
+  return sources.map((ds) => {
+    const stats = Array.isArray(coverage)
+      ? coverage.find((s) => s.data_source === ds)
+      : undefined
+    const baseName = DATA_SOURCE_LABELS[ds] ?? ds
+    if (stats) {
+      const warn = stats.coverage_ratio < 0.5 ? ' ⚠️' : ''
+      return {
+        value: ds,
+        label: `${baseName}（${stats.sectors_with_constituents} 板块 / ${stats.total_stocks} 股票）${warn}`,
+      }
+    }
+    return { value: ds, label: baseName }
+  })
+})
+
 // ─── 策略示例 ──────────────────────────────────────────────────────────────────
 
 const showExamplesDialog = ref(false)
@@ -1777,6 +1815,8 @@ onMounted(async () => {
   // 加载因子注册表和策略示例
   screenerStore.fetchFactorRegistry()
   screenerStore.fetchStrategyExamples()
+  // 加载板块数据源覆盖率
+  screenerStore.fetchSectorCoverage()
   // 自动选中 is_active=true 的策略并回显配置（需求 22.3）
   const active = strategies.value.find((s) => s.is_active)
   if (active) {
@@ -2132,10 +2172,17 @@ details > summary::-webkit-details-marker { display: none; }
 
 .factor-toggle { flex-shrink: 0; }
 
-.sector-selectors { display: flex; gap: 8px; align-items: center; margin-top: 4px; width: 100%; }
+.sector-selectors { display: flex; gap: 8px; align-items: center; margin-top: 4px; width: 100%; flex-wrap: wrap; }
 .sector-select { width: 100px; }
+.sector-source-select { width: auto; min-width: 140px; }
 .sector-period-input { display: flex; align-items: center; gap: 4px; }
 .param-hint { font-size: 12px; color: #8b949e; }
+
+.sector-coverage-warning {
+  width: 100%; margin-top: 6px; padding: 8px 12px;
+  background: #3a2a1a; border: 1px solid #d2992244; border-radius: 6px;
+  font-size: 12px; color: #d29922; line-height: 1.5;
+}
 
 .factor-unit { font-size: 12px; color: var(--text-secondary, #8b949e); flex-shrink: 0; }
 .factor-range-hint { font-size: 11px; color: var(--text-secondary, #8b949e); flex-shrink: 0; }

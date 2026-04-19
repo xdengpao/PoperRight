@@ -10,8 +10,10 @@
 - POST /sector/import/incremental   — 触发增量导入
 - GET  /sector/import/status        — 导入进度查询
 - POST /sector/import/stop          — 停止导入
+- GET  /sector/import/errors        — 导入错误查询（分页）
+- GET  /sector/import/errors/export — 导入错误导出（CSV）
 
-Validates: Requirements 7.1–7.5, 8.1–8.5
+Validates: Requirements 7.1–7.5, 8.1–8.5, 17.5, 17.6
 """
 
 from __future__ import annotations
@@ -712,3 +714,187 @@ class TestStopImport:
         data = resp.json()
         assert "message" in data
         svc_instance.request_stop.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# 17.5 — GET /sector/import/errors
+# 17.6 — GET /sector/import/errors/export
+# ---------------------------------------------------------------------------
+
+SAMPLE_ERRORS = [
+    {
+        "file": "东方财富_板块列表1.csv",
+        "line": 42,
+        "error_type": "parse_error",
+        "message": "列数不匹配，期望 13 列，实际 10 列",
+        "raw_data": "BK0001,人工智能,CONCEPT,...",
+    },
+    {
+        "file": "通达信_板块行情汇总.csv",
+        "line": 108,
+        "error_type": "ohlc_invalid",
+        "message": "OHLC 保序性验证失败: high < low",
+        "raw_data": "BK0002,2024-06-15,100.00,90.00,110.00,95.00,...",
+    },
+]
+
+
+class TestGetImportErrors:
+    """导入错误查询端点测试。Validates: Requirements 17.5"""
+
+    @pytest.mark.asyncio
+    async def test_get_import_errors_empty(self):
+        """无错误时返回空列表和 total=0。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=[])
+            svc_instance.get_error_count = AsyncMock(return_value=0)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get("/api/v1/sector/import/errors")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 0
+        assert data["offset"] == 0
+        assert data["limit"] == 50
+        assert data["items"] == []
+
+    @pytest.mark.asyncio
+    async def test_get_import_errors_with_data(self):
+        """有错误数据时返回正确的 items 和 total。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=SAMPLE_ERRORS)
+            svc_instance.get_error_count = AsyncMock(return_value=2)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get("/api/v1/sector/import/errors")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
+        assert data["items"][0]["file"] == "东方财富_板块列表1.csv"
+        assert data["items"][0]["line"] == 42
+        assert data["items"][0]["error_type"] == "parse_error"
+        assert data["items"][0]["message"] == "列数不匹配，期望 13 列，实际 10 列"
+        assert data["items"][0]["raw_data"] == "BK0001,人工智能,CONCEPT,..."
+        assert data["items"][1]["error_type"] == "ohlc_invalid"
+        svc_instance.get_errors.assert_awaited_once_with(offset=0, limit=50)
+        svc_instance.get_error_count.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_import_errors_pagination(self):
+        """使用 offset 和 limit 参数分页查询。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=[SAMPLE_ERRORS[1]])
+            svc_instance.get_error_count = AsyncMock(return_value=2)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get(
+                    "/api/v1/sector/import/errors",
+                    params={"offset": 1, "limit": 10},
+                )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["offset"] == 1
+        assert data["limit"] == 10
+        assert len(data["items"]) == 1
+        svc_instance.get_errors.assert_awaited_once_with(offset=1, limit=10)
+
+
+class TestExportImportErrorsCsv:
+    """导入错误 CSV 导出端点测试。Validates: Requirements 17.6"""
+
+    @pytest.mark.asyncio
+    async def test_export_errors_csv_empty(self):
+        """无错误时 CSV 仅包含表头行。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=[])
+            svc_instance.get_error_count = AsyncMock(return_value=0)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get("/api/v1/sector/import/errors/export")
+
+        assert resp.status_code == 200
+        content = resp.text
+        lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
+        # 仅有表头行
+        assert len(lines) == 1
+        assert "file" in lines[0]
+        assert "line" in lines[0]
+        assert "error_type" in lines[0]
+        assert "message" in lines[0]
+        assert "raw_data" in lines[0]
+
+    @pytest.mark.asyncio
+    async def test_export_errors_csv_with_data(self):
+        """有错误数据时 CSV 包含表头和数据行。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=SAMPLE_ERRORS)
+            svc_instance.get_error_count = AsyncMock(return_value=2)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get("/api/v1/sector/import/errors/export")
+
+        assert resp.status_code == 200
+        content = resp.text
+        lines = [line.strip() for line in content.strip().split("\n") if line.strip()]
+        # 表头 + 2 条数据
+        assert len(lines) == 3
+        # 验证表头
+        header = lines[0]
+        assert "file,line,error_type,message,raw_data" == header
+        # 验证第一条数据行包含正确内容
+        assert "东方财富_板块列表1.csv" in lines[1]
+        assert "42" in lines[1]
+        assert "parse_error" in lines[1]
+        # 验证第二条数据行
+        assert "通达信_板块行情汇总.csv" in lines[2]
+        assert "ohlc_invalid" in lines[2]
+
+    @pytest.mark.asyncio
+    async def test_export_errors_csv_content_type(self):
+        """验证响应 Content-Type 为 text/csv，Content-Disposition 包含文件名。"""
+        with patch(
+            "app.api.v1.sector.SectorImportService"
+        ) as MockSvc:
+            svc_instance = MockSvc.return_value
+            svc_instance.get_errors = AsyncMock(return_value=[])
+            svc_instance.get_error_count = AsyncMock(return_value=0)
+
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://localhost"
+            ) as client:
+                resp = await client.get("/api/v1/sector/import/errors/export")
+
+        assert resp.status_code == 200
+        assert "text/csv" in resp.headers["content-type"]
+        assert "import_errors.csv" in resp.headers["content-disposition"]
+        assert "attachment" in resp.headers["content-disposition"]
