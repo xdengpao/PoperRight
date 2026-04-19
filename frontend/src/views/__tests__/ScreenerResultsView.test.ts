@@ -63,6 +63,7 @@ interface MockSignal {
   strength?: string
   freshness?: string
   description?: string
+  dimension?: string
 }
 
 interface MockSectorClassifications {
@@ -510,6 +511,95 @@ describe('ScreenerResultsView - 信号标签增强', () => {
 
       const sectorArea = wrapper.find('.sector-classifications')
       expect(sectorArea.exists()).toBe(false)
+
+      wrapper.unmount()
+    })
+  })
+
+  // ─── Req 10.3, 10.4, 10.5: 信号维度分组渲染 ─────────────────────────────
+
+  describe('信号维度分组渲染', () => {
+    it('信号按维度分组展示，每组有维度标题', async () => {
+      const wrapper = await mountAndExpand([
+        makeRow({
+          signals: [
+            { category: 'MA_TREND', label: 'ma_trend', is_fake_breakout: false, strength: 'STRONG', description: '均线多头排列', dimension: '技术面' },
+            { category: 'CAPITAL_INFLOW', label: 'capital', is_fake_breakout: false, strength: 'MEDIUM', description: '主力资金净流入', dimension: '资金面' },
+          ],
+        }),
+      ])
+
+      const headers = wrapper.findAll('.dimension-header')
+      expect(headers.length).toBe(2)
+      expect(headers[0].text()).toBe('技术面')
+      expect(headers[1].text()).toBe('资金面')
+
+      // 每组下有对应的信号标签
+      const tags = wrapper.findAll('.signal-tag')
+      expect(tags.length).toBe(2)
+      expect(tags[0].text()).toContain('均线趋势')
+      expect(tags[1].text()).toContain('资金流入')
+
+      wrapper.unmount()
+    })
+
+    it('维度分组按固定顺序（技术面 → 板块面 → 资金面 → 基本面）', async () => {
+      const wrapper = await mountAndExpand([
+        makeRow({
+          signals: [
+            { category: 'CAPITAL_INFLOW', label: 'capital', is_fake_breakout: false, strength: 'MEDIUM', description: '主力资金净流入', dimension: '资金面' },
+            { category: 'SECTOR_STRONG', label: 'sector', is_fake_breakout: false, strength: 'STRONG', description: '板块强势', dimension: '板块面' },
+            { category: 'MA_TREND', label: 'ma_trend', is_fake_breakout: false, strength: 'STRONG', description: '均线多头排列', dimension: '技术面' },
+          ],
+        }),
+      ])
+
+      const headers = wrapper.findAll('.dimension-header')
+      expect(headers.length).toBe(3)
+      // 固定顺序：技术面 → 板块面 → 资金面
+      expect(headers[0].text()).toBe('技术面')
+      expect(headers[1].text()).toBe('板块面')
+      expect(headers[2].text()).toBe('资金面')
+
+      wrapper.unmount()
+    })
+
+    it('无信号的维度分组被跳过', async () => {
+      const wrapper = await mountAndExpand([
+        makeRow({
+          signals: [
+            { category: 'MA_TREND', label: 'ma_trend', is_fake_breakout: false, strength: 'STRONG', description: '均线多头排列', dimension: '技术面' },
+            { category: 'MACD', label: 'macd', is_fake_breakout: false, strength: 'MEDIUM', description: 'MACD 金叉', dimension: '技术面' },
+          ],
+        }),
+      ])
+
+      const headers = wrapper.findAll('.dimension-header')
+      // 只有技术面有信号，其他维度被跳过
+      expect(headers.length).toBe(1)
+      expect(headers[0].text()).toBe('技术面')
+
+      // 技术面下有两个信号标签
+      const tags = wrapper.findAll('.signal-tag')
+      expect(tags.length).toBe(2)
+
+      wrapper.unmount()
+    })
+
+    it('dimension 缺失时信号归入"其他"分组', async () => {
+      const wrapper = await mountAndExpand([
+        makeRow({
+          signals: [
+            { category: 'MA_TREND', label: 'ma_trend', is_fake_breakout: false, strength: 'STRONG', description: '均线多头排列', dimension: '技术面' },
+            { category: 'RSI', label: 'rsi', is_fake_breakout: false, strength: 'WEAK', description: 'RSI 信号' },
+          ],
+        }),
+      ])
+
+      const headers = wrapper.findAll('.dimension-header')
+      expect(headers.length).toBe(2)
+      expect(headers[0].text()).toBe('技术面')
+      expect(headers[1].text()).toBe('其他')
 
       wrapper.unmount()
     })

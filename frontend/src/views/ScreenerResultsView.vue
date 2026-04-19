@@ -122,32 +122,35 @@
                     </div>
                     <div v-if="row.signals.length === 0" class="detail-empty">无触发信号</div>
                     <div v-else class="signal-tags">
-                      <span
-                        v-for="(sig, idx) in row.signals"
-                        :key="idx"
-                        :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category], signalStrengthClass(sig.strength)]"
-                      >
-                        {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.description || sig.label }}
-                        <span class="strength-label">{{ signalStrengthText(sig.strength) }}</span>
-                        <span v-if="sig.freshness === 'NEW'" class="freshness-badge">新</span>
-                        <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
-                      </span>
+                      <template v-for="group in groupSignalsByDimension(row.signals)" :key="group.dimension">
+                        <div class="dimension-header">{{ group.dimension }}</div>
+                        <span
+                          v-for="(sig, idx) in group.signals"
+                          :key="idx"
+                          :class="['signal-tag', SIGNAL_CATEGORY_CLASS[sig.category], signalStrengthClass(sig.strength)]"
+                        >
+                          {{ SIGNAL_CATEGORY_LABEL[sig.category] }}：{{ sig.description || sig.label }}
+                          <span class="strength-label">{{ signalStrengthText(sig.strength) }}</span>
+                          <span v-if="sig.freshness === 'NEW'" class="freshness-badge">新</span>
+                          <span v-if="sig.is_fake_breakout" class="fake-tag">假突破</span>
+                        </span>
+                      </template>
                     </div>
-                  </div>
-                  <!-- 板块分类展示（需求 9） -->
-                  <div class="sector-classifications" v-if="row.sector_classifications">
-                    <div class="detail-header">板块分类</div>
-                    <div class="sector-columns">
-                      <div class="sector-column" v-for="source in sectorSources" :key="source.key">
-                        <div class="sector-source-title">{{ source.label }}</div>
-                        <div v-if="(row.sector_classifications[source.key] ?? []).length > 0" class="sector-tags">
-                          <span
-                            v-for="name in row.sector_classifications[source.key]"
-                            :key="name"
-                            class="sector-tag"
-                          >{{ name }}</span>
+                    <!-- 板块分类展示（需求 9）—— 放在信号详情下方 -->
+                    <div class="sector-classifications" v-if="row.sector_classifications">
+                      <div class="detail-header">板块分类</div>
+                      <div class="sector-columns">
+                        <div class="sector-column" v-for="source in sectorSources" :key="source.key">
+                          <div class="sector-source-title">{{ source.label }}</div>
+                          <div v-if="(row.sector_classifications[source.key] ?? []).length > 0" class="sector-tags">
+                            <span
+                              v-for="name in row.sector_classifications[source.key]"
+                              :key="name"
+                              class="sector-tag"
+                            >{{ name }}</span>
+                          </div>
+                          <div v-else class="sector-empty">暂无数据</div>
                         </div>
-                        <div v-else class="sector-empty">暂无数据</div>
                       </div>
                     </div>
                   </div>
@@ -231,6 +234,7 @@ interface SignalDetail {
   strength?: 'STRONG' | 'MEDIUM' | 'WEAK'
   freshness?: 'NEW' | 'CONTINUING'
   description?: string
+  dimension?: string  // 信号维度（"技术面"/"资金面"/"基本面"/"板块面"）
 }
 
 interface SectorClassifications {
@@ -307,6 +311,33 @@ function signalSummary(signals: SignalDetail[]): string {
     : `${signals.length} 个信号`
   const cats = [...new Set(signals.map((s) => SIGNAL_CATEGORY_LABEL[s.category] ?? s.category))]
   return `${base}：${cats.slice(0, 3).join(' / ')}${cats.length > 3 ? ' …' : ''}`
+}
+
+// 维度展示顺序（需求 10.4）
+const DIMENSION_ORDER = ['技术面', '板块面', '资金面', '基本面'] as const
+
+// 按维度分组信号（需求 10.3, 10.4, 10.5）
+function groupSignalsByDimension(signals: SignalDetail[]): { dimension: string; signals: SignalDetail[] }[] {
+  const groups = new Map<string, SignalDetail[]>()
+  for (const sig of signals) {
+    const dim = sig.dimension ?? '其他'
+    if (!groups.has(dim)) groups.set(dim, [])
+    groups.get(dim)!.push(sig)
+  }
+  // 按固定顺序排列，跳过无信号的维度
+  const ordered: { dimension: string; signals: SignalDetail[] }[] = []
+  for (const dim of DIMENSION_ORDER) {
+    const sigs = groups.get(dim)
+    if (sigs && sigs.length > 0) {
+      ordered.push({ dimension: dim, signals: sigs })
+      groups.delete(dim)
+    }
+  }
+  // 追加不在预定义顺序中的维度（如"其他"）
+  for (const [dim, sigs] of groups) {
+    if (sigs.length > 0) ordered.push({ dimension: dim, signals: sigs })
+  }
+  return ordered
 }
 
 // 信号强度 → CSS 类映射
@@ -936,6 +967,21 @@ onMounted(() => {
 .sector-empty {
   font-size: 12px;
   color: #484f58;
+}
+
+/* ─── 维度分组标题（需求 10）──────────────────────────────────────────────── */
+.dimension-header {
+  width: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: #8b949e;
+  margin-top: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #21262d;
+}
+
+.dimension-header:first-child {
+  margin-top: 0;
 }
 
 /* ─── 响应式：小屏幕上下堆叠 ───────────────────────────────────────────────── */

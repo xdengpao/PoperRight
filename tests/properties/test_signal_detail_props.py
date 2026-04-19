@@ -431,3 +431,73 @@ def test_sector_classifications_serialization_completeness(
     assert deserialized == sector_classifications, (
         f"JSON 往返不一致:\n  原始: {sector_classifications}\n  反序列化: {deserialized}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Property 6: 信号维度映射完整性与一致性
+# ---------------------------------------------------------------------------
+
+from app.api.v1.screen import _SIGNAL_DIMENSION_MAP
+
+
+# 合法的维度值集合
+_VALID_DIMENSIONS = {"技术面", "资金面", "基本面", "板块面"}
+
+
+@settings(max_examples=100)
+@given(signal=signal_detail_strategy())
+def test_dimension_mapping_completeness(signal: SignalDetail):
+    """
+    # Feature: signal-detail-enhancement, Property 6: dimension mapping completeness
+
+    **Validates: Requirements 10.1, 10.2, 10.5**
+
+    对任意有效的 SignalDetail 对象（已知 SignalCategory）：
+    1. _SIGNAL_DIMENSION_MAP 应包含该 category.value 的映射
+    2. 模拟 API 序列化逻辑后，输出 dict 应包含 dimension 字段
+    3. dimension 值应为 "技术面"、"资金面"、"基本面"、"板块面" 之一
+    4. 所有已知 SignalCategory 值均在 _SIGNAL_DIMENSION_MAP 中有映射
+    """
+    category_value = signal.category.value
+
+    # 验证所有已知 SignalCategory 值均在映射中
+    assert category_value in _SIGNAL_DIMENSION_MAP, (
+        f"SignalCategory.{category_value} 未在 _SIGNAL_DIMENSION_MAP 中定义映射"
+    )
+
+    # 模拟 API 序列化逻辑（与 screen.py run_screen 中一致）
+    serialized = {
+        "category": signal.category.value,
+        "label": signal.label,
+        "is_fake_breakout": signal.is_fake_breakout,
+        "strength": signal.strength.value,
+        "freshness": signal.freshness.value,
+        "description": signal.description,
+        "dimension": _SIGNAL_DIMENSION_MAP.get(signal.category.value, "其他"),
+    }
+
+    # 验证输出 dict 包含 dimension 字段
+    assert "dimension" in serialized, (
+        "API 序列化 dict 缺少 dimension 字段"
+    )
+
+    # 验证 dimension 值为合法维度之一（已知分类不应为"其他"）
+    assert serialized["dimension"] in _VALID_DIMENSIONS, (
+        f"dimension 值不合法: {serialized['dimension']}, "
+        f"期望 {_VALID_DIMENSIONS}, category={category_value}"
+    )
+
+
+def test_all_signal_categories_in_dimension_map():
+    """
+    验证 _SIGNAL_DIMENSION_MAP 覆盖所有已知 SignalCategory 枚举值。
+
+    **Validates: Requirements 10.1**
+    """
+    all_categories = {cat.value for cat in SignalCategory}
+    mapped_categories = set(_SIGNAL_DIMENSION_MAP.keys())
+
+    missing = all_categories - mapped_categories
+    assert not missing, (
+        f"以下 SignalCategory 值未在 _SIGNAL_DIMENSION_MAP 中定义映射: {missing}"
+    )

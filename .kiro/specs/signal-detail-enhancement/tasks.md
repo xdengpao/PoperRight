@@ -181,12 +181,13 @@
     - 新增 `sectorSources` 常量数组：`[{ key: 'eastmoney', label: '东方财富' }, { key: 'tonghuashun', label: '同花顺' }, { key: 'tongdaxin', label: '通达信' }]`
     - _Requirements: 9.1, 9.2, 9.4, 9.5_
 
-  - [x] 12.2 在展开详情行的 `detail-panel` 中，在信号详情区域（`detail-signals`）下方新增板块分类区域
+  - [x] 12.2 在 `detail-signals` 区域内部、信号标签列表下方嵌套板块分类区域
+    - 板块分类区域嵌套在 `detail-signals` 内部（而非作为与信号区和K线图表并列的独立 flex 子项），避免挤占K线图表水平空间
     - 使用 `v-if="row.sector_classifications"` 条件渲染，`sector_classifications` 缺失时不渲染
     - 添加 `detail-header` 标题"板块分类"
     - 使用 `v-for="source in sectorSources"` 遍历三个数据源，每列显示数据源中文标题和板块标签列表
     - 当某数据源板块列表为空时显示"暂无数据"占位文本
-    - _Requirements: 9.4, 9.5, 9.6_
+    - _Requirements: 9.4, 9.5, 9.6, 9.8_
 
   - [x] 12.3 添加板块分类 CSS 样式
     - 添加 `.sector-classifications` 容器样式（margin-top、padding-top、border-top 分隔线）
@@ -207,6 +208,79 @@
     - _Requirements: 9.4, 9.5, 9.6_
 
 - [x] 13. Final checkpoint - 确保全部测试通过
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 14. 后端：信号维度映射与 API 序列化
+  - [x] 14.1 在 `app/api/v1/screen.py` 模块顶部定义 `_SIGNAL_DIMENSION_MAP` 常量
+    - 定义 `dict[str, str]` 类型的映射：`MA_TREND`/`MACD`/`BOLL`/`RSI`/`DMA`/`BREAKOUT`/`MA_SUPPORT` → `"技术面"`，`CAPITAL_INFLOW`/`LARGE_ORDER` → `"资金面"`，`SECTOR_STRONG` → `"板块面"`
+    - 添加中文注释说明映射用途和需求编号（需求 10）
+    - _Requirements: 10.1_
+
+  - [x] 14.2 修改 `app/api/v1/screen.py` 中 `run_screen` 函数的信号序列化逻辑，在每条信号的序列化字典中添加 `dimension` 字段
+    - 使用 `_SIGNAL_DIMENSION_MAP.get(s.category.value, "其他")` 实时派生 `dimension` 值
+    - 确保缓存读取路径也包含 `dimension` 字段序列化（需求 10.6）
+    - _Requirements: 10.1, 10.2, 10.6_
+
+  - [x] 14.3 修改 `app/services/screener/screen_executor.py` 中 `_generate_signal_description()` 的 `SECTOR_STRONG` 分支
+    - 从 `stock_data.get("sector_name")` 读取板块名称
+    - 当 `sector_name` 存在时生成 `"所属板块【{sector_name}】涨幅排名前列"`
+    - 当 `sector_name` 缺失时回退为 `"所属板块涨幅排名前列"`
+    - _Requirements: 10.7, 2.10_
+
+  - [x] 14.4 编写属性测试验证信号维度映射完整性
+    - **Property 6: dimension mapping completeness**
+    - 在 `tests/properties/test_signal_detail_props.py` 中使用 Hypothesis 生成任意合法 `SignalDetail` 对象（已知 `SignalCategory`）
+    - 模拟 API 序列化逻辑，验证输出 dict 包含 `dimension` 字段，值为 `"技术面"`、`"资金面"`、`"基本面"`、`"板块面"` 之一
+    - 验证所有已知 `SignalCategory` 值均在 `_SIGNAL_DIMENSION_MAP` 中有映射
+    - 最少 100 次迭代
+    - **Validates: Requirements 10.1, 10.2, 10.5**
+
+  - [x] 14.5 编写单元测试验证维度映射和 SECTOR_STRONG 描述更新
+    - 在 `tests/services/test_signal_description.py` 中新增测试：
+      - SECTOR_STRONG 信号在 `sector_name` 存在时描述包含板块名（如 `"所属板块【半导体】涨幅排名前列"`）
+      - SECTOR_STRONG 信号在 `sector_name` 缺失时回退为通用描述
+    - 在 `tests/api/test_screen_api.py` 中新增测试：
+      - `_SIGNAL_DIMENSION_MAP` 覆盖所有已知 `SignalCategory` 值
+      - API 序列化中 `dimension` 字段值与映射一致
+    - _Requirements: 10.1, 10.2, 10.7_
+
+- [x] 15. Checkpoint - 确保后端维度映射相关测试通过
+  - Ensure all tests pass, ask the user if questions arise.
+
+- [x] 16. 前端：信号维度分组展示
+  - [x] 16.1 在 `frontend/src/views/ScreenerResultsView.vue` 中扩展 `SignalDetail` TypeScript 接口
+    - 添加可选字段 `dimension?: string`
+    - _Requirements: 10.2_
+
+  - [x] 16.2 添加维度分组常量和分组函数
+    - 定义 `DIMENSION_ORDER` 常量数组：`['技术面', '板块面', '资金面', '基本面']`（需求 10.4 指定顺序）
+    - 实现 `groupSignalsByDimension(signals: SignalDetail[])` 函数：
+      - 按 `dimension` 字段分组信号，`dimension` 缺失时归入 `"其他"`（需求 10.5）
+      - 按 `DIMENSION_ORDER` 固定顺序排列分组，跳过无信号的维度
+      - 不在预定义顺序中的维度（如"其他"）追加到末尾
+    - _Requirements: 10.3, 10.4, 10.5_
+
+  - [x] 16.3 修改信号标签区域模板，按维度分组渲染
+    - 将现有的 `v-for="(sig, idx) in row.signals"` 替换为嵌套的 `v-for` 结构：
+      - 外层遍历 `groupSignalsByDimension(row.signals)` 获取维度分组
+      - 每组渲染一个 `.dimension-header` 标题（维度中文名）
+      - 内层遍历分组内的信号，保留现有的信号标签渲染逻辑不变
+    - _Requirements: 10.3, 10.4_
+
+  - [x] 16.4 添加维度分组标题 CSS 样式
+    - 添加 `.dimension-header` 样式：`width: 100%`、`font-size: 12px`、`font-weight: 600`、`color: #8b949e`、`margin-top: 8px`、`margin-bottom: 4px`、`border-bottom: 1px solid #21262d`
+    - 添加 `.dimension-header:first-child` 样式：`margin-top: 0`（首个分组无上边距）
+    - _Requirements: 10.3_
+
+  - [x] 16.5 编写前端单元测试验证维度分组渲染
+    - 在 `frontend/src/views/__tests__/ScreenerResultsView.test.ts` 中编写测试
+    - 覆盖信号按维度分组展示，每组有维度标题
+    - 覆盖维度分组按固定顺序（技术面 → 板块面 → 资金面 → 基本面）
+    - 覆盖无信号的维度分组被跳过
+    - 覆盖 `dimension` 缺失时信号归入"其他"分组
+    - _Requirements: 10.3, 10.4, 10.5_
+
+- [x] 17. Final checkpoint - 确保全部测试通过（含维度分类功能）
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

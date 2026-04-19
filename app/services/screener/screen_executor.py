@@ -459,8 +459,11 @@ class ScreenExecutor:
         if category == SignalCategory.MA_SUPPORT:
             return "回调至均线获支撑"
 
-        # 板块强势信号
+        # 板块强势信号（需求 10.7：包含具体板块名称）
         if category == SignalCategory.SECTOR_STRONG:
+            sector_name = stock_data.get("sector_name")
+            if sector_name:
+                return f"所属板块【{sector_name}】涨幅排名前列"
             return "所属板块涨幅排名前列"
 
         # 未知信号类别

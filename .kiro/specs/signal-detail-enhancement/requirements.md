@@ -19,6 +19,7 @@
 - **Factor_Description**: 信号中包含的人类可读因子条件描述文本，说明具体触发条件和量化数值
 - **Screen_Executor**: 后端选股执行器（`app/services/screener/screen_executor.py`），负责生成 `ScreenItem` 和 `SignalDetail`
 - **ScreenerResultsView**: 前端选股结果页面（`frontend/src/views/ScreenerResultsView.vue`）
+- **Signal_Dimension**: 信号维度分类，将 10 种 `SignalCategory` 归类为四个分析维度——技术面（Technical）、资金面（Capital Flow）、基本面（Fundamental）、板块面（Sector），用于在前端按维度分组展示触发信号
 
 ## Requirements
 
@@ -48,7 +49,7 @@
 7. WHEN 资金流入信号（CAPITAL_INFLOW）触发, THE Screen_Executor SHALL 生成包含资金流向的描述文本（例如"主力资金净流入"）
 8. WHEN 大单活跃信号（LARGE_ORDER）触发, THE Screen_Executor SHALL 生成包含大单状态的描述文本（例如"大单成交活跃"）
 9. WHEN 均线支撑信号（MA_SUPPORT）触发, THE Screen_Executor SHALL 生成包含支撑均线的描述文本（例如"回调至 20 日均线获支撑"）
-10. WHEN 板块强势信号（SECTOR_STRONG）触发, THE Screen_Executor SHALL 生成包含板块信息的描述文本（例如"所属板块涨幅排名前列"）
+10. WHEN 板块强势信号（SECTOR_STRONG）触发, THE Screen_Executor SHALL 生成包含具体触发板块名称的描述文本（例如"所属板块【半导体】涨幅排名前列"），使用户能明确知道因哪个板块而被选中
 11. THE Screen_Executor SHALL 将生成的描述文本存储在 SignalDetail 的 `description` 字段中
 
 ### Requirement 3: 前端信号标签增强展示
@@ -126,3 +127,19 @@
 5. THE ScreenerResultsView SHALL 为每列显示数据源中文标题（"东方财富"、"同花顺"、"通达信"）
 6. IF 某数据源的板块列表为空, THEN THE ScreenerResultsView SHALL 在对应列中显示"暂无数据"占位文本
 7. WHEN 选股结果从缓存中读取, THE Signal_Detail_API SHALL 保留完整的 `sector_classifications` 字段
+8. THE ScreenerResultsView SHALL 将板块分类区域嵌套在信号详情区域（`detail-signals`）内部、信号标签列表下方，而非作为与信号详情和K线图表并列的独立 flex 子项，以避免挤占K线图表的水平空间导致图表无法正常显示
+
+
+### Requirement 10: 信号维度分类展示
+
+**User Story:** As a 量化交易员, I want 在触发信号详情中知道具体是技术面、资金面、基本面还是板块面中哪个因子触发了, so that 我能从多维度视角快速理解信号来源并做出更全面的交易决策。
+
+#### Acceptance Criteria
+
+1. THE Signal_Detail_API SHALL 定义一个从 `SignalCategory` 到 Signal_Dimension 的静态映射，其中：技术面包含 MA_TREND、MACD、BOLL、RSI、DMA、BREAKOUT、MA_SUPPORT；资金面包含 CAPITAL_INFLOW、LARGE_ORDER；基本面暂无对应分类（预留扩展）；板块面包含 SECTOR_STRONG
+2. WHEN 选股执行完成, THE Signal_Detail_API SHALL 在每条信号对象中包含 `dimension` 字段，值为该信号所属维度的中文名称（"技术面"、"资金面"、"基本面"或"板块面"）
+3. WHEN 选股结果展开详情面板, THE ScreenerResultsView SHALL 将信号标签按 Signal_Dimension 分组展示，每组以维度中文名称作为分组标题
+4. THE ScreenerResultsView SHALL 按固定顺序展示维度分组：技术面 → 板块面 → 资金面 → 基本面，跳过无信号的维度分组
+5. IF 信号的 `dimension` 字段缺失, THEN THE ScreenerResultsView SHALL 将该信号归入默认分组"其他"以保持向后兼容
+6. WHEN 选股结果从缓存中读取, THE Signal_Detail_API SHALL 保留完整的 `dimension` 字段
+7. WHEN 板块面维度的信号（SECTOR_STRONG）展示时, THE ScreenerResultsView SHALL 在信号描述中包含具体触发板块名称，使用户能明确知道该股票因属于哪个板块而被选中

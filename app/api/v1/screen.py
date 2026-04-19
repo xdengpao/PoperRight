@@ -48,6 +48,21 @@ _DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 # 数据源代码 → API 字段名映射（需求 9）
 _SOURCE_TO_API_KEY = {"DC": "eastmoney", "TI": "tonghuashun", "TDX": "tongdaxin"}
 
+# 信号维度分类映射：SignalCategory.value → 维度中文名（需求 10）
+# 将 10 种信号分类归入四个分析维度，用于前端按维度分组展示触发信号
+_SIGNAL_DIMENSION_MAP: dict[str, str] = {
+    "MA_TREND": "技术面",
+    "MACD": "技术面",
+    "BOLL": "技术面",
+    "RSI": "技术面",
+    "DMA": "技术面",
+    "BREAKOUT": "技术面",
+    "MA_SUPPORT": "技术面",
+    "CAPITAL_INFLOW": "资金面",
+    "LARGE_ORDER": "资金面",
+    "SECTOR_STRONG": "板块面",
+}
+
 
 # ---------------------------------------------------------------------------
 # Pydantic 请求/响应模型
@@ -447,6 +462,7 @@ async def run_screen(body: ScreenRunRequest) -> dict:
                         "strength": s.strength.value,
                         "freshness": s.freshness.value,
                         "description": s.description,
+                        "dimension": _SIGNAL_DIMENSION_MAP.get(s.category.value, "其他"),
                     }
                     for s in item.signals
                 ],

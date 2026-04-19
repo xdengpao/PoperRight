@@ -116,11 +116,11 @@ class TestGenerateSignalDescriptionNormal:
         assert result == "回调至均线获支撑"
 
     def test_sector_strong_fixed_text(self):
-        """SECTOR_STRONG：返回固定描述文本"""
+        """SECTOR_STRONG：sector_name 存在时返回包含板块名的描述"""
         signal = _make_signal(SignalCategory.SECTOR_STRONG)
         stock_data = {"sector_name": "新能源"}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
-        assert result == "所属板块涨幅排名前列"
+        assert result == "所属板块【新能源】涨幅排名前列"
 
 
 # ---------------------------------------------------------------------------
@@ -302,3 +302,40 @@ class TestBreakoutTypeChineseMapping:
         }
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
         assert result == "箱体突破"
+
+
+# ---------------------------------------------------------------------------
+# SECTOR_STRONG 描述文本包含板块名称（需求 10.7）
+# ---------------------------------------------------------------------------
+
+
+class TestSectorStrongDescriptionWithSectorName:
+    """验证 SECTOR_STRONG 信号描述文本包含具体板块名称（需求 10.7）"""
+
+    def test_sector_strong_with_sector_name_present(self):
+        """SECTOR_STRONG：sector_name 存在时，描述包含板块名"""
+        signal = _make_signal(SignalCategory.SECTOR_STRONG)
+        stock_data = {"sector_name": "半导体"}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "所属板块【半导体】涨幅排名前列"
+
+    def test_sector_strong_with_sector_name_missing(self):
+        """SECTOR_STRONG：sector_name 缺失时，回退为通用描述"""
+        signal = _make_signal(SignalCategory.SECTOR_STRONG)
+        stock_data = {}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "所属板块涨幅排名前列"
+
+    def test_sector_strong_with_sector_name_none(self):
+        """SECTOR_STRONG：sector_name 为 None 时，回退为通用描述"""
+        signal = _make_signal(SignalCategory.SECTOR_STRONG)
+        stock_data = {"sector_name": None}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "所属板块涨幅排名前列"
+
+    def test_sector_strong_with_different_sector_name(self):
+        """SECTOR_STRONG：不同板块名称正确嵌入描述"""
+        signal = _make_signal(SignalCategory.SECTOR_STRONG)
+        stock_data = {"sector_name": "人工智能"}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "所属板块【人工智能】涨幅排名前列"
