@@ -37,6 +37,8 @@ class StockInfo(PGBase):
     pb: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     roe: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     market_cap: Mapped[Decimal | None] = mapped_column(Numeric(20, 2), nullable=True)
+    industry_code: Mapped[str | None] = mapped_column(String(10), nullable=True)   # 申万一级行业代码
+    industry_name: Mapped[str | None] = mapped_column(String(50), nullable=True)   # 申万一级行业名称
     updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ, nullable=True)
 
     def __repr__(self) -> str:

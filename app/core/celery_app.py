@@ -18,6 +18,7 @@ celery_app = Celery(
         "app.tasks.backtest",
         "app.tasks.review",
         "app.tasks.sector_sync",
+        "app.tasks.risk_cleanup",
     ],
 )
 
@@ -110,6 +111,13 @@ celery_app.conf.beat_schedule = {
     "daily-kline-sync-1600": {
         "task": "app.tasks.data_sync.sync_daily_kline",
         "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+        "options": {"queue": "data_sync"},
+    },
+
+    # 风控事件日志清理：每日凌晨 2:00 执行（需求 10.5）
+    "risk-event-log-cleanup-0200": {
+        "task": "app.tasks.risk_cleanup.cleanup_risk_event_log",
+        "schedule": crontab(hour=2, minute=0),
         "options": {"queue": "data_sync"},
     },
 }

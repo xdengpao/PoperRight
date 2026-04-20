@@ -95,6 +95,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         threshold_type=ThresholdType.BOOLEAN,
         default_threshold=None,
         description="价格回调至 20/60 日均线附近后企稳反弹的信号",
+        examples=[
+            {"说明": "筛选回调至 20 日或 60 日均线附近企稳反弹的个股"},
+        ],
     ),
     "macd": FactorMeta(
         factor_name="macd",
@@ -103,6 +106,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         threshold_type=ThresholdType.BOOLEAN,
         default_threshold=None,
         description="DIF/DEA 零轴上方金叉 + 红柱放大 + DEA 向上的多头信号",
+        examples=[
+            {"说明": "筛选 MACD 零轴上方金叉且红柱放大的个股"},
+        ],
     ),
     "boll": FactorMeta(
         factor_name="boll",
@@ -111,6 +117,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         threshold_type=ThresholdType.BOOLEAN,
         default_threshold=None,
         description="股价站稳中轨、触碰上轨且布林带开口向上的突破信号",
+        examples=[
+            {"说明": "筛选连续 2 日站稳布林带中轨的个股"},
+        ],
     ),
     "rsi": FactorMeta(
         factor_name="rsi",
@@ -121,6 +130,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="RSI 处于强势区间且无超买背离，50-80 为适中强势区间",
+        examples=[
+            {"operator": "range", "threshold": [55, 75], "说明": "筛选 RSI 在 55-75 强势区间内的个股"},
+        ],
     ),
     "dma": FactorMeta(
         factor_name="dma",
@@ -129,6 +141,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         threshold_type=ThresholdType.BOOLEAN,
         default_threshold=None,
         description="DMA 线在 AMA 线上方，表示短期均线强于长期均线",
+        examples=[
+            {"说明": "筛选 DMA 线在 AMA 线上方的个股，表示短期趋势强于长期"},
+        ],
     ),
     "breakout": FactorMeta(
         factor_name="breakout",
@@ -137,6 +152,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         threshold_type=ThresholdType.BOOLEAN,
         default_threshold=None,
         description="箱体突破/前期高点突破/下降趋势线突破，需量价确认（量比 ≥ 1.5 倍）",
+        examples=[
+            {"说明": "筛选放量突破箱体或前期高点的个股，量比 ≥ 1.5"},
+        ],
     ),
 
     # ── 资金面（4 个） ──
@@ -150,6 +168,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_max=100,
         unit="%",
         description="换手率反映交易活跃度，3%-15% 为适中活跃区间",
+        examples=[
+            {"operator": "range", "threshold": [3.0, 15.0], "说明": "筛选换手率在 3%-15% 的适中活跃个股"},
+        ],
     ),
     "money_flow": FactorMeta(
         factor_name="money_flow",
@@ -160,6 +181,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="主力资金净流入的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 80, "说明": "筛选主力资金净流入排名前 20% 的个股"},
+        ],
     ),
     "large_order": FactorMeta(
         factor_name="large_order",
@@ -171,6 +195,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_max=100,
         unit="%",
         description="大单成交额占总成交额的比例，>30% 表示主力资金活跃",
+        examples=[
+            {"operator": ">=", "threshold": 30, "说明": "筛选大单成交占比 ≥ 30% 的个股"},
+        ],
     ),
     "volume_price": FactorMeta(
         factor_name="volume_price",
@@ -181,6 +208,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="近 20 日日均成交额的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 70, "说明": "筛选日均成交额排名前 30% 的个股，确保流动性充足"},
+        ],
     ),
 
     # ── 基本面（6 个） ──
@@ -193,6 +223,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=5.0,
         description="市盈率的行业相对值（当前 PE / 行业中位数 PE）",
+        examples=[
+            {"operator": "<=", "threshold": 1.0, "说明": "筛选 PE 低于行业中位数的个股（相对低估）"},
+        ],
     ),
     "pb": FactorMeta(
         factor_name="pb",
@@ -203,6 +236,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=5.0,
         description="市净率的行业相对值（当前 PB / 行业中位数 PB）",
+        examples=[
+            {"operator": "<=", "threshold": 1.0, "说明": "筛选 PB 低于行业中位数的个股（相对低估）"},
+        ],
     ),
     "roe": FactorMeta(
         factor_name="roe",
@@ -213,6 +249,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="ROE 的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 70, "说明": "筛选 ROE 排名前 30% 的高盈利能力个股"},
+        ],
     ),
     "profit_growth": FactorMeta(
         factor_name="profit_growth",
@@ -223,6 +262,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="净利润同比增长率的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 70, "说明": "筛选利润增速排名前 30% 的高成长个股"},
+        ],
     ),
     "market_cap": FactorMeta(
         factor_name="market_cap",
@@ -233,6 +275,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="总市值的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 30, "说明": "筛选总市值排名前 70% 的个股，排除微盘股"},
+        ],
     ),
     "revenue_growth": FactorMeta(
         factor_name="revenue_growth",
@@ -243,6 +288,9 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         value_min=0,
         value_max=100,
         description="营业收入同比增长率的全市场百分位排名",
+        examples=[
+            {"operator": ">=", "threshold": 70, "说明": "筛选营收增速排名前 30% 的高成长个股"},
+        ],
     ),
 
     # ── 板块面（2 个） ──

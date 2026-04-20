@@ -4,9 +4,9 @@
       <h1 class="page-title">选股结果</h1>
       <div class="header-actions">
         <button class="btn btn-outline" @click="loadResults">🔄 刷新</button>
-        <button class="btn btn-export" :disabled="exporting || !allResults.length" @click="exportExcel">
+        <button class="btn btn-export" :disabled="exporting || !allResults.length" @click="exportCsv">
           <span v-if="exporting" class="spinner" aria-hidden="true"></span>
-          {{ exporting ? '导出中...' : '📥 导出 Excel' }}
+          {{ exporting ? '导出中...' : '📥 导出 CSV' }}
         </button>
       </div>
     </div>
@@ -27,6 +27,30 @@
 
     <!-- 结果表格 -->
     <div v-else class="table-wrapper">
+      <!-- 选中操作栏 -->
+      <div v-if="selectedSymbols.size > 0" class="selection-bar">
+        <span class="selection-count">已选 {{ selectedSymbols.size }} 只</span>
+        <div class="pool-dropdown-wrapper" ref="poolDropdownRef">
+          <button class="btn btn-add-pool" @click="togglePoolDropdown">添加到选股池</button>
+          <div v-if="showPoolDropdown" class="pool-dropdown">
+            <template v-if="poolStore.pools.length > 0">
+              <div
+                v-for="pool in poolStore.pools"
+                :key="pool.id"
+                class="pool-dropdown-item"
+                @click="addToPool(pool.id, pool.name)"
+              >
+                {{ pool.name }}（{{ pool.stock_count }} 只）
+              </div>
+            </template>
+            <div v-else class="pool-dropdown-empty">
+              <span>暂无选股池</span>
+              <a class="pool-dropdown-link" @click="goCreatePool">新建选股池</a>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- 排序控制 -->
       <div class="sort-bar">
         <span class="sort-label">排序：</span>
@@ -47,6 +71,15 @@
       <table class="result-table" aria-label="选股结果列表">
         <thead>
           <tr>
+            <th class="checkbox-col">
+              <input
+                type="checkbox"
+                :checked="isAllSelected"
+                :indeterminate="isIndeterminate"
+                @change="toggleSelectAll"
+                aria-label="全选"
+              />
+            </th>
             <th>股票代码</th>
             <th>股票名称</th>
             <th>买入参考价</th>
@@ -81,6 +114,14 @@
               tabindex="0"
               @keyup.enter="toggleExpand(row.symbol)"
             >
+              <td class="checkbox-col" @click.stop>
+                <input
+                  type="checkbox"
+                  :checked="selectedSymbols.has(row.symbol)"
+                  @change="toggleSelectSymbol(row.symbol)"
+                  :aria-label="'选择 ' + row.symbol"
+                />
+              </td>
               <td class="symbol-cell">
                 <span class="expand-icon">{{ expandedSymbols.has(row.symbol) ? '▼' : '▶' }}</span>
                 <span class="symbol-code">{{ row.symbol }}</span>
@@ -113,7 +154,7 @@
             </tr>
             <!-- 展开详情行 -->
             <tr v-if="expandedSymbols.has(row.symbol)" class="detail-row">
-              <td colspan="7">
+              <td colspan="8">
                 <div class="detail-panel detail-panel-flex">
                   <div class="detail-signals">
                     <div class="detail-header">触发信号详情</div>
@@ -204,7 +245,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiClient } from '@/api'
 import { usePageState } from '@/composables/usePageState'
@@ -212,6 +253,7 @@ import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
 import MinuteKlineChart from '@/components/MinuteKlineChart.vue'
 import { type AdjType, extractDateFromClick } from '@/components/minuteKlineUtils'
+import { useStockPoolStore } from '@/stores/stockPool'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
@@ -378,6 +420,14 @@ const sortDir = ref<SortDir>('desc')
 const exporting = ref(false)
 const currentPage = ref(1)
 const pageSize = 20
+
+// ─── 选股池相关状态 ───────────────────────────────────────────────────────────
+
+const poolStore = useStockPoolStore()
+const selectedSymbols = ref<Set<string>>(new Set())
+const showPoolDropdown = ref(false)
+const poolDropdownRef = ref<HTMLElement | null>(null)
+const addingToPool = ref(false)
 
 const sortedResults = computed(() => {
   const arr = [...allResults.value]
@@ -633,23 +683,107 @@ function changePage(p: number) {
   currentPage.value = p
 }
 
-// ─── 导出 Excel ───────────────────────────────────────────────────────────────
+// ─── 选股池：复选框与操作 ─────────────────────────────────────────────────────
 
-async function exportExcel() {
+/** 当前页是否全选 */
+const isAllSelected = computed(() => {
+  if (results.value.length === 0) return false
+  return results.value.every((r) => selectedSymbols.value.has(r.symbol))
+})
+
+/** 当前页是否部分选中（indeterminate 状态） */
+const isIndeterminate = computed(() => {
+  if (results.value.length === 0) return false
+  const some = results.value.some((r) => selectedSymbols.value.has(r.symbol))
+  return some && !isAllSelected.value
+})
+
+/** 切换当前页全选/取消全选 */
+function toggleSelectAll() {
+  if (isAllSelected.value) {
+    // 取消当前页所有选中
+    for (const row of results.value) {
+      selectedSymbols.value.delete(row.symbol)
+    }
+  } else {
+    // 选中当前页所有
+    for (const row of results.value) {
+      selectedSymbols.value.add(row.symbol)
+    }
+  }
+  // 触发响应式更新
+  selectedSymbols.value = new Set(selectedSymbols.value)
+}
+
+/** 切换单只股票选中状态 */
+function toggleSelectSymbol(symbol: string) {
+  if (selectedSymbols.value.has(symbol)) {
+    selectedSymbols.value.delete(symbol)
+  } else {
+    selectedSymbols.value.add(symbol)
+  }
+  selectedSymbols.value = new Set(selectedSymbols.value)
+}
+
+/** 切换选股池下拉菜单 */
+function togglePoolDropdown() {
+  showPoolDropdown.value = !showPoolDropdown.value
+  if (showPoolDropdown.value) {
+    poolStore.fetchPools()
+  }
+}
+
+/** 点击外部关闭下拉菜单 */
+function onClickOutside(e: MouseEvent) {
+  if (poolDropdownRef.value && !poolDropdownRef.value.contains(e.target as Node)) {
+    showPoolDropdown.value = false
+  }
+}
+
+/** 添加选中股票到指定选股池 */
+async function addToPool(poolId: string, poolName: string) {
+  if (addingToPool.value) return
+  addingToPool.value = true
+  showPoolDropdown.value = false
+  try {
+    const symbols = [...selectedSymbols.value]
+    const result = await poolStore.addStocksToPool(poolId, symbols)
+    const parts: string[] = []
+    if (result.added > 0) parts.push(`成功添加 ${result.added} 只到「${poolName}」`)
+    if (result.skipped > 0) parts.push(`已跳过 ${result.skipped} 只重复股票`)
+    alert(parts.join('，'))
+    // 清除选中状态
+    selectedSymbols.value = new Set()
+  } catch (e: any) {
+    const detail = e?.response?.data?.detail
+    alert(typeof detail === 'string' ? detail : '添加失败，请稍后重试')
+  } finally {
+    addingToPool.value = false
+  }
+}
+
+/** 跳转到新建选股池页面 */
+function goCreatePool() {
+  showPoolDropdown.value = false
+  router.push('/stock-pool')
+}
+
+// ─── 导出 CSV ─────────────────────────────────────────────────────────────────
+
+async function exportCsv() {
   exporting.value = true
   try {
-    const res = await apiClient.get('/screen/export', { responseType: 'blob' })
+    const res = await apiClient.get('/screen/export/csv', { responseType: 'blob' })
     const blob = new Blob([res.data as BlobPart], {
-      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      type: 'text/csv',
     })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `screener_results_${new Date().toISOString().slice(0, 10)}.xlsx`
+    a.download = `screener_results_${new Date().toISOString().slice(0, 10)}.csv`
     a.click()
     URL.revokeObjectURL(url)
   } catch {
-    // 如果后端返回 JSON（stub），尝试作为 JSON 处理并提示
     alert('导出功能暂不可用，请稍后再试')
   } finally {
     exporting.value = false
@@ -660,6 +794,11 @@ async function exportExcel() {
 
 onMounted(() => {
   loadResults()
+  document.addEventListener('click', onClickOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onClickOutside)
 })
 </script>
 
@@ -683,6 +822,11 @@ onMounted(() => {
 .empty-icon { font-size: 48px; }
 .empty-text { font-size: 16px; color: #e6edf3; margin: 0; }
 .empty-hint { font-size: 14px; color: #8b949e; margin: 0; }
+
+.selection-bar + .sort-bar {
+  border-radius: 0;
+  border-top: none;
+}
 
 /* ─── 排序栏 ────────────────────────────────────────────────────────────────── */
 .sort-bar {
@@ -982,6 +1126,93 @@ onMounted(() => {
 
 .dimension-header:first-child {
   margin-top: 0;
+}
+
+/* ─── 复选框列 ──────────────────────────────────────────────────────────────── */
+.checkbox-col {
+  width: 40px;
+  text-align: center;
+  padding: 10px 8px !important;
+}
+.checkbox-col input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+  accent-color: #58a6ff;
+}
+
+/* ─── 选中操作栏 ────────────────────────────────────────────────────────────── */
+.selection-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: #1f6feb18;
+  border: 1px solid #1f6feb44;
+  border-radius: 8px 8px 0 0;
+  margin-bottom: 0;
+}
+.selection-count {
+  font-size: 14px;
+  color: #58a6ff;
+  font-weight: 600;
+}
+.btn-add-pool {
+  background: #238636;
+  color: #fff;
+  border: none;
+  padding: 5px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.btn-add-pool:hover { background: #2ea043; }
+
+/* ─── 选股池下拉菜单 ────────────────────────────────────────────────────────── */
+.pool-dropdown-wrapper {
+  position: relative;
+}
+.pool-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  margin-top: 4px;
+  min-width: 220px;
+  max-height: 260px;
+  overflow-y: auto;
+  background: #1c2128;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+}
+.pool-dropdown-item {
+  padding: 10px 14px;
+  font-size: 13px;
+  color: #e6edf3;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.pool-dropdown-item:hover {
+  background: #30363d;
+}
+.pool-dropdown-empty {
+  padding: 14px;
+  font-size: 13px;
+  color: #8b949e;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+.pool-dropdown-link {
+  color: #58a6ff;
+  cursor: pointer;
+  font-size: 13px;
+}
+.pool-dropdown-link:hover {
+  text-decoration: underline;
 }
 
 /* ─── 响应式：小屏幕上下堆叠 ───────────────────────────────────────────────── */

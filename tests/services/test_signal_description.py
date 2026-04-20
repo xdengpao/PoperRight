@@ -56,25 +56,56 @@ class TestGenerateSignalDescriptionNormal:
         assert result == "均线多头排列, 趋势评分 92"
 
     def test_macd_fixed_text(self):
-        """MACD：返回固定描述文本"""
+        """MACD：无 signal_type 时返回默认描述文本"""
         signal = _make_signal(SignalCategory.MACD)
         stock_data = {"macd": True}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
         assert result == "MACD 金叉, DIF 上穿 DEA"
 
+    def test_macd_above_zero_signal_type(self):
+        """MACD：signal_type=above_zero 时返回零轴上方金叉描述（需求 1.4）"""
+        signal = _make_signal(SignalCategory.MACD)
+        signal.signal_type = "above_zero"
+        stock_data = {"macd": True, "macd_signal_type": "above_zero"}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "MACD 零轴上方金叉, DIF 上穿 DEA"
+
+    def test_macd_below_zero_second_signal_type(self):
+        """MACD：signal_type=below_zero_second 时返回零轴下方二次金叉描述（需求 1.4）"""
+        signal = _make_signal(SignalCategory.MACD)
+        signal.signal_type = "below_zero_second"
+        stock_data = {"macd": True, "macd_signal_type": "below_zero_second"}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "MACD 零轴下方二次金叉"
+
     def test_boll_fixed_text(self):
-        """BOLL：返回固定描述文本"""
+        """BOLL：返回描述文本（需求 2.4：使用 hold_days 和 near_upper_band）"""
         signal = _make_signal(SignalCategory.BOLL)
         stock_data = {"boll": True}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
-        assert result == "价格突破布林带中轨, 接近上轨"
+        assert result == "价格突破布林带中轨"
+
+    def test_boll_with_hold_days(self):
+        """BOLL：stock_data 包含 hold_days 时，返回含站稳天数的描述"""
+        signal = _make_signal(SignalCategory.BOLL)
+        stock_data = {"boll": True, "boll_hold_days": 5}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert result == "价格站稳布林带中轨 5 日"
+
+    def test_boll_near_upper_band_risk_warning(self):
+        """BOLL：near_upper_band=True 时附加风险提示（需求 2.2）"""
+        signal = _make_signal(SignalCategory.BOLL)
+        stock_data = {"boll": True, "boll_near_upper_band": True, "boll_hold_days": 3}
+        result = ScreenExecutor._generate_signal_description(signal, stock_data)
+        assert "接近上轨注意风险" in result
+        assert "价格站稳布林带中轨 3 日" in result
 
     def test_rsi_with_valid_value(self):
-        """RSI：stock_data 包含 rsi 值时，返回含数值的描述"""
+        """RSI：stock_data 包含 rsi_current 值时，返回含数值的描述（需求 3.4）"""
         signal = _make_signal(SignalCategory.RSI)
-        stock_data = {"rsi": 65}
+        stock_data = {"rsi": True, "rsi_current": 65.0}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
-        assert result == "RSI(14) = 65, 处于强势区间"
+        assert result == "RSI(14) = 65.0, 处于强势区间"
 
     def test_dma_with_valid_value(self):
         """DMA：stock_data 包含 dma 字典时，返回含 DMA 值的描述"""
@@ -146,23 +177,23 @@ class TestGenerateSignalDescriptionFallback:
         assert result == "均线趋势信号"
 
     def test_rsi_missing_value(self):
-        """RSI：stock_data 缺少 rsi 字段时，返回通用描述"""
+        """RSI：stock_data 缺少 rsi_current 字段时，返回通用描述"""
         signal = _make_signal(SignalCategory.RSI)
         stock_data = {}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
         assert result == "RSI 强势信号"
 
     def test_rsi_none_value(self):
-        """RSI：rsi 为 None 时，返回通用描述"""
+        """RSI：rsi_current 为 None 时，返回通用描述"""
         signal = _make_signal(SignalCategory.RSI)
-        stock_data = {"rsi": None}
+        stock_data = {"rsi": True, "rsi_current": None}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
         assert result == "RSI 强势信号"
 
     def test_rsi_boolean_true_fallback(self):
-        """RSI：rsi 为布尔 True 时（非数值），返回通用描述"""
+        """RSI：rsi_current 为 0 时（无有效 RSI 值），返回通用描述"""
         signal = _make_signal(SignalCategory.RSI)
-        stock_data = {"rsi": True}
+        stock_data = {"rsi": True, "rsi_current": 0.0}
         result = ScreenExecutor._generate_signal_description(signal, stock_data)
         assert result == "RSI 强势信号"
 

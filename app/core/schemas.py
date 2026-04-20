@@ -84,6 +84,12 @@ class AlertType(str, Enum):
     SYSTEM = "SYSTEM"                   # 系统告警
 
 
+class StopLossMode(str, Enum):
+    """止损模式（需求 4）"""
+    FIXED = "fixed"                     # 固定比例
+    ATR_ADAPTIVE = "atr_adaptive"       # ATR 自适应
+
+
 class SignalStrength(str, Enum):
     """信号强度等级（需求 7）"""
     STRONG = "STRONG"
@@ -175,6 +181,7 @@ class SignalDetail:
     label: str                      # 信号标签（如"多头排列"、"MACD 金叉"）
     is_fake_breakout: bool = False  # 是否为假突破标记
     breakout_type: str | None = None  # 突破类型标识（需求 6：BOX/PREVIOUS_HIGH/TRENDLINE）
+    signal_type: str | None = None  # 信号子类型（需求 1.4：MACD 的 "above_zero"/"below_zero_second"）
     strength: SignalStrength = SignalStrength.MEDIUM  # 信号强度等级（需求 7）
     freshness: SignalFreshness = SignalFreshness.NEW  # 信号新鲜度（需求 8）
     description: str = ""  # 人类可读的因子条件描述文本（需求 8.1, 8.2）
@@ -281,7 +288,7 @@ class MaTrendConfig:
     """均线趋势配置（需求 3 / 21.8）"""
     ma_periods: list[int] = field(default_factory=lambda: [5, 10, 20, 60, 120])
     slope_threshold: float = 0.0            # 多头排列斜率阈值
-    trend_score_threshold: int = 80         # 趋势打分纳入初选池阈值
+    trend_score_threshold: int = 68         # 趋势打分纳入初选池阈值（需求 10.1, 10.3）
     support_ma_lines: list[int] = field(default_factory=lambda: [20, 60])
 
     def to_dict(self) -> dict:
@@ -297,7 +304,7 @@ class MaTrendConfig:
         return cls(
             ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120]),
             slope_threshold=data.get("slope_threshold", 0.0),
-            trend_score_threshold=data.get("trend_score_threshold", 80),
+            trend_score_threshold=data.get("trend_score_threshold", 68),
             support_ma_lines=data.get("support_ma_lines", [20, 60]),
         )
 
@@ -311,8 +318,8 @@ class IndicatorParamsConfig:
     boll_period: int = 20
     boll_std_dev: float = 2.0
     rsi_period: int = 14
-    rsi_lower: int = 50
-    rsi_upper: int = 80
+    rsi_lower: int = 55                    # RSI 强势区间下限（需求 3.1）
+    rsi_upper: int = 75                    # RSI 强势区间上限（需求 3.1）
     dma_short: int = 10
     dma_long: int = 50
 
@@ -339,8 +346,8 @@ class IndicatorParamsConfig:
             boll_period=data.get("boll_period", 20),
             boll_std_dev=data.get("boll_std_dev", 2.0),
             rsi_period=data.get("rsi_period", 14),
-            rsi_lower=data.get("rsi_lower", 50),
-            rsi_upper=data.get("rsi_upper", 80),
+            rsi_lower=data.get("rsi_lower", 55),
+            rsi_upper=data.get("rsi_upper", 75),
             dma_short=data.get("dma_short", 10),
             dma_long=data.get("dma_long", 50),
         )
@@ -385,6 +392,8 @@ class VolumePriceConfig:
     large_order_ratio: float = 30.0         # 大单占比阈值 %
     min_daily_amount: float = 5000.0        # 日均成交额下限（万元）
     sector_rank_top: int = 30               # 板块排名范围
+    money_flow_mode: str = "relative"       # 资金流信号模式："relative" | "absolute"（需求 6.6）
+    relative_threshold_pct: float = 5.0     # 相对阈值百分比（需求 6.6）
 
     def to_dict(self) -> dict:
         return {
@@ -395,6 +404,8 @@ class VolumePriceConfig:
             "large_order_ratio": self.large_order_ratio,
             "min_daily_amount": self.min_daily_amount,
             "sector_rank_top": self.sector_rank_top,
+            "money_flow_mode": self.money_flow_mode,
+            "relative_threshold_pct": self.relative_threshold_pct,
         }
 
     @classmethod
@@ -407,6 +418,8 @@ class VolumePriceConfig:
             large_order_ratio=data.get("large_order_ratio", 30.0),
             min_daily_amount=data.get("min_daily_amount", 5000.0),
             sector_rank_top=data.get("sector_rank_top", 30),
+            money_flow_mode=data.get("money_flow_mode", "relative"),
+            relative_threshold_pct=data.get("relative_threshold_pct", 5.0),
         )
 
 
@@ -520,6 +533,17 @@ class StrategyConfig:
 # ---------------------------------------------------------------------------
 # 风控数据类
 # ---------------------------------------------------------------------------
+
+
+@dataclass
+class StopConfig:
+    """止损配置（Redis 持久化）（需求 4）"""
+    mode: StopLossMode = StopLossMode.FIXED
+    fixed_stop_loss: float = 8.0            # 固定止损比例 %
+    trailing_stop: float = 5.0              # 移动止损回撤比例 %
+    trend_stop_ma: int = 20                 # 趋势止损均线周期
+    atr_fixed_multiplier: float = 2.0       # ATR 固定止损倍数
+    atr_trailing_multiplier: float = 1.5    # ATR 移动止损倍数
 
 
 @dataclass

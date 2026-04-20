@@ -143,3 +143,14 @@
 5. IF 信号的 `dimension` 字段缺失, THEN THE ScreenerResultsView SHALL 将该信号归入默认分组"其他"以保持向后兼容
 6. WHEN 选股结果从缓存中读取, THE Signal_Detail_API SHALL 保留完整的 `dimension` 字段
 7. WHEN 板块面维度的信号（SECTOR_STRONG）展示时, THE ScreenerResultsView SHALL 在信号描述中包含具体触发板块名称，使用户能明确知道该股票因属于哪个板块而被选中
+
+### Requirement 11: 因子条件编辑器板块面信号生成修复
+
+**User Story:** As a 量化交易员, I want 通过因子条件编辑器配置的板块面因子（板块涨幅排名、板块趋势）在选股执行后能正确生成 SECTOR_STRONG 信号, so that 选股结果中能展示板块面维度的触发信号而非仅有技术面信号。
+
+#### Acceptance Criteria
+
+1. WHEN 用户在因子条件编辑器中配置了板块面因子（`sector_rank` 或 `sector_trend`）且因子评估通过, THE Screen_Executor SHALL 生成对应的 `SECTOR_STRONG` 类别信号，不受 `volume_price` 模块启用状态的限制
+2. THE Screen_Executor 的 `_FACTOR_MODULE` 映射 SHALL NOT 将 `sector_rank` 和 `sector_trend` 映射到 `"volume_price"` 模块，以避免因子条件编辑器路径中板块面因子被错误地按模块启用状态过滤
+3. WHEN 因子条件编辑器路径中某因子不在 `_FACTOR_MODULE` 映射中, THE Screen_Executor SHALL 跳过模块启用检查，直接根据因子评估结果生成信号
+4. THE Screen_Executor SHALL 保持非因子条件编辑器路径（独立模块路径）中板块面信号的生成逻辑不变

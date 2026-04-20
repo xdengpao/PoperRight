@@ -197,7 +197,7 @@ class TestStrategyConfigSectorCompat:
         assert cfg.indicator_params.macd_fast == 12
 
         # ma_trend 默认值
-        assert cfg.ma_trend.trend_score_threshold == 80
+        assert cfg.ma_trend.trend_score_threshold == 68
 
         # breakout 默认值
         assert cfg.breakout.volume_ratio_threshold == 1.5

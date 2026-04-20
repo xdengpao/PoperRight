@@ -37,6 +37,13 @@ _SUPPORT_REBOUND_DAYS = 2      # 企稳反弹所需天数
 # 斜率计算回看天数
 _SLOPE_LOOKBACK = 5
 
+# 短期均线斜率权重系数（5 日、10 日）
+_SHORT_TERM_SLOPE_WEIGHT = 2.0
+# 中期/长期均线斜率权重系数（20 日、60 日、120 日）
+_LONG_TERM_SLOPE_WEIGHT = 1.0
+# 短期均线周期集合
+_SHORT_TERM_PERIODS = {5, 10}
+
 
 # ---------------------------------------------------------------------------
 # 数据类
@@ -268,6 +275,44 @@ def detect_bullish_alignment(
 
 
 
+def _bell_curve_distance_score(pct_above: float) -> float:
+    """
+    钟形曲线距离评分（纯函数）。
+
+    根据价格在均线上方的百分比距离计算评分，最优区间给满分，
+    偏离越远扣分越多。
+
+    Args:
+        pct_above: 价格在均线上方的百分比距离（如 3.0 表示 3%）
+
+    Returns:
+        0-100 分的距离评分
+
+    规则:
+    - [0%, 3%]: 满分 100
+    - (3%, 5%]: 线性递减 100 → 60
+    - (5%, 10%]: 线性递减 60 → 20
+    - > 10%: 固定 20 分
+    - < 0%（价格在均线下方）: 线性递减 100 → 0（-5% 时为 0 分）
+    """
+    if pct_above < 0.0:
+        # 价格在均线下方：从 100 线性递减到 0（-5% 时为 0）
+        score = 100.0 + pct_above * (100.0 / 5.0)  # 每下降 1% 扣 20 分
+        return max(0.0, score)
+    elif pct_above <= 3.0:
+        # 最优区间：满分 100
+        return 100.0
+    elif pct_above <= 5.0:
+        # 线性递减 100 → 60
+        return 100.0 - (pct_above - 3.0) * (40.0 / 2.0)
+    elif pct_above <= 10.0:
+        # 线性递减 60 → 20
+        return 60.0 - (pct_above - 5.0) * (40.0 / 5.0)
+    else:
+        # 超过 10%：固定 20 分
+        return 20.0
+
+
 def score_ma_trend(
     closes: list[float],
     periods: list[int] | None = None,
@@ -310,24 +355,31 @@ def score_ma_trend(
         alignment_score = 0.0
 
     # --- 2. 斜率分 (0-100) ---
-    # 低于 slope_threshold 的斜率视为 0（不贡献分数）
-    slope_values = [
-        alignment.slopes[p]
-        for p in sorted(periods)
-        if p in alignment.slopes
-    ]
-    if slope_values:
-        # 斜率高于阈值才贡献正分，低于阈值的视为 0
-        filtered_slopes = [max(s - slope_threshold, 0.0) if s > slope_threshold else 0.0 for s in slope_values]
-        avg_slope = sum(filtered_slopes) / len(filtered_slopes)
+    # 短期均线（5 日、10 日）权重系数 2.0，中期/长期均线权重系数 1.0
+    # 加权平均斜率 = Σ(slope_i × weight_i) / Σ(weight_i)
+    sorted_periods = sorted(periods)
+    weighted_slope_sum = 0.0
+    total_weight = 0.0
+    for p in sorted_periods:
+        if p not in alignment.slopes:
+            continue
+        raw_slope = alignment.slopes[p]
+        # 低于 slope_threshold 的斜率视为 0（不贡献分数）
+        filtered_slope = max(raw_slope - slope_threshold, 0.0) if raw_slope > slope_threshold else 0.0
+        w = _SHORT_TERM_SLOPE_WEIGHT if p in _SHORT_TERM_PERIODS else _LONG_TERM_SLOPE_WEIGHT
+        weighted_slope_sum += filtered_slope * w
+        total_weight += w
+
+    if total_weight > 0:
+        avg_slope = weighted_slope_sum / total_weight
         slope_score = min(avg_slope * 100.0, 100.0)
     else:
         slope_score = 0.0
 
     # --- 3. 距离分 (0-100) ---
+    # 使用钟形曲线评分替代原有线性映射
     last_idx = len(closes) - 1
     current_price = closes[last_idx]
-    sorted_periods = sorted(periods)
 
     distance_scores = []
     for p in sorted_periods:
@@ -337,9 +389,7 @@ def score_ma_trend(
             if ma_val > 0:
                 # 价格在 MA 上方的百分比距离
                 pct_above = ((current_price - ma_val) / ma_val) * 100.0
-                # 映射：0% → 50 分，>= 5% → 100 分，<= -5% → 0 分
-                dist_score = 50.0 + pct_above * 10.0
-                dist_score = max(0.0, min(100.0, dist_score))
+                dist_score = _bell_curve_distance_score(pct_above)
                 distance_scores.append(dist_score)
 
     if distance_scores:

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 BROADCAST_CHANNELS = ["market:overview"]
 
 # 用户专属频道前缀（消息转发给对应用户）
-USER_CHANNEL_PREFIXES = ["alert:", "screen:result:"]
+USER_CHANNEL_PREFIXES = ["alert:", "screen:result:", "risk:alert:"]
 
 
 def _resolve_target(channel: str) -> tuple[str, str | None]:
@@ -100,7 +100,7 @@ async def _dynamic_relay_loop() -> None:
             # 订阅广播频道（精确匹配）
             await pubsub.subscribe(*BROADCAST_CHANNELS)
             # 订阅用户专属频道（模式匹配）
-            await pubsub.psubscribe("alert:*", "screen:result:*")
+            await pubsub.psubscribe("alert:*", "screen:result:*", "risk:alert:*")
             logger.info("PubSub relay started (dynamic mode)")
             retry_delay = 1.0  # 连接成功后重置重试延迟
 

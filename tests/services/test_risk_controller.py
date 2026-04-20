@@ -673,3 +673,261 @@ class TestCheckStrategyHealth:
     def test_zero_drawdown_with_good_win_rate_healthy(self):
         """零回撤 + 高胜率 → 健康"""
         assert StopLossChecker.check_strategy_health(0.70, 0.0) is False
+
+
+# ===========================================================================
+# MarketRiskChecker — 多维度风控增强（需求 8）
+# ===========================================================================
+
+
+class TestCheckMarketRiskMultiDimensional:
+    """check_market_risk 多维度风控测试（需求 8.1, 8.2, 8.5）"""
+
+    def test_breadth_below_threshold_escalates_normal_to_caution(self):
+        """市场广度低于阈值时，NORMAL → CAUTION"""
+        checker = MarketRiskChecker()
+        # 价格在所有均线上方 → 基础等级 NORMAL
+        closes = [100.0] * 59 + [110.0]
+        result = checker.check_market_risk(
+            closes, market_breadth=0.3, breadth_threshold=0.5,
+        )
+        assert result == MarketRiskLevel.CAUTION
+
+    def test_breadth_below_threshold_escalates_caution_to_danger(self):
+        """市场广度低于阈值时，CAUTION → DANGER"""
+        checker = MarketRiskChecker()
+        # 构造 CAUTION 基础等级：价格跌破 MA20 但在 MA60 上方
+        closes = [100.0] * 40 + [110.0] * 19 + [105.0]
+        base = checker.check_market_risk(closes)
+        assert base == MarketRiskLevel.CAUTION
+
+        result = checker.check_market_risk(
+            closes, market_breadth=0.3, breadth_threshold=0.5,
+        )
+        assert result == MarketRiskLevel.DANGER
+
+    def test_breadth_below_threshold_danger_stays_danger(self):
+        """市场广度低于阈值时，DANGER 保持 DANGER（已是最高级别）"""
+        checker = MarketRiskChecker()
+        # 构造 DANGER 基础等级
+        closes = [100.0] * 59 + [90.0]
+        base = checker.check_market_risk(closes)
+        assert base == MarketRiskLevel.DANGER
+
+        result = checker.check_market_risk(
+            closes, market_breadth=0.3, breadth_threshold=0.5,
+        )
+        assert result == MarketRiskLevel.DANGER
+
+    def test_breadth_above_threshold_no_escalation(self):
+        """市场广度高于阈值时，不提升风险等级"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 59 + [110.0]
+        result = checker.check_market_risk(
+            closes, market_breadth=1.5, breadth_threshold=0.5,
+        )
+        assert result == MarketRiskLevel.NORMAL
+
+    def test_breadth_exactly_at_threshold_no_escalation(self):
+        """市场广度恰好等于阈值时，不提升（需要 < 才触发）"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 59 + [110.0]
+        result = checker.check_market_risk(
+            closes, market_breadth=0.5, breadth_threshold=0.5,
+        )
+        assert result == MarketRiskLevel.NORMAL
+
+    def test_breadth_none_uses_ma_only(self):
+        """market_breadth 为 None 时仅使用均线判定"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 59 + [110.0]
+        result = checker.check_market_risk(
+            closes, market_breadth=None,
+        )
+        assert result == MarketRiskLevel.NORMAL
+
+    def test_breadth_none_with_caution_base(self):
+        """market_breadth 为 None 时，CAUTION 基础等级不变"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 40 + [110.0] * 19 + [105.0]
+        result = checker.check_market_risk(
+            closes, market_breadth=None,
+        )
+        assert result == MarketRiskLevel.CAUTION
+
+    def test_custom_breadth_threshold(self):
+        """自定义广度阈值"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 59 + [110.0]
+        # breadth=0.8 < threshold=1.0 → 提升
+        result = checker.check_market_risk(
+            closes, market_breadth=0.8, breadth_threshold=1.0,
+        )
+        assert result == MarketRiskLevel.CAUTION
+
+    def test_volume_change_rate_parameter_accepted(self):
+        """volume_change_rate 参数可传入（预留参数，当前不影响结果）"""
+        checker = MarketRiskChecker()
+        closes = [100.0] * 59 + [110.0]
+        result = checker.check_market_risk(
+            closes, volume_change_rate=0.5,
+        )
+        assert result == MarketRiskLevel.NORMAL
+
+    def test_backward_compatible_no_new_params(self):
+        """不传新参数时行为与原有逻辑一致（向后兼容）"""
+        checker = MarketRiskChecker()
+        # NORMAL
+        closes_normal = [100.0] * 59 + [110.0]
+        assert checker.check_market_risk(closes_normal) == MarketRiskLevel.NORMAL
+
+        # CAUTION
+        closes_caution = [100.0] * 40 + [110.0] * 19 + [105.0]
+        assert checker.check_market_risk(closes_caution) == MarketRiskLevel.CAUTION
+
+        # DANGER
+        closes_danger = [100.0] * 59 + [90.0]
+        assert checker.check_market_risk(closes_danger) == MarketRiskLevel.DANGER
+
+
+# ===========================================================================
+# ScreenExecutor — DANGER 模式强势股通过（需求 8.3, 8.4）
+# ===========================================================================
+
+from decimal import Decimal
+from app.core.schemas import RiskLevel, ScreenItem
+from app.services.screener.screen_executor import ScreenExecutor
+
+
+def _make_screen_item(symbol: str, trend_score: float) -> ScreenItem:
+    """创建测试用 ScreenItem"""
+    return ScreenItem(
+        symbol=symbol,
+        ref_buy_price=Decimal("10.00"),
+        trend_score=trend_score,
+        risk_level=RiskLevel.LOW if trend_score >= 80 else RiskLevel.MEDIUM,
+    )
+
+
+class TestDangerModeStrongStocks:
+    """DANGER 模式强势股通过测试（需求 8.3, 8.4）"""
+
+    def _make_danger_closes(self) -> list[float]:
+        """构造 DANGER 级别的指数数据"""
+        return [100.0] * 59 + [90.0]
+
+    def test_danger_allows_strong_stocks(self):
+        """DANGER 模式下 trend_score >= 95 的股票通过"""
+        items = [
+            _make_screen_item("stock_a", 96.0),
+            _make_screen_item("stock_b", 80.0),
+            _make_screen_item("stock_c", 95.0),
+        ]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 2
+        symbols = {item.symbol for item in filtered}
+        assert symbols == {"stock_a", "stock_c"}
+
+    def test_danger_no_strong_stocks_returns_empty(self):
+        """DANGER 模式下无强势股时返回空列表"""
+        items = [
+            _make_screen_item("stock_a", 80.0),
+            _make_screen_item("stock_b", 90.0),
+            _make_screen_item("stock_c", 94.9),
+        ]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 0
+
+    def test_danger_all_strong_stocks_pass(self):
+        """DANGER 模式下所有强势股都通过"""
+        items = [
+            _make_screen_item("stock_a", 95.0),
+            _make_screen_item("stock_b", 98.0),
+            _make_screen_item("stock_c", 100.0),
+        ]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 3
+
+    def test_danger_custom_threshold(self):
+        """DANGER 模式下自定义强势股阈值"""
+        items = [
+            _make_screen_item("stock_a", 90.0),
+            _make_screen_item("stock_b", 85.0),
+        ]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+            danger_strong_threshold=88.0,
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 1
+        assert filtered[0].symbol == "stock_a"
+
+    def test_danger_score_exactly_at_threshold(self):
+        """DANGER 模式下 trend_score 恰好等于阈值 → 通过"""
+        items = [_make_screen_item("stock_a", 95.0)]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 1
+
+    def test_danger_score_just_below_threshold(self):
+        """DANGER 模式下 trend_score 略低于阈值 → 不通过"""
+        items = [_make_screen_item("stock_a", 94.99)]
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=items,
+            stocks_data={item.symbol: {} for item in items},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 0
+
+    def test_danger_empty_items(self):
+        """DANGER 模式下空列表输入 → 返回空列表"""
+        filtered, risk_level = ScreenExecutor._apply_risk_filters_pure(
+            items=[],
+            stocks_data={},
+            index_closes=self._make_danger_closes(),
+            market_risk_checker=MarketRiskChecker(),
+            stock_risk_filter=StockRiskFilter(),
+            blacklist_manager=BlackWhiteListManager(),
+        )
+        assert risk_level == MarketRiskLevel.DANGER
+        assert len(filtered) == 0

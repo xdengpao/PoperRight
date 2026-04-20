@@ -283,6 +283,14 @@
 - [x] 17. Final checkpoint - 确保全部测试通过（含维度分类功能）
   - Ensure all tests pass, ask the user if questions arise.
 
+- [x] 18. 修复因子条件编辑器板块面信号生成
+  - [x] 18.1 修改 `app/services/screener/screen_executor.py` 中 `_FACTOR_MODULE` 映射，移除 `sector_rank` 和 `sector_trend` 的映射
+    - 从 `_FACTOR_MODULE` 字典中删除 `"sector_rank": "volume_price"` 和 `"sector_trend": "volume_price"` 两个条目
+    - 添加中文注释说明板块面因子不在此映射中的原因
+    - 确保因子条件编辑器路径中板块面因子通过评估后能正确生成 `SECTOR_STRONG` 信号
+    - 确保非因子条件编辑器路径中板块信号生成逻辑不受影响
+    - _Requirements: 11.1, 11.2, 11.3, 11.4_
+
 ## Notes
 
 - Tasks marked with `*` are optional and can be skipped for faster MVP

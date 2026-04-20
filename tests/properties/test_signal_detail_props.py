@@ -64,6 +64,7 @@ def signal_detail_strategy(draw):
         label=draw(_label_strategy),
         is_fake_breakout=draw(_is_fake_breakout_strategy),
         breakout_type=draw(_breakout_type_strategy),
+        signal_type=draw(st.one_of(st.none(), st.sampled_from(["above_zero", "below_zero_second", "none"]))),
         strength=draw(_strength_strategy),
         freshness=draw(_freshness_strategy),
         description=draw(_description_strategy),
@@ -92,7 +93,7 @@ def test_signal_detail_json_roundtrip(signal: SignalDetail):
     # 验证序列化 dict 包含所有预期字段
     expected_fields = {
         "category", "label", "is_fake_breakout",
-        "breakout_type", "strength", "freshness", "description",
+        "breakout_type", "signal_type", "strength", "freshness", "description",
     }
     assert set(serialized.keys()) == expected_fields, (
         f"序列化 dict 字段不完整: 期望 {expected_fields}, 实际 {set(serialized.keys())}"

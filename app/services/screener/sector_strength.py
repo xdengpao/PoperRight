@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +116,34 @@ class SectorStrengthFilter:
                     data_source, len(sector_codes), period,
                 )
                 return []
+
+            # 步骤 2.5：数据新鲜度检查（需求 9）
+            # 从 kline_data 中提取最新交易日
+            latest_data_date: date | None = None
+            for _code, klines in kline_data.items():
+                for k in klines:
+                    k_date = k.time.date() if isinstance(k.time, datetime) else k.time
+                    if latest_data_date is None or k_date > latest_data_date:
+                        latest_data_date = k_date
+
+            if latest_data_date is not None:
+                current_date = date.today()
+                should_warn, should_degrade, stale_days = self.check_data_freshness(
+                    latest_data_date, current_date,
+                )
+                if should_degrade:
+                    logger.warning(
+                        "板块数据严重过期，降级处理 data_source=%s "
+                        "最新数据日期=%s 延迟交易日=%d天，返回空排名列表",
+                        data_source, latest_data_date, stale_days,
+                    )
+                    return []
+                if should_warn:
+                    logger.warning(
+                        "板块数据延迟 data_source=%s "
+                        "最新数据日期=%s 延迟交易日=%d天",
+                        data_source, latest_data_date, stale_days,
+                    )
 
             # 步骤 3：计算累计涨跌幅并排名
             sector_change = self._aggregate_change_pct(kline_data)
@@ -287,6 +315,58 @@ class SectorStrengthFilter:
                 factor_dict["sector_rank"] = None
                 factor_dict["sector_trend"] = False
                 factor_dict["sector_name"] = None
+
+    # ------------------------------------------------------------------
+    # 纯函数：数据新鲜度检查
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def check_data_freshness(
+        latest_data_date: date,
+        current_date: date,
+        warning_threshold_days: int = 2,
+        degrade_threshold_days: int = 5,
+    ) -> tuple[bool, bool, int]:
+        """
+        检查板块数据新鲜度（纯函数）。
+
+        使用简化工作日计算（排除周末），统计 latest_data_date 到 current_date
+        之间的交易日数（不含 latest_data_date 当天，含 current_date 当天）。
+
+        Args:
+            latest_data_date: 最新数据日期
+            current_date: 当前日期
+            warning_threshold_days: WARNING 阈值（默认 2 个交易日）
+            degrade_threshold_days: 降级阈值（默认 5 个交易日）
+
+        Returns:
+            (should_warn, should_degrade, stale_days) 元组
+            - should_warn: 是否应记录 WARNING（stale_days > warning_threshold）
+            - should_degrade: 是否应降级（stale_days > degrade_threshold）
+            - stale_days: 数据延迟交易日数
+
+        对应需求：
+        - 需求 9.1：超过 2 个交易日记录 WARNING
+        - 需求 9.2：超过 5 个交易日降级
+        - 需求 9.4：支持自定义阈值
+        """
+        # 简化工作日计算：逐日遍历，排除周末（周六=5，周日=6）
+        business_days = 0
+        d = latest_data_date
+        one_day = timedelta(days=1)
+
+        # 从 latest_data_date 的下一天开始计数到 current_date
+        d = d + one_day
+        while d <= current_date:
+            # weekday(): 0=周一 ... 4=周五, 5=周六, 6=周日
+            if d.weekday() < 5:
+                business_days += 1
+            d = d + one_day
+
+        should_warn = business_days > warning_threshold_days
+        should_degrade = business_days > degrade_threshold_days
+
+        return (should_warn, should_degrade, business_days)
 
     # ------------------------------------------------------------------
     # 纯函数（保留原有静态方法，向后兼容）

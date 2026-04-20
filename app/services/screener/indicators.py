@@ -22,6 +22,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from app.core.schemas import SignalStrength
+
 
 # ---------------------------------------------------------------------------
 # 默认参数
@@ -79,6 +81,46 @@ class DMAResult:
     """DMA 计算结果"""
     dma: list[float]       # DMA 线 = MA(short) - MA(long)
     ama: list[float]       # AMA 线 = MA(DMA, signal)
+
+
+@dataclass
+class MACDSignalResult:
+    """MACD 信号检测结构化结果（需求 1.4）
+
+    包含信号判定、强度等级、信号类型以及原始 MACD 计算数据。
+    """
+    signal: bool                          # 是否生成信号
+    strength: SignalStrength              # 信号强度
+    signal_type: str                      # "above_zero" | "below_zero_second" | "none"
+    dif: list[float]                      # DIF 线
+    dea: list[float]                      # DEA 线
+    macd: list[float]                     # MACD 柱
+
+
+@dataclass
+class BOLLSignalResult:
+    """BOLL 信号检测结构化结果（需求 2.4）
+
+    包含中轨突破信号、接近上轨风险提示、站稳天数以及原始布林带数据。
+    """
+    signal: bool                          # 中轨突破 + 站稳信号
+    near_upper_band: bool                 # 接近上轨风险提示
+    hold_days: int                        # 连续站稳中轨天数
+    upper: list[float]                    # 上轨
+    middle: list[float]                   # 中轨
+    lower: list[float]                    # 下轨
+
+
+@dataclass
+class RSISignalResult:
+    """RSI 信号检测结构化结果（需求 3.4）
+
+    包含信号判定、当前 RSI 值、连续上升天数以及原始 RSI 值序列。
+    """
+    signal: bool                          # 是否生成强势信号
+    current_rsi: float                    # 当前 RSI 值
+    consecutive_rising: int               # 连续上升天数
+    values: list[float]                   # RSI 值序列
 
 
 # ---------------------------------------------------------------------------
@@ -301,21 +343,70 @@ def _ema_from_valid(data: list[float], period: int) -> list[float]:
     return result
 
 
+def _count_below_zero_golden_crosses(
+    dif: list[float],
+    dea: list[float],
+    lookback: int = 60,
+) -> int:
+    """
+    统计最近 lookback 天内零轴下方金叉次数（纯函数）。
+
+    金叉定义：DIF[i-1] <= DEA[i-1] 且 DIF[i] > DEA[i] 且 DIF[i] < 0。
+    仅统计 lookback 窗口内（不含最后一天）的历史金叉，最后一天的金叉由调用方判断。
+
+    Args:
+        dif: DIF 线序列
+        dea: DEA 线序列
+        lookback: 回溯天数，默认 60
+
+    Returns:
+        零轴下方金叉次数（不含最后一天）
+
+    需求: 1.2, 1.5
+    """
+    n = len(dif)
+    if n < 2:
+        return 0
+
+    count = 0
+    # 回溯窗口起始位置（不含最后一天，最后一天由调用方判断）
+    start = max(1, n - 1 - lookback)
+    end = n - 1  # 不含最后一天
+
+    for i in range(start, end):
+        if (
+            not math.isnan(dif[i])
+            and not math.isnan(dea[i])
+            and not math.isnan(dif[i - 1])
+            and not math.isnan(dea[i - 1])
+            and dif[i - 1] <= dea[i - 1]
+            and dif[i] > dea[i]
+            and dif[i] < 0
+        ):
+            count += 1
+
+    return count
+
+
 def detect_macd_signal(
     closes: list[float],
     fast_period: int = DEFAULT_MACD_FAST,
     slow_period: int = DEFAULT_MACD_SLOW,
     signal_period: int = DEFAULT_MACD_SIGNAL,
     macd_result: MACDResult | None = None,
-) -> MACDResult:
+) -> MACDSignalResult:
     """
-    检测 MACD 多头信号。
+    检测 MACD 多头信号（需求 1.1 ~ 1.5）。
 
-    信号条件（需求 4.2）：
-    1. DIF 和 DEA 均在零轴上方（> 0）
-    2. DIF 上穿 DEA（金叉：前一日 DIF <= DEA，当日 DIF > DEA）
-    3. MACD 红柱持续放大（当日 MACD 柱 > 前一日 MACD 柱 > 0）
-    4. DEA 向上运行（当日 DEA > 前一日 DEA）
+    信号分类：
+    - 零轴上方金叉：DIF > 0, DEA > 0, DIF 上穿 DEA, MACD 红柱放大
+      → signal=True, strength=STRONG, signal_type="above_zero"
+    - 零轴下方二次金叉：最近 60 天内已有一次零轴下方金叉，当前再次金叉
+      → signal=True, strength=WEAK, signal_type="below_zero_second"
+    - 零轴下方首次金叉：signal=False
+
+    DEA 趋势修饰符：DEA[last] > DEA[prev] 时 strength 提升一级
+    （WEAK→MEDIUM, MEDIUM→STRONG, STRONG 不变）。
 
     Args:
         closes: 收盘价序列
@@ -325,47 +416,93 @@ def detect_macd_signal(
         macd_result: 预计算的 MACD 结果（可选）
 
     Returns:
-        MACDResult（含 signal 字段）
+        MACDSignalResult（含 signal、strength、signal_type 字段）
     """
     if macd_result is None:
         macd_result = calculate_macd(closes, fast_period, slow_period, signal_period)
 
-    n = len(macd_result.dif)
-    if n < 2:
-        return macd_result
-
     dif = macd_result.dif
     dea = macd_result.dea
     macd_bar = macd_result.macd
+    n = len(dif)
 
-    # 检查最后一个有效点
+    # 默认无信号结果
+    no_signal = MACDSignalResult(
+        signal=False,
+        strength=SignalStrength.WEAK,
+        signal_type="none",
+        dif=dif,
+        dea=dea,
+        macd=macd_bar,
+    )
+
+    if n < 2:
+        return no_signal
+
     last = n - 1
     prev = n - 2
 
-    if any(math.isnan(v) for v in [dif[last], dea[last], dif[prev], dea[prev],
-                                     macd_bar[last], macd_bar[prev]]):
-        return macd_result
+    # 数据有效性检查
+    if any(
+        math.isnan(v)
+        for v in [dif[last], dea[last], dif[prev], dea[prev],
+                  macd_bar[last], macd_bar[prev]]
+    ):
+        return no_signal
 
-    # 条件 1：DIF 和 DEA 均在零轴上方
-    cond_above_zero = dif[last] > 0 and dea[last] > 0
-
-    # 条件 2：DIF 上穿 DEA（金叉）
+    # 金叉判定：DIF 上穿 DEA
     cond_golden_cross = dif[prev] <= dea[prev] and dif[last] > dea[last]
 
-    # 条件 3：红柱持续放大
+    if not cond_golden_cross:
+        return no_signal
+
+    # DEA 趋势向上（用于强度修饰）
+    dea_trending_up = dea[last] > dea[prev]
+
+    # ── 零轴上方金叉 ──
+    cond_above_zero = dif[last] > 0 and dea[last] > 0
     cond_bar_expanding = macd_bar[last] > macd_bar[prev] and macd_bar[last] > 0
 
-    # 条件 4：DEA 向上运行
-    cond_dea_up = dea[last] > dea[prev]
+    if cond_above_zero and cond_bar_expanding:
+        strength = SignalStrength.STRONG
+        # STRONG 不变，DEA 修饰符不再提升
+        return MACDSignalResult(
+            signal=True,
+            strength=strength,
+            signal_type="above_zero",
+            dif=dif,
+            dea=dea,
+            macd=macd_bar,
+        )
 
-    signal = cond_above_zero and cond_golden_cross and cond_bar_expanding and cond_dea_up
+    # ── 零轴下方金叉 ──
+    if dif[last] < 0:
+        # 统计历史零轴下方金叉次数（不含当前这次）
+        history_count = _count_below_zero_golden_crosses(dif, dea, lookback=60)
 
-    return MACDResult(
-        dif=macd_result.dif,
-        dea=macd_result.dea,
-        macd=macd_result.macd,
-        signal=signal,
-    )
+        if history_count >= 1:
+            # 二次（或更多次）金叉 → 信号触发
+            base_strength = SignalStrength.WEAK
+            # DEA 趋势修饰符
+            if dea_trending_up:
+                strength = SignalStrength.MEDIUM
+            else:
+                strength = base_strength
+
+            return MACDSignalResult(
+                signal=True,
+                strength=strength,
+                signal_type="below_zero_second",
+                dif=dif,
+                dea=dea,
+                macd=macd_bar,
+            )
+
+        # 首次金叉 → 不生成信号
+        return no_signal
+
+    # 其他情况（如 DIF >= 0 但不满足零轴上方金叉的红柱放大条件）
+    return no_signal
 
 
 # ---------------------------------------------------------------------------
@@ -430,19 +567,49 @@ def calculate_boll(
     return BOLLResult(upper=upper, middle=middle, lower=lower)
 
 
+def _count_hold_days_above_middle(
+    closes: list[float],
+    middle: list[float],
+) -> int:
+    """
+    从最新一天向前扫描，统计连续收盘价 > 中轨的天数（纯函数）。
+
+    Args:
+        closes: 收盘价序列
+        middle: 布林带中轨序列
+
+    Returns:
+        连续站稳中轨天数（从最新一天开始向前计数）
+
+    需求: 2.4
+    """
+    n = len(closes)
+    count = 0
+    for i in range(n - 1, -1, -1):
+        if math.isnan(middle[i]):
+            break
+        if closes[i] > middle[i]:
+            count += 1
+        else:
+            break
+    return count
+
+
 def detect_boll_signal(
     closes: list[float],
     period: int = DEFAULT_BOLL_PERIOD,
     std_dev: float = DEFAULT_BOLL_STD_DEV,
     boll_result: BOLLResult | None = None,
-) -> BOLLResult:
+) -> BOLLSignalResult:
     """
-    检测 BOLL 突破信号。
+    检测 BOLL 突破信号（需求 2.1 ~ 2.4）。
 
-    信号条件（需求 4.3）：
-    1. 股价站稳中轨（当日收盘价 > 中轨）
-    2. 向上触碰上轨（当日最高价或收盘价 >= 上轨 * 0.98，即接近上轨）
-    3. 布林带开口向上（当日带宽 > 前一日带宽）
+    信号条件：
+    - 主信号：当日收盘价 > 中轨 AND 前一日收盘价 > 前一日中轨（连续 2 日站稳）→ signal=True
+    - 风险提示：当日收盘价 >= 上轨 × 0.98 → near_upper_band=True（独立于 signal）
+    - hold_days：从最新一天向前扫描连续收盘价 > 中轨的天数
+
+    移除原有"触碰上轨"作为买入条件的逻辑。
 
     Args:
         closes: 收盘价序列
@@ -451,44 +618,54 @@ def detect_boll_signal(
         boll_result: 预计算的 BOLL 结果（可选）
 
     Returns:
-        BOLLResult（含 signal 字段）
+        BOLLSignalResult（含 signal、near_upper_band、hold_days 字段）
     """
     if boll_result is None:
         boll_result = calculate_boll(closes, period, std_dev)
 
     n = len(closes)
-    if n < 2:
-        return boll_result
-
-    last = n - 1
-    prev = n - 2
-
     up = boll_result.upper
     mid = boll_result.middle
     low = boll_result.lower
 
-    if any(math.isnan(v) for v in [up[last], mid[last], low[last],
-                                     up[prev], mid[prev], low[prev]]):
-        return boll_result
+    # 默认无信号结果
+    no_signal = BOLLSignalResult(
+        signal=False,
+        near_upper_band=False,
+        hold_days=0,
+        upper=up,
+        middle=mid,
+        lower=low,
+    )
 
-    # 条件 1：股价站稳中轨
-    cond_above_middle = closes[last] > mid[last]
+    if n < 2:
+        return no_signal
 
-    # 条件 2：向上触碰上轨（收盘价接近或超过上轨的 98%）
-    cond_touch_upper = closes[last] >= up[last] * 0.98
+    last = n - 1
+    prev = n - 2
 
-    # 条件 3：布林带开口向上（带宽扩大）
-    bandwidth_last = up[last] - low[last]
-    bandwidth_prev = up[prev] - low[prev]
-    cond_opening_up = bandwidth_last > bandwidth_prev
+    # 数据有效性检查：至少最后两天的中轨和最后一天的上轨需要有效
+    if math.isnan(mid[last]) or math.isnan(mid[prev]) or math.isnan(up[last]):
+        return no_signal
 
-    signal = cond_above_middle and cond_touch_upper and cond_opening_up
+    # ── 主信号条件：连续 2 日站稳中轨 ──
+    cond_today_above = closes[last] > mid[last]
+    cond_prev_above = closes[prev] > mid[prev]
+    signal = cond_today_above and cond_prev_above
 
-    return BOLLResult(
-        upper=boll_result.upper,
-        middle=boll_result.middle,
-        lower=boll_result.lower,
+    # ── 风险提示：接近上轨（独立于 signal） ──
+    near_upper_band = closes[last] >= up[last] * 0.98
+
+    # ── hold_days：连续站稳中轨天数 ──
+    hold_days = _count_hold_days_above_middle(closes, mid)
+
+    return BOLLSignalResult(
         signal=signal,
+        near_upper_band=near_upper_band,
+        hold_days=hold_days,
+        upper=up,
+        middle=mid,
+        lower=low,
     )
 
 
@@ -560,28 +737,59 @@ def calculate_rsi(
     return RSIResult(values=values)
 
 
+def _count_consecutive_rising(values: list[float], end_idx: int) -> int:
+    """
+    从 end_idx 向前统计 RSI 连续严格递增的天数（纯函数）。
+
+    从 end_idx 开始，向前检查 values[i] > values[i-1]，
+    直到条件不满足或遇到 NaN 为止。
+
+    Args:
+        values: RSI 值序列
+        end_idx: 结束索引（含）
+
+    Returns:
+        连续严格递增天数（不含起始天本身，即比较次数）
+    """
+    count = 0
+    for i in range(end_idx, 0, -1):
+        if math.isnan(values[i]) or math.isnan(values[i - 1]):
+            break
+        if values[i] > values[i - 1]:
+            count += 1
+        else:
+            break
+    return count
+
+
 def detect_rsi_signal(
     closes: list[float],
     period: int = DEFAULT_RSI_PERIOD,
+    lower_bound: float = 55.0,
+    upper_bound: float = 75.0,
+    rising_days: int = 3,
     rsi_result: RSIResult | None = None,
-) -> RSIResult:
+) -> RSISignalResult:
     """
-    检测 RSI 强势信号。
+    检测 RSI 强势信号（需求 3.1 ~ 3.5）。
 
-    信号条件（需求 4.4）：
-    1. RSI 值在 [50, 80] 区间
-    2. 无超买背离（价格创新高时 RSI 也应创新高，否则为背离）
+    信号条件：
+    1. RSI 值在 [lower_bound, upper_bound] 区间内
+    2. 最近 rising_days 天 RSI 严格递增
+    3. 无超买背离（价格创新高时 RSI 也应创新高，否则为背离）
 
-    背离检测：比较最近两个局部高点，若价格新高但 RSI 未新高则为背离。
-    简化实现：检查最近 N 天内价格是否创新高而 RSI 下降。
+    数据不足时（可用天数 < rising_days + period）返回 signal=False。
 
     Args:
         closes: 收盘价序列
-        period: RSI 周期
+        period: RSI 周期，默认 14
+        lower_bound: 强势区间下限，默认 55.0（原 50.0）
+        upper_bound: 强势区间上限，默认 75.0（原 80.0）
+        rising_days: 连续上升天数要求，默认 3
         rsi_result: 预计算的 RSI 结果（可选）
 
     Returns:
-        RSIResult（含 signal 字段）
+        RSISignalResult（含 signal、current_rsi、consecutive_rising、values 字段）
     """
     if rsi_result is None:
         rsi_result = calculate_rsi(closes, period)
@@ -589,19 +797,36 @@ def detect_rsi_signal(
     n = len(closes)
     values = rsi_result.values
 
-    if n < period + 1:
-        return rsi_result
+    # 默认无信号结果
+    def _no_signal(current_rsi: float = 0.0, consecutive_rising: int = 0) -> RSISignalResult:
+        return RSISignalResult(
+            signal=False,
+            current_rsi=current_rsi,
+            consecutive_rising=consecutive_rising,
+            values=values,
+        )
+
+    # 数据不足检查：可用天数 < rising_days + period
+    if n < rising_days + period:
+        return _no_signal()
 
     last = n - 1
     if math.isnan(values[last]):
-        return rsi_result
+        return _no_signal()
 
-    # 条件 1：RSI 在 [50, 80]
-    cond_range = 50.0 <= values[last] <= 80.0
+    current_rsi = values[last]
 
-    # 条件 2：无超买背离
-    # 检查最近 period 天内是否存在背离：
-    # 价格创新高但 RSI 未创新高
+    # 计算连续上升天数
+    consecutive_rising = _count_consecutive_rising(values, last)
+
+    # 条件 1：RSI 在 [lower_bound, upper_bound] 区间内
+    cond_range = lower_bound <= current_rsi <= upper_bound
+
+    # 条件 2：最近 rising_days 天 RSI 严格递增
+    cond_rising = consecutive_rising >= rising_days
+
+    # 条件 3：无超买背离
+    # 检查最近 period 天内是否存在背离：价格创新高但 RSI 未创新高
     lookback = min(period, last)
     cond_no_divergence = True
 
@@ -620,9 +845,14 @@ def detect_rsi_signal(
                 and values[last] < values[price_max_idx]):
             cond_no_divergence = False
 
-    signal = cond_range and cond_no_divergence
+    signal = cond_range and cond_rising and cond_no_divergence
 
-    return RSIResult(values=rsi_result.values, signal=signal)
+    return RSISignalResult(
+        signal=signal,
+        current_rsi=current_rsi,
+        consecutive_rising=consecutive_rising,
+        values=values,
+    )
 
 
 # ---------------------------------------------------------------------------

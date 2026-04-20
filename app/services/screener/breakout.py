@@ -69,6 +69,8 @@ class BreakoutSignal:
     is_valid: bool                       # 是否有效突破（量价确认）
     is_false_breakout: bool = False      # 是否假突破（站稳检查后标记）
     generates_buy_signal: bool = False   # 是否生成买入信号
+    volume_sustained: bool | None = None # 突破后成交量持续性（True=持续放量, False=缩量, None=数据不足）
+    consolidation_bonus: bool = False    # 突破前横盘整理期 ≥ 30 个交易日加分标记
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +423,80 @@ def check_false_breakout(
         is_false_breakout=is_false,
         generates_buy_signal=signal.is_valid and not is_false,
     )
+
+
+# ---------------------------------------------------------------------------
+# 突破后成交量持续性验证（需求 7.1, 7.2, 7.5）
+# ---------------------------------------------------------------------------
+
+def check_volume_sustainability(
+    breakout_volume: int,
+    post_breakout_volumes: list[int],
+    sustain_threshold_pct: float = 0.70,
+    fail_threshold_pct: float = 0.50,
+) -> bool | None:
+    """
+    验证突破后成交量持续性（纯函数）。
+
+    判定规则：
+    - 突破日成交量为 0 → 返回 None（避免除零）
+    - 突破后交易日不足 2 天 → 返回 None（数据不足）
+    - 任一日成交量 < breakout_volume × fail_threshold_pct → 返回 False（缩量）
+    - 连续 2 日成交量均 >= breakout_volume × sustain_threshold_pct → 返回 True（持续放量）
+    - 其他情况 → 返回 None（介于两者之间，待确认）
+
+    Args:
+        breakout_volume: 突破日成交量
+        post_breakout_volumes: 突破后各交易日成交量列表
+        sustain_threshold_pct: 持续放量阈值比例（默认 70%）
+        fail_threshold_pct: 缩量失败阈值比例（默认 50%）
+
+    Returns:
+        True（持续放量）、False（缩量）或 None（数据不足/待确认）
+    """
+    # 突破日成交量为 0，无法计算比例
+    if breakout_volume == 0:
+        return None
+
+    # 数据不足（需要至少 2 个交易日）
+    if len(post_breakout_volumes) < 2:
+        return None
+
+    sustain_line = breakout_volume * sustain_threshold_pct
+    fail_line = breakout_volume * fail_threshold_pct
+
+    # 检查是否有任一日低于失败阈值
+    for vol in post_breakout_volumes:
+        if vol < fail_line:
+            return False
+
+    # 检查前 2 日是否均达到持续放量阈值
+    if post_breakout_volumes[0] >= sustain_line and post_breakout_volumes[1] >= sustain_line:
+        return True
+
+    # 介于两者之间，待确认
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 突破前横盘整理加分（需求 7.3）
+# ---------------------------------------------------------------------------
+
+def check_consolidation_bonus(
+    box_period_days: int,
+    min_consolidation_days: int = 30,
+) -> bool:
+    """
+    判断箱体突破前横盘整理期是否足够长（纯函数）。
+
+    Args:
+        box_period_days: 箱体整理期天数
+        min_consolidation_days: 最低整理期天数（默认 30）
+
+    Returns:
+        True 表示整理期足够长，应给予加分
+    """
+    return box_period_days >= min_consolidation_days
 
 
 # ---------------------------------------------------------------------------

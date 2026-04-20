@@ -170,7 +170,8 @@ def test_macd_signal_correctness(closes: list[float]):
 
     **Validates: Requirements 4.2**
 
-    MACD 金叉信号仅当 DIF/DEA 均在零轴上方且 DIF 上穿 DEA 时生成。
+    MACD 信号分类：零轴上方金叉（STRONG）或零轴下方二次金叉（WEAK/MEDIUM）。
+    信号为 True 时必须满足金叉条件（DIF 上穿 DEA）。
     """
     result = detect_macd_signal(closes)
     n = len(result.dif)
@@ -183,15 +184,20 @@ def test_macd_signal_correctness(closes: list[float]):
     prev = n - 2
 
     if result.signal:
-        # 信号为 True 时，验证所有条件成立
+        # 信号为 True 时，验证金叉条件成立
         assert not math.isnan(result.dif[last])
         assert not math.isnan(result.dea[last])
-        # 条件 1：DIF 和 DEA 均在零轴上方
-        assert result.dif[last] > 0, "MACD 信号要求 DIF > 0"
-        assert result.dea[last] > 0, "MACD 信号要求 DEA > 0"
-        # 条件 2：DIF 上穿 DEA（金叉）
+        # 金叉：DIF 上穿 DEA
         assert result.dif[prev] <= result.dea[prev], "金叉要求前一日 DIF <= DEA"
         assert result.dif[last] > result.dea[last], "金叉要求当日 DIF > DEA"
+
+        if result.signal_type == "above_zero":
+            # 零轴上方金叉：DIF > 0, DEA > 0
+            assert result.dif[last] > 0, "零轴上方金叉要求 DIF > 0"
+            assert result.dea[last] > 0, "零轴上方金叉要求 DEA > 0"
+        elif result.signal_type == "below_zero_second":
+            # 零轴下方二次金叉：DIF < 0
+            assert result.dif[last] < 0, "零轴下方金叉要求 DIF < 0"
 
 
 @settings(max_examples=100)
@@ -200,22 +206,25 @@ def test_rsi_signal_correctness(closes: list[float]):
     """
     # Feature: a-share-quant-trading-system, Property 7: 技术指标信号生成正确性 (RSI)
 
-    **Validates: Requirements 4.4**
+    **Validates: Requirements 3.1, 3.2, 3.3**
 
-    RSI 强势信号仅当 RSI 在 [50, 80] 区间内时生成。
+    RSI 强势信号仅当 RSI 在 [55, 75] 区间内且连续上升时生成。
     """
     result = detect_rsi_signal(closes, period=14)
     n = len(result.values)
 
-    if n < 15:
+    if n < 17:  # rising_days(3) + period(14)
         assert result.signal is False
         return
 
     last = n - 1
     if result.signal:
         assert not math.isnan(result.values[last])
-        assert 50.0 <= result.values[last] <= 80.0, (
-            f"RSI 信号要求 RSI 在 [50, 80]，实际 RSI={result.values[last]:.2f}"
+        assert 55.0 <= result.current_rsi <= 75.0, (
+            f"RSI 信号要求 RSI 在 [55, 75]，实际 RSI={result.current_rsi:.2f}"
+        )
+        assert result.consecutive_rising >= 3, (
+            f"RSI 信号要求连续上升 >= 3 天，实际 {result.consecutive_rising} 天"
         )
 
 

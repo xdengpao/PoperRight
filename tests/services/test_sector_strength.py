@@ -398,3 +398,203 @@ class TestMultipleSectorMapping:
         assert stocks_data["SH600002"]["sector_rank"] == 2
         assert stocks_data["SH600002"]["sector_name"] == "板块B"
         assert stocks_data["SH600002"]["sector_trend"] is True
+
+
+# ---------------------------------------------------------------------------
+# Test: check_data_freshness 数据新鲜度检查（Req 9）
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDataFreshness:
+    """
+    板块数据新鲜度检查单元测试。
+
+    覆盖：WARNING 阈值（2 天）、降级阈值（5 天）、周末跳过、自定义阈值。
+    Requirements: 9.1, 9.2, 9.3, 9.4, 9.5
+    """
+
+    def test_same_day_no_warning_no_degrade(self):
+        """当天数据，stale_days=0，不触发 WARNING 也不降级。"""
+        from datetime import date
+
+        # 2024-01-15 是周一
+        d = date(2024, 1, 15)
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(d, d)
+        )
+
+        assert stale_days == 0
+        assert should_warn is False
+        assert should_degrade is False
+
+    def test_one_business_day_no_warning(self):
+        """延迟 1 个工作日，不触发 WARNING。"""
+        from datetime import date
+
+        # 周一 → 周二，1 个工作日
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 16)  # 周二
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 1
+        assert should_warn is False
+        assert should_degrade is False
+
+    def test_two_business_days_no_warning(self):
+        """延迟恰好 2 个工作日，不触发 WARNING（阈值为 >2）。"""
+        from datetime import date
+
+        # 周一 → 周三，2 个工作日
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 17)  # 周三
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 2
+        assert should_warn is False
+        assert should_degrade is False
+
+    def test_three_business_days_triggers_warning(self):
+        """延迟 3 个工作日，触发 WARNING（>2）。"""
+        from datetime import date
+
+        # 周一 → 周四，3 个工作日
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 18)  # 周四
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 3
+        assert should_warn is True
+        assert should_degrade is False
+
+    def test_five_business_days_no_degrade(self):
+        """延迟恰好 5 个工作日，不触发降级（阈值为 >5）。"""
+        from datetime import date
+
+        # 周一 → 下周一，5 个工作日（周二到周五=4，下周一=5）
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 22)  # 下周一
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 5
+        assert should_warn is True
+        assert should_degrade is False
+
+    def test_six_business_days_triggers_degrade(self):
+        """延迟 6 个工作日，触发降级（>5）。"""
+        from datetime import date
+
+        # 周一 → 下周二，6 个工作日
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 23)  # 下周二
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 6
+        assert should_warn is True
+        assert should_degrade is True
+
+    def test_weekend_skipped(self):
+        """周末不计入工作日。周五 → 下周一 = 0 个工作日（周六周日跳过）。"""
+        from datetime import date
+
+        # 周五 → 下周一，中间只有周六和周日
+        latest = date(2024, 1, 19)  # 周五
+        current = date(2024, 1, 22)  # 下周一
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        # 周六和周日不计入，周一计入 = 1 个工作日
+        assert stale_days == 1
+        assert should_warn is False
+        assert should_degrade is False
+
+    def test_weekend_only_gap(self):
+        """周五 → 周六/周日，stale_days=0。"""
+        from datetime import date
+
+        latest = date(2024, 1, 19)  # 周五
+        current_sat = date(2024, 1, 20)  # 周六
+        current_sun = date(2024, 1, 21)  # 周日
+
+        _, _, stale_sat = SectorStrengthFilter.check_data_freshness(
+            latest, current_sat,
+        )
+        _, _, stale_sun = SectorStrengthFilter.check_data_freshness(
+            latest, current_sun,
+        )
+
+        assert stale_sat == 0
+        assert stale_sun == 0
+
+    def test_custom_warning_threshold(self):
+        """自定义 WARNING 阈值为 1 天。"""
+        from datetime import date
+
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 17)  # 周三，2 个工作日
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(
+                latest, current,
+                warning_threshold_days=1,
+            )
+        )
+
+        assert stale_days == 2
+        assert should_warn is True  # 2 > 1
+        assert should_degrade is False
+
+    def test_custom_degrade_threshold(self):
+        """自定义降级阈值为 3 天。"""
+        from datetime import date
+
+        latest = date(2024, 1, 15)  # 周一
+        current = date(2024, 1, 19)  # 周五，4 个工作日
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(
+                latest, current,
+                degrade_threshold_days=3,
+            )
+        )
+
+        assert stale_days == 4
+        assert should_warn is True  # 4 > 2
+        assert should_degrade is True  # 4 > 3
+
+    def test_long_gap_with_multiple_weekends(self):
+        """跨越多个周末的长间隔。"""
+        from datetime import date
+
+        # 2024-01-15 (周一) → 2024-02-05 (周一)
+        # 3 周 = 15 个工作日
+        latest = date(2024, 1, 15)
+        current = date(2024, 2, 5)
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert stale_days == 15
+        assert should_warn is True
+        assert should_degrade is True
+
+    def test_degrade_implies_warn(self):
+        """降级时必然也触发 WARNING。"""
+        from datetime import date
+
+        latest = date(2024, 1, 15)
+        current = date(2024, 1, 23)  # 6 个工作日
+        should_warn, should_degrade, stale_days = (
+            SectorStrengthFilter.check_data_freshness(latest, current)
+        )
+
+        assert should_degrade is True
+        assert should_warn is True

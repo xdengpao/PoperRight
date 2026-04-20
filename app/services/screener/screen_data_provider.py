@@ -451,8 +451,14 @@ class ScreenDataProvider:
             "ma_trend": float,          # 均线趋势打分 0-100
             "ma_support": bool,         # 均线支撑信号
             "macd": bool,               # MACD 多头信号
+            "macd_strength": SignalStrength | None,  # MACD 信号强度（需求 1.4）
+            "macd_signal_type": str,    # MACD 信号类型（需求 1.4）
             "boll": bool,               # BOLL 突破信号
+            "boll_near_upper_band": bool,  # BOLL 接近上轨风险提示（需求 2.4）
+            "boll_hold_days": int,      # BOLL 连续站稳中轨天数（需求 2.4）
             "rsi": bool,                # RSI 强势信号
+            "rsi_current": float,       # 当前 RSI 值（需求 3.4）
+            "rsi_consecutive_rising": int,  # RSI 连续上升天数（需求 3.4）
             "dma": dict | None,         # DMA 指标结果
             "breakout": dict | None,    # 突破信号
             "turnover_check": bool,     # 换手率筛选
@@ -522,26 +528,41 @@ class ScreenDataProvider:
             stock_data["ma_support"] = False
 
         # 技术指标模块
+        # 适配结构化返回值（需求 1.4, 2.4, 3.4）：
+        # 各检测函数返回 MACDSignalResult / BOLLSignalResult / RSISignalResult，
+        # 将 signal 及附加字段写入 stock_data 供 ScreenExecutor 使用。
         try:
             macd_result = detect_macd_signal(closes_float)
             stock_data["macd"] = macd_result.signal
+            stock_data["macd_strength"] = macd_result.strength
+            stock_data["macd_signal_type"] = macd_result.signal_type
         except Exception:
             logger.debug("计算 macd 失败", exc_info=True)
             stock_data["macd"] = False
+            stock_data["macd_strength"] = None
+            stock_data["macd_signal_type"] = "none"
 
         try:
             boll_result = detect_boll_signal(closes_float)
             stock_data["boll"] = boll_result.signal
+            stock_data["boll_near_upper_band"] = boll_result.near_upper_band
+            stock_data["boll_hold_days"] = boll_result.hold_days
         except Exception:
             logger.debug("计算 boll 失败", exc_info=True)
             stock_data["boll"] = False
+            stock_data["boll_near_upper_band"] = False
+            stock_data["boll_hold_days"] = 0
 
         try:
             rsi_result = detect_rsi_signal(closes_float)
             stock_data["rsi"] = rsi_result.signal
+            stock_data["rsi_current"] = rsi_result.current_rsi
+            stock_data["rsi_consecutive_rising"] = rsi_result.consecutive_rising
         except Exception:
             logger.debug("计算 rsi 失败", exc_info=True)
             stock_data["rsi"] = False
+            stock_data["rsi_current"] = 0.0
+            stock_data["rsi_consecutive_rising"] = 0
 
         try:
             dma_result = calculate_dma(closes_float)

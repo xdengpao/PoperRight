@@ -63,6 +63,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/ScreenerResultsView.vue'),
         meta: { title: '选股结果' },
       },
+      // 选股池管理
+      {
+        path: 'stock-pool',
+        name: 'StockPool',
+        component: () => import('@/views/StockPoolView.vue'),
+        meta: { title: '选股池' },
+      },
       // 风控配置（需求 9-11）
       {
         path: 'risk',

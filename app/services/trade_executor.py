@@ -25,6 +25,7 @@ from app.core.schemas import (
     OrderResponse,
     OrderStatus,
     OrderType,
+    Position,
     ScreenItem,
     TradeMode,
 )
@@ -156,17 +157,21 @@ class TradeExecutor:
         初始交易模式，默认 LIVE。
     now_fn : Callable[[], datetime] | None
         可注入的时间函数，便于测试。默认使用 ``datetime.now``。
+    risk_gateway : RiskGateway | None
+        风控网关实例，为 None 时不执行风控校验（向后兼容）。
     """
 
     def __init__(
         self,
         mode: TradeMode = TradeMode.LIVE,
         now_fn: Callable[[], datetime] | None = None,
+        risk_gateway: "RiskGateway | None" = None,
     ) -> None:
         self._mode = mode
         self._now_fn = now_fn or datetime.now
         self._paper_client = _PaperBrokerClient()
         self._live_client = _LiveBrokerClient()
+        self._risk_gateway = risk_gateway
 
     # -- 属性 ---------------------------------------------------------------
 
@@ -202,10 +207,31 @@ class TradeExecutor:
 
     # -- 委托 ---------------------------------------------------------------
 
-    def submit_order(self, order: OrderRequest) -> OrderResponse:
+    def submit_order(
+        self,
+        order: OrderRequest,
+        positions: list[Position] | None = None,
+        market_data: dict | None = None,
+        blacklist: set[str] | None = None,
+        total_position_limit: float = 80.0,
+    ) -> OrderResponse:
         """提交委托。
 
         非交易时段自动拒绝（需求 14.5 / 属性 26）。
+        当 risk_gateway 已配置时，买入委托在提交前经过风控校验链（需求 1）。
+
+        Parameters
+        ----------
+        order : OrderRequest
+            委托请求。
+        positions : list[Position] | None
+            当前持仓列表，风控校验时使用。
+        market_data : dict | None
+            行情数据字典（daily_change_pct, industry_map, total_market_value, available_cash）。
+        blacklist : set[str] | None
+            黑名单股票代码集合。
+        total_position_limit : float
+            总仓位上限百分比，默认 80.0。
         """
         if not self.is_trading_hours():
             return OrderResponse(
@@ -218,6 +244,18 @@ class TradeExecutor:
                 status=OrderStatus.REJECTED,
                 message="OUTSIDE_TRADING_HOURS",
             )
+
+        # 风控网关校验（需求 1）
+        if self._risk_gateway is not None:
+            return self._risk_gateway.check_and_submit(
+                order=order,
+                broker=self.broker,
+                positions=positions or [],
+                market_data=market_data or {},
+                blacklist=blacklist or set(),
+                total_position_limit=total_position_limit,
+            )
+
         return self.broker.submit_order(order)
 
     # -- 撤单 ---------------------------------------------------------------

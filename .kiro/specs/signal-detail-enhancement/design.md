@@ -29,6 +29,7 @@
 | `dimension` 字段在 API 序列化时从映射常量派生，不存储在 `SignalDetail` dataclass 中 | `dimension` 是 `category` 的派生属性，存储会引入数据冗余；在序列化时实时查表即可，性能开销可忽略（需求 10） |
 | SECTOR_STRONG 描述文本包含具体板块名称 | 用户需要明确知道因哪个板块被选中，板块名称已在 `stock_data["sector_name"]` 中可用（需求 10.7） |
 | 前端按维度分组顺序为 技术面 → 板块面 → 资金面 → 基本面 | 用户指定的优先级顺序，技术面信号最常见排首位，板块面次之（需求 10.4） |
+| 从 `_FACTOR_MODULE` 中移除 `sector_rank` 和 `sector_trend` 的映射 | 板块面因子通过因子条件编辑器路径评估时，不应受 `volume_price` 模块启用状态限制；`_FACTOR_MODULE.get()` 返回 `None` 时跳过模块启用检查，信号正常生成（需求 11） |
 
 ## 架构
 
@@ -491,6 +492,38 @@ if category == SignalCategory.SECTOR_STRONG:
     return "所属板块涨幅排名前列"
 ```
 
+### 14a. 后端：修复因子条件编辑器板块面信号生成 — 需求 11
+
+**问题**：`ScreenExecutor._FACTOR_MODULE` 映射中，`sector_rank` 和 `sector_trend` 被错误地映射到 `"volume_price"` 模块。当用户通过因子条件编辑器配置板块面因子时，因子评估正确通过，但在构建 `SignalDetail` 时，代码检查 `volume_price` 模块是否启用——如果策略模板未启用该模块，板块面信号被静默跳过。
+
+**修复**：从 `_FACTOR_MODULE` 中移除 `sector_rank` 和 `sector_trend` 的映射。在因子条件编辑器路径中，`_FACTOR_MODULE.get(fr.factor_name)` 返回 `None` 时，`if factor_module and not self._is_module_enabled(factor_module)` 条件为 `False`，信号正常生成。
+
+```python
+# 修复前（错误）
+_FACTOR_MODULE: dict[str, str] = {
+    # ...
+    "sector_rank": "volume_price",    # ❌ 导致板块面因子被 volume_price 模块启用状态过滤
+    "sector_trend": "volume_price",   # ❌ 同上
+}
+
+# 修复后
+_FACTOR_MODULE: dict[str, str] = {
+    "ma_trend": "ma_trend",
+    "ma_support": "ma_trend",
+    "macd": "indicator_params",
+    "boll": "indicator_params",
+    "rsi": "indicator_params",
+    "dma": "indicator_params",
+    "breakout": "breakout",
+    "money_flow": "volume_price",
+    "large_order": "volume_price",
+    "volume_price": "volume_price",
+    # sector_rank 和 sector_trend 不再映射到任何模块
+}
+```
+
+**影响范围**：仅影响因子条件编辑器路径（`use_factor_editor=True`）。非因子条件编辑器路径中的板块信号生成逻辑（通过 `_is_module_enabled("volume_price")` 检查后直接从 `stock_data` 构建信号）不受影响。
+
 ### 15. 前端：信号维度分组展示 — 需求 10
 
 修改 `ScreenerResultsView.vue` 中信号标签区域，将信号按 `dimension` 字段分组展示：
@@ -768,6 +801,7 @@ stock_data["sector_classifications"] = {
 | `sector_classifications` 字段在 `stocks_data` 中缺失 | API 序列化时使用默认空对象 `{"eastmoney": [], "tonghuashun": [], "tongdaxin": []}`（需求 9） |
 | `_SIGNAL_DIMENSION_MAP` 中未找到 `SignalCategory` 值 | `dimension` 字段默认为 `"其他"`（需求 10.5） |
 | SECTOR_STRONG 信号的 `stock_data["sector_name"]` 缺失 | 描述文本回退为不含板块名的通用文本 `"所属板块涨幅排名前列"`（需求 10.7） |
+| 因子条件编辑器路径中板块面因子（`sector_rank`/`sector_trend`）不在 `_FACTOR_MODULE` 映射中 | 跳过模块启用检查，直接根据因子评估结果生成 `SECTOR_STRONG` 信号（需求 11） |
 
 ### 前端错误处理
 
@@ -833,6 +867,13 @@ stock_data["sector_classifications"] = {
 | API 序列化中 `dimension` 字段值与映射一致 | `tests/api/test_screen_api.py` |
 | SECTOR_STRONG 描述文本包含具体板块名称 | `tests/services/test_signal_description.py` |
 | SECTOR_STRONG 描述文本在 `sector_name` 缺失时回退 | `tests/services/test_signal_description.py` |
+
+#### 因子条件编辑器板块面信号修复单元测试（需求 11）
+
+| 测试场景 | 测试文件 |
+|----------|----------|
+| `_FACTOR_MODULE` 不包含 `sector_rank` 和 `sector_trend` 映射 | `tests/services/test_signal_description.py` |
+| 因子条件编辑器路径中板块面因子通过评估后正确生成 `SECTOR_STRONG` 信号 | `tests/services/test_signal_description.py` |
 
 ### 前端测试（TypeScript / fast-check）
 

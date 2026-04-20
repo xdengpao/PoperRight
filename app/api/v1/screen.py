@@ -3,22 +3,26 @@
 
 - POST /screen/run          — 执行选股
 - GET  /screen/results       — 查询选股结果
-- GET  /screen/export        — 导出选股结果
+- GET  /screen/export/csv    — 导出选股结果为 CSV
 - GET  /screen/schedule      — 盘后选股调度状态
 - POST /screen/backtest      — 选股结果到回测闭环（需求 11）
+- GET  /screen/factors       — 因子元数据列表（需求 11）
+- GET  /screen/factors/{factor_name}/usage — 因子使用说明（需求 11）
 - CRUD /strategies           — 策略模板管理
 """
 
 from __future__ import annotations
 
+import io
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from redis.asyncio import Redis
 from sqlalchemy import select, func, update as sa_update
@@ -28,10 +32,12 @@ from app.core.database import AsyncSessionPG, AsyncSessionTS, get_pg_session
 from app.core.redis_client import cache_get, cache_set, get_redis
 from app.core.schemas import ScreenType, StrategyConfig
 from app.models.strategy import StrategyTemplate
+from app.services.csv_exporter import build_csv_content, build_export_filename
 from app.services.screener.factor_registry import (
     FACTOR_REGISTRY,
     FactorCategory,
     FactorMeta,
+    get_factor_meta,
     get_factors_by_category,
 )
 from app.services.screener.screen_data_provider import ScreenDataProvider
@@ -529,13 +535,66 @@ async def get_screen_results(
     }
 
 
-@router.get("/screen/export")
-async def export_screen_results(
+@router.get("/screen/export/csv")
+async def export_screen_csv(
     strategy_id: UUID | None = Query(None),
-    format: str = Query("xlsx"),
-) -> dict:
-    """导出选股结果（stub）。"""
-    return {"download_url": f"/api/v1/screen/export/file?format={format}", "status": "pending"}
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> StreamingResponse:
+    """导出选股结果为 CSV 文件。
+
+    从 Redis 缓存读取选股结果，查询策略名称，生成 UTF-8 BOM 编码的 CSV，
+    以 StreamingResponse 返回，Content-Disposition 包含文件名。
+
+    对应需求：1.1, 1.2, 1.3, 1.4, 1.5
+    """
+    # 1. 从 Redis 读取选股结果
+    cache_key = f"screen:results:{strategy_id}" if strategy_id else "screen:results:latest"
+    raw = await cache_get(cache_key)
+    if not raw:
+        raise HTTPException(status_code=404, detail="暂无选股结果可导出")
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        raise HTTPException(status_code=404, detail="暂无选股结果可导出")
+
+    items = data.get("items", [])
+    if not items:
+        raise HTTPException(status_code=404, detail="暂无选股结果可导出")
+
+    # 2. 查询策略名称
+    strategy_name = "选股结果"
+    sid = data.get("strategy_id")
+    if sid:
+        try:
+            result = await pg_session.execute(
+                select(StrategyTemplate.name).where(StrategyTemplate.id == UUID(sid))
+            )
+            name_row = result.scalar_one_or_none()
+            if name_row:
+                strategy_name = name_row
+        except Exception:
+            logger.warning("查询策略名称失败，使用默认名称", exc_info=True)
+
+    # 3. 将缓存中的 "name" 字段映射为 "stock_name"（CSV 导出器使用 stock_name）
+    csv_items = []
+    for item in items:
+        csv_item = dict(item)
+        if "stock_name" not in csv_item and "name" in csv_item:
+            csv_item["stock_name"] = csv_item["name"]
+        csv_items.append(csv_item)
+
+    # 4. 生成 CSV 内容和文件名
+    export_time = datetime.now(timezone.utc)
+    csv_bytes = build_csv_content(csv_items, strategy_name, export_time)
+    filename = build_export_filename(strategy_name, export_time)
+
+    # 5. 返回 StreamingResponse
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -688,6 +747,57 @@ async def get_factor_registry(
     return result
 
 
+@router.get("/screen/factors")
+async def list_factors(
+    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector"),
+) -> dict:
+    """返回所有因子元数据（按 category 分组）。
+
+    复用 get_factor_registry 逻辑，提供 RESTful 风格的因子列表端点。
+
+    对应需求：11.2, 11.4
+    """
+    if category is not None:
+        try:
+            cat_enum = FactorCategory(category)
+        except ValueError:
+            return {}
+        factors = get_factors_by_category(cat_enum)
+        return {category: [_factor_meta_to_dict(m) for m in factors]}
+
+    result: dict[str, list[dict]] = {}
+    for cat in FactorCategory:
+        factors = get_factors_by_category(cat)
+        result[cat.value] = [_factor_meta_to_dict(m) for m in factors]
+    return result
+
+
+@router.get("/screen/factors/{factor_name}/usage")
+async def get_factor_usage(factor_name: str) -> dict:
+    """返回单个因子的使用说明（description, examples, 推荐阈值）。
+
+    因子不存在时返回 HTTP 404 + 描述性错误信息。
+
+    对应需求：11.3, 11.5
+    """
+    meta = get_factor_meta(factor_name)
+    if meta is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"因子 '{factor_name}' 不存在",
+        )
+    return {
+        "factor_name": meta.factor_name,
+        "label": meta.label,
+        "description": meta.description,
+        "examples": meta.examples,
+        "default_threshold": meta.default_threshold,
+        "default_range": list(meta.default_range) if meta.default_range else None,
+        "unit": meta.unit,
+        "threshold_type": meta.threshold_type.value,
+    }
+
+
 @router.get("/screen/strategy-examples")
 async def get_strategy_examples() -> list[dict]:
     """返回策略示例库。"""
@@ -749,6 +859,20 @@ async def create_strategy(
 ) -> dict:
     """创建策略模板。"""
     try:
+        # 同一用户下策略名称唯一性校验
+        if body.name:
+            existing = await pg_session.execute(
+                select(StrategyTemplate.id).where(
+                    StrategyTemplate.user_id == _DEFAULT_USER_ID,
+                    StrategyTemplate.name == body.name,
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"策略名称「{body.name}」已存在，请使用其他名称",
+                )
+
         entry = StrategyTemplate(
             user_id=_DEFAULT_USER_ID,
             name=body.name,
@@ -760,6 +884,8 @@ async def create_strategy(
         pg_session.add(entry)
         await pg_session.flush()
         return _strategy_to_dict(entry)
+    except HTTPException:
+        raise
     except Exception:
         logger.warning("数据库创建策略失败", exc_info=True)
         raise HTTPException(status_code=503, detail="数据库暂时不可用，请稍后重试")
@@ -793,8 +919,23 @@ async def update_strategy(
     s = result.scalar_one_or_none()
     if s is None:
         raise HTTPException(status_code=404, detail="策略不存在")
-    if body.name is not None:
+
+    # 更新名称时校验同一用户下唯一性
+    if body.name is not None and body.name != s.name:
+        existing = await pg_session.execute(
+            select(StrategyTemplate.id).where(
+                StrategyTemplate.user_id == s.user_id,
+                StrategyTemplate.name == body.name,
+                StrategyTemplate.id != strategy_id,
+            )
+        )
+        if existing.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"策略名称「{body.name}」已存在，请使用其他名称",
+            )
         s.name = body.name
+
     if body.config is not None:
         s.config = body.config.model_dump()
     if body.is_active is not None:

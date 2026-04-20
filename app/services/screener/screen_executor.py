@@ -137,6 +137,9 @@ class ScreenExecutor:
         return self._execute(stocks_data, ScreenType.REALTIME, index_closes=index_closes, previous_items=previous_items)
 
     # 因子名称 → 所属模块标识符的映射
+    # 注意：仅映射非 factor_editor 路径需要模块启用检查的因子。
+    # 板块面因子（sector_rank, sector_trend）不在此映射中，
+    # 因为它们通过 factor_editor 路径评估时不应受 volume_price 模块启用状态限制。
     _FACTOR_MODULE: dict[str, str] = {
         "ma_trend": "ma_trend",
         "ma_support": "ma_trend",
@@ -148,8 +151,6 @@ class ScreenExecutor:
         "money_flow": "volume_price",
         "large_order": "volume_price",
         "volume_price": "volume_price",
-        "sector_rank": "volume_price",
-        "sector_trend": "volume_price",
     }
 
     def _is_module_enabled(self, module_key: str) -> bool:
@@ -157,6 +158,55 @@ class ScreenExecutor:
         if self._enabled_modules is None:
             return True
         return module_key in self._enabled_modules
+
+    # ------------------------------------------------------------------
+    # 技术指标差异化权重与共振加分（需求 5）
+    # ------------------------------------------------------------------
+
+    # 差异化权重：按指标可靠性分配
+    _INDICATOR_WEIGHTS: dict[str, float] = {
+        "macd": 35.0,
+        "rsi": 25.0,
+        "boll": 20.0,
+        "dma": 20.0,
+    }
+
+    @staticmethod
+    def _compute_indicator_score(triggered: dict[str, bool]) -> float:
+        """
+        计算 indicator_params 模块评分（纯函数，用于属性测试）。
+
+        差异化权重：MACD=35, RSI=25, BOLL=20, DMA=20。
+        共振加分：触发数 < 2 → 0, == 2 → +10, >= 3 → +20。
+        最终评分 = min(base_score + resonance_bonus, 100.0)。
+
+        Args:
+            triggered: {指标名: 是否触发}，键为 "macd"/"rsi"/"boll"/"dma"
+
+        Returns:
+            indicator_params 模块评分，范围 [0, 100]
+        """
+        weights = ScreenExecutor._INDICATOR_WEIGHTS
+
+        # 基础评分：触发指标的权重之和
+        base_score = sum(
+            weights.get(ind, 0.0)
+            for ind, is_on in triggered.items()
+            if is_on
+        )
+
+        # 触发指标数量
+        count = sum(1 for v in triggered.values() if v)
+
+        # 共振加分
+        if count >= 3:
+            resonance_bonus = 20.0
+        elif count == 2:
+            resonance_bonus = 10.0
+        else:
+            resonance_bonus = 0.0
+
+        return min(base_score + resonance_bonus, 100.0)
 
     # ------------------------------------------------------------------
     # 加权求和评分（需求 5）
@@ -201,6 +251,36 @@ class ScreenExecutor:
 
         result = numerator / denominator
         return max(0.0, min(100.0, result))
+
+    # ------------------------------------------------------------------
+    # 趋势加速信号检测（需求 10）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_trend_acceleration(
+        current_score: float,
+        previous_score: float | None,
+        acceleration_high: float = 70.0,
+        acceleration_low: float = 60.0,
+    ) -> bool:
+        """
+        检测趋势加速信号（纯函数，用于属性测试）。
+
+        当趋势评分从低位（< acceleration_low）快速上升至高位（>= acceleration_high）时，
+        判定为趋势加速。前一轮评分不可用时不触发。
+
+        Args:
+            current_score: 当前趋势评分
+            previous_score: 前一轮趋势评分，None 表示无历史数据
+            acceleration_high: 当前评分触发阈值，默认 70.0
+            acceleration_low: 前一轮评分上限阈值，默认 60.0
+
+        Returns:
+            True 表示趋势加速信号触发，False 表示未触发
+        """
+        if previous_score is None:
+            return False
+        return current_score >= acceleration_high and previous_score < acceleration_low
 
     # ------------------------------------------------------------------
     # 多重突破信号构建（需求 6）
@@ -389,20 +469,30 @@ class ScreenExecutor:
                 pass
             return "均线趋势信号"
 
-        # MACD 信号（固定文本）
+        # MACD 信号（需求 1.4：使用 signal_type 和 strength 生成描述）
         if category == SignalCategory.MACD:
+            signal_type = getattr(signal, "signal_type", None) or stock_data.get("macd_signal_type")
+            if signal_type == "above_zero":
+                return "MACD 零轴上方金叉, DIF 上穿 DEA"
+            if signal_type == "below_zero_second":
+                return "MACD 零轴下方二次金叉"
             return "MACD 金叉, DIF 上穿 DEA"
 
-        # 布林带信号（固定文本）
+        # 布林带信号（需求 2.2, 2.4：near_upper_band 时附加风险提示）
         if category == SignalCategory.BOLL:
-            return "价格突破布林带中轨, 接近上轨"
+            near_upper = stock_data.get("boll_near_upper_band", False)
+            hold_days = stock_data.get("boll_hold_days", 0)
+            base_desc = f"价格站稳布林带中轨 {hold_days} 日" if hold_days > 0 else "价格突破布林带中轨"
+            if near_upper:
+                return f"{base_desc}, ⚠️ 接近上轨注意风险"
+            return base_desc
 
-        # RSI 信号
+        # RSI 信号（需求 3.4：使用 current_rsi 生成描述）
         if category == SignalCategory.RSI:
             try:
-                rsi_val = stock_data.get("rsi")
-                if rsi_val is not None and rsi_val is not True:
-                    return f"RSI(14) = {rsi_val}, 处于强势区间"
+                rsi_val = stock_data.get("rsi_current")
+                if rsi_val is not None and rsi_val > 0:
+                    return f"RSI(14) = {rsi_val:.1f}, 处于强势区间"
             except (TypeError, ValueError):
                 pass
             return "RSI 强势信号"
@@ -592,6 +682,7 @@ class ScreenExecutor:
     # ------------------------------------------------------------------
 
     _CAUTION_THRESHOLD = 90.0  # CAUTION 状态下的趋势打分阈值
+    _DANGER_STRONG_THRESHOLD = 95.0  # DANGER 模式下强势股趋势评分阈值（需求 8.3）
 
     def _apply_risk_filters(
         self,
@@ -604,7 +695,7 @@ class ScreenExecutor:
 
         处理流程：
         1. 检查大盘风险等级
-        2. DANGER → 返回空列表，标注大盘风险暂停买入
+        2. DANGER → 仅允许 trend_score >= 95 的强势股通过
         3. CAUTION → 仅保留 trend_score >= 90 的股票
         4. 剔除单日涨幅 > 9% 的股票
         5. 剔除黑名单中的股票
@@ -634,6 +725,7 @@ class ScreenExecutor:
         market_risk_checker: MarketRiskChecker,
         stock_risk_filter: StockRiskFilter,
         blacklist_manager: BlackWhiteListManager,
+        danger_strong_threshold: float = 95.0,
     ) -> tuple[list[ScreenItem], MarketRiskLevel]:
         """
         纯函数版本的风控过滤，用于属性测试（无实例依赖）。
@@ -645,6 +737,7 @@ class ScreenExecutor:
             market_risk_checker: 大盘风控检测器
             stock_risk_filter: 个股风控过滤器
             blacklist_manager: 黑白名单管理器
+            danger_strong_threshold: DANGER 模式下强势股趋势评分阈值，默认 95.0
 
         Returns:
             (过滤后的股票列表, 大盘风险等级)
@@ -654,10 +747,16 @@ class ScreenExecutor:
         if index_closes is not None:
             risk_level = market_risk_checker.check_market_risk(index_closes)
 
-        # 2. DANGER → 返回空列表
+        # 2. DANGER → 仅允许 trend_score >= danger_strong_threshold 的强势股通过
         if risk_level == MarketRiskLevel.DANGER:
-            logger.info("大盘风险等级 DANGER，暂停买入，清空选股结果")
-            return [], risk_level
+            logger.info(
+                "大盘风险等级 DANGER，仅允许趋势评分 >= %.0f 的强势股通过",
+                danger_strong_threshold,
+            )
+            items = [
+                item for item in items
+                if item.trend_score >= danger_strong_threshold
+            ]
 
         # 3. CAUTION → 仅保留 trend_score >= 90
         if risk_level == MarketRiskLevel.CAUTION:
@@ -796,20 +895,24 @@ class ScreenExecutor:
                 if bp_score > 0:
                     module_scores["breakout"] = bp_score
 
-            # indicator_params 模块评分：每个有效信号 +25
+            # indicator_params 模块评分：差异化权重 + 共振加分（需求 5）
             if self._is_module_enabled("indicator_params"):
-                ind_score = 0.0
-                if stock_data.get("macd"):
-                    ind_score += 25.0
-                if stock_data.get("boll"):
-                    ind_score += 25.0
-                if stock_data.get("rsi"):
-                    ind_score += 25.0
+                # 判断各指标是否触发
+                dma_triggered = False
                 if stock_data.get("dma") and isinstance(stock_data["dma"], dict):
                     dma_val = stock_data["dma"].get("dma", 0)
                     ama_val = stock_data["dma"].get("ama", 0)
                     if dma_val and ama_val and dma_val > ama_val:
-                        ind_score += 25.0
+                        dma_triggered = True
+
+                triggered = {
+                    "macd": bool(stock_data.get("macd")),
+                    "boll": bool(stock_data.get("boll")),
+                    "rsi": bool(stock_data.get("rsi")),
+                    "dma": dma_triggered,
+                }
+
+                ind_score = self._compute_indicator_score(triggered)
                 if ind_score > 0:
                     module_scores["indicator_params"] = ind_score
 
@@ -846,22 +949,41 @@ class ScreenExecutor:
                         ))
 
             # 非 factor_editor 模块：从 stock_data 派生因子值直接构建信号
-            # ma_trend 模块
+            # ma_trend 模块（需求 10：阈值降低 + 趋势加速信号）
             if self._is_module_enabled("ma_trend"):
-                ma_cfg = self._raw_config.get("ma_trend", {}) if isinstance(self._raw_config.get("ma_trend"), dict) else {}
-                threshold = ma_cfg.get("trend_score_threshold", 80)
-                if stock_data.get("ma_trend", 0) >= threshold:
+                ma_trend_score = float(stock_data.get("ma_trend", 0))
+                # 使用 MaTrendConfig 的 trend_score_threshold（默认 68）
+                threshold = self._config.ma_trend.trend_score_threshold
+                if ma_trend_score >= threshold:
                     signals.append(SignalDetail(
                         category=SignalCategory.MA_TREND,
                         label="ma_trend",
                     ))
 
+                # 趋势加速信号检测（需求 10.2, 10.4, 10.5）
+                previous_ma_trend_score = stock_data.get("previous_ma_trend_score")
+                if previous_ma_trend_score is not None:
+                    previous_ma_trend_score = float(previous_ma_trend_score)
+                if self._detect_trend_acceleration(ma_trend_score, previous_ma_trend_score):
+                    signals.append(SignalDetail(
+                        category=SignalCategory.MA_TREND,
+                        label="ma_trend_acceleration",
+                        strength=SignalStrength.STRONG,
+                    ))
+
             # indicator_params 模块
+            # 适配结构化信号结果（需求 1.4, 2.2, 2.4, 3.4）：
+            # 使用 stock_data 中的新字段构建更丰富的 SignalDetail。
             if self._is_module_enabled("indicator_params"):
                 if stock_data.get("macd"):
+                    # MACD 信号：使用结构化的 strength 和 signal_type（需求 1.4）
+                    macd_strength = stock_data.get("macd_strength")
+                    macd_signal_type = stock_data.get("macd_signal_type", "none")
                     signals.append(SignalDetail(
                         category=SignalCategory.MACD,
                         label="macd",
+                        strength=macd_strength if macd_strength is not None else SignalStrength.MEDIUM,
+                        signal_type=macd_signal_type,
                     ))
                 if stock_data.get("boll"):
                     signals.append(SignalDetail(
@@ -897,7 +1019,13 @@ class ScreenExecutor:
                 continue
 
             # 信号强度分级（需求 7）：为每个信号计算强度等级
+            # 趋势加速信号的强度已在生成时显式设为 STRONG（需求 10.4），跳过重新计算
+            # MACD 信号的强度已从结构化结果中获取（需求 1.4），跳过重新计算
             for sig in signals:
+                if sig.label == "ma_trend_acceleration":
+                    continue
+                if sig.category == SignalCategory.MACD and sig.strength is not None:
+                    continue
                 sig.strength = self._compute_signal_strength(sig, stock_data)
 
             # 信号描述文本生成（需求 2.11）：为每个信号生成人类可读的因子条件描述

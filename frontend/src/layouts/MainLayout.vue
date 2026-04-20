@@ -179,6 +179,7 @@ const menuGroups: Record<string, NavItem[]> = {
   '选股': [
     { path: '/screener', label: '智能选股', icon: '🔍' },
     { path: '/screener/results', label: '选股结果', icon: '📋' },
+    { path: '/stock-pool', label: '选股池', icon: '📦' },
   ],
   '风控': [
     { path: '/risk', label: '风险控制', icon: '🛡️' },

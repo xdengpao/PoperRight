@@ -10,6 +10,7 @@ from app.api.v1.admin import router as admin_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.backtest import router as backtest_router
 from app.api.v1.data import router as data_router
+from app.api.v1.pool import pool_router
 from app.api.v1.review import router as review_router
 from app.api.v1.risk import router as risk_router
 from app.api.v1.screen import router as screen_router
@@ -29,6 +30,7 @@ router.include_router(trade_router)
 router.include_router(review_router)
 router.include_router(admin_router)
 router.include_router(sector_router)
+router.include_router(pool_router)
 
 
 # ---------------------------------------------------------------------------

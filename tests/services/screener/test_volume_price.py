@@ -398,3 +398,172 @@ class TestVolumePriceIntegration:
         amounts = [2000.0] * 20
         avg_amount = check_avg_daily_amount(amounts)
         assert avg_amount.passed is False
+
+
+# ---------------------------------------------------------------------------
+# 相对阈值模式的资金流信号（需求 6）
+# ---------------------------------------------------------------------------
+
+from app.services.screener.volume_price import (
+    RelativeMoneyFlowSignal,
+    check_money_flow_signal_relative,
+)
+
+
+class TestCheckMoneyFlowSignalRelative:
+    """测试相对阈值模式的资金流信号（需求 6.1, 6.2, 6.3, 6.4, 6.5, 6.6）"""
+
+    def test_signal_triggered_relative_threshold(self):
+        """相对净流入 >= 5% 连续 2 日 → 生成信号"""
+        # 日均成交额 = 10000 万，5% 阈值 = 500 万
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [100.0, 200.0, 600.0, 700.0]  # 最后 2 日：6%, 7%
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is True
+        assert result.consecutive_days == 2
+        assert result.fallback_needed is False
+        assert isinstance(result, RelativeMoneyFlowSignal)
+
+    def test_no_signal_below_relative_threshold(self):
+        """相对净流入 < 5% → 不生成信号"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [100.0, 200.0, 300.0]  # 最大 3%，不满足 5%
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is False
+        assert result.fallback_needed is False
+
+    def test_signal_only_one_day(self):
+        """仅 1 日满足相对阈值 → 不生成信号（需连续 2 日）"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [100.0, 200.0, 300.0, 600.0]  # 仅最后 1 日 6%
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is False
+        assert result.consecutive_days == 1
+
+    def test_fallback_when_avg_amount_zero(self):
+        """日均成交额 = 0 → 回退标记"""
+        daily_amounts = [0.0] * 20
+        daily_inflows = [1000.0, 2000.0]
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is False
+        assert result.fallback_needed is True
+
+    def test_fallback_when_avg_amount_negative(self):
+        """日均成交额 < 0 → 回退标记"""
+        daily_amounts = [-100.0] * 20
+        daily_inflows = [1000.0, 2000.0]
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is False
+        assert result.fallback_needed is True
+
+    def test_fallback_when_empty_amounts(self):
+        """成交额数据为空 → 回退标记"""
+        result = check_money_flow_signal_relative([1000.0], [])
+        assert result.signal is False
+        assert result.fallback_needed is True
+
+    def test_fallback_when_empty_inflows(self):
+        """净流入数据为空 → 回退标记"""
+        result = check_money_flow_signal_relative([], [10000.0] * 20)
+        assert result.signal is False
+        assert result.fallback_needed is True
+
+    def test_custom_threshold_pct(self):
+        """自定义相对阈值百分比"""
+        daily_amounts = [10000.0] * 20
+        # 3% 阈值 = 300 万，最后 2 日净流入 400, 500 → 4%, 5% → 满足
+        daily_inflows = [100.0, 400.0, 500.0]
+        result = check_money_flow_signal_relative(
+            daily_inflows, daily_amounts, relative_threshold_pct=3.0,
+        )
+        assert result.signal is True
+        assert result.consecutive_days == 2
+
+    def test_custom_consecutive_days(self):
+        """自定义连续天数要求"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [600.0, 700.0, 800.0]  # 连续 3 日 >= 5%
+        result = check_money_flow_signal_relative(
+            daily_inflows, daily_amounts, consecutive=3,
+        )
+        assert result.signal is True
+        assert result.consecutive_days == 3
+
+    def test_custom_consecutive_days_not_met(self):
+        """自定义连续天数要求未满足"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [600.0, 700.0]  # 仅 2 日，要求 3 日
+        result = check_money_flow_signal_relative(
+            daily_inflows, daily_amounts, consecutive=3,
+        )
+        assert result.signal is False
+        assert result.consecutive_days == 2
+
+    def test_custom_amount_period(self):
+        """自定义日均成交额计算周期"""
+        # 前 10 日成交额 1000，后 5 日成交额 10000
+        daily_amounts = [1000.0] * 10 + [10000.0] * 5
+        # 使用最近 5 日计算 → avg = 10000，5% = 500
+        daily_inflows = [100.0, 600.0, 700.0]
+        result = check_money_flow_signal_relative(
+            daily_inflows, daily_amounts, amount_period=5,
+        )
+        assert result.signal is True
+        assert result.avg_daily_amount == pytest.approx(10000.0)
+
+    def test_amounts_fewer_than_period(self):
+        """成交额数据不足 period 天 → 使用可用数据"""
+        daily_amounts = [10000.0] * 5  # 仅 5 日，period 默认 20
+        daily_inflows = [600.0, 700.0]
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is True
+        assert result.avg_daily_amount == pytest.approx(10000.0)
+
+    def test_backward_compatible_original_function(self):
+        """原 check_money_flow_signal 函数保持不变（向后兼容）"""
+        # 验证原函数仍然可用且行为不变
+        inflows = [1200.0, 1500.0]
+        result = check_money_flow_signal(inflows)
+        assert result.signal is True
+        assert result.consecutive_days == 2
+        assert isinstance(result, MoneyFlowSignal)
+
+    def test_backward_compatible_original_no_signal(self):
+        """原函数：不满足绝对阈值 → 不生成信号"""
+        inflows = [500.0, 800.0]
+        result = check_money_flow_signal(inflows)
+        assert result.signal is False
+
+    def test_relative_vs_absolute_small_cap(self):
+        """小盘股场景：绝对阈值可能不触发，相对阈值可以触发"""
+        # 小盘股日均成交额 2000 万，净流入 150 万 = 7.5% → 相对阈值触发
+        daily_amounts = [2000.0] * 20
+        daily_inflows = [150.0, 160.0]
+        relative_result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        absolute_result = check_money_flow_signal(daily_inflows)  # 阈值 1000 万
+        assert relative_result.signal is True   # 相对阈值触发
+        assert absolute_result.signal is False  # 绝对阈值不触发
+
+    def test_latest_ratio_calculation(self):
+        """验证最近一日净流入占比计算"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [100.0, 800.0]  # 最后一日 800/10000 = 8%
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.latest_ratio == pytest.approx(8.0)
+
+    def test_break_in_streak(self):
+        """中间断流 → 从最近连续段计算"""
+        daily_amounts = [10000.0] * 20
+        # 600, 700 满足 5%，然后 100 不满足，然后 800, 900 满足
+        daily_inflows = [600.0, 700.0, 100.0, 800.0, 900.0]
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is True
+        assert result.consecutive_days == 2  # 最近连续 2 日
+
+    def test_exactly_at_threshold(self):
+        """净流入占比恰好 = 5% 连续 2 日 → 生成信号"""
+        daily_amounts = [10000.0] * 20
+        daily_inflows = [500.0, 500.0]  # 恰好 5%
+        result = check_money_flow_signal_relative(daily_inflows, daily_amounts)
+        assert result.signal is True
+        assert result.consecutive_days == 2

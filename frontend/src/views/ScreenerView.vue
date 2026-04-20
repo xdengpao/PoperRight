@@ -101,6 +101,7 @@
           v-for="(factor, idx) in config.factors"
           :key="idx"
           class="factor-row"
+          @click="selectedFactorName = factor.factor_name"
         >
           <div class="factor-type-badge" :class="factor.type">
             {{ factorTypeLabel(factor.type) }}
@@ -117,6 +118,7 @@
               v-model="factor.factor_name"
               class="input factor-name"
               :aria-label="`因子名称 ${idx + 1}`"
+              @change="selectedFactorName = factor.factor_name"
             >
               <option value="" disabled>选择因子</option>
               <option
@@ -217,6 +219,9 @@
           暂无因子条件，点击下方按钮添加
         </div>
       </div>
+
+      <!-- 因子使用说明面板 -->
+      <FactorUsagePanel :factor-name="selectedFactorName" />
 
       <!-- 添加因子按钮组 -->
       <div class="add-factor-row">
@@ -907,6 +912,8 @@ import { useRouter } from 'vue-router'
 import { apiClient } from '@/api'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
+import FactorUsagePanel from '@/components/FactorUsagePanel.vue'
+import { storeToRefs } from 'pinia'
 import { useScreenerStore } from '@/stores/screener'
 import type { FactorMeta, StrategyExample } from '@/stores/screener'
 
@@ -1088,8 +1095,8 @@ const activeStrategyName = computed(
   () => strategies.value.find((s) => s.id === activeStrategyId.value)?.name ?? ''
 )
 
-const running = ref(false)
-const runError = ref('')
+// running / runError 从 store 获取，跨组件生命周期保持状态
+const { running, runError } = storeToRefs(screenerStore)
 
 const showCreateDialog = ref(false)
 const newStrategyName = ref('')
@@ -1139,6 +1146,10 @@ const config = reactive({
   logic: 'AND' as 'AND' | 'OR',
   factors: [] as FactorCondition[],
 })
+
+// ─── 因子使用说明面板：跟踪当前选中的因子名称 ─────────────────────────────────
+
+const selectedFactorName = ref('')
 
 // ─── 技术指标默认值 ────────────────────────────────────────────────────────────
 
@@ -1637,8 +1648,10 @@ async function createStrategy() {
     newStrategyName.value = ''
     newStrategyModules.value = []
     await loadStrategies()
-  } catch (e) {
-    pageError.value = e instanceof Error ? e.message : '创建策略失败'
+  } catch (e: any) {
+    // 策略名称重复时后端返回 409
+    const detail = e?.response?.data?.detail
+    pageError.value = typeof detail === 'string' ? detail : (e instanceof Error ? e.message : '创建策略失败')
   }
 }
 
@@ -1790,22 +1803,11 @@ function buildStrategyConfig() {
 // ─── 执行选股 ─────────────────────────────────────────────────────────────────
 
 async function runScreen() {
-  running.value = true
-  runError.value = ''
-  try {
-    await apiClient.post('/screen/run', {
-      strategy_id: activeStrategyId.value || undefined,
-      strategy_config: activeStrategyId.value ? undefined : buildStrategyConfig(),
-      screen_type: 'EOD',
-    }, {
-      timeout: 120_000, // 全市场选股需要遍历所有股票，120s 超时
-    })
-    router.push('/screener/results')
-  } catch (e: any) {
-    const msg = e?.response?.data?.detail ?? e?.message ?? '执行选股失败，请重试'
-    runError.value = typeof msg === 'string' ? msg : JSON.stringify(msg)
-    running.value = false
-  }
+  const result = await screenerStore.runScreen({
+    strategyId: activeStrategyId.value || undefined,
+    strategyConfig: activeStrategyId.value ? undefined : buildStrategyConfig(),
+  })
+  if (result.success) router.push('/screener/results')
 }
 
 // ─── 初始化 ───────────────────────────────────────────────────────────────────

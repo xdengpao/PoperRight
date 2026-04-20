@@ -1,11 +1,11 @@
 """
 风控过滤属性测试（Hypothesis）
 
-Property 2: DANGER 市场风险清空结果
+Property 2: DANGER 市场风险强势股通过
 Property 3: CAUTION 市场风险提升阈值
 Property 4: 风控过滤排除规则
 
-对应需求 4.2、4.3、4.4、4.5
+对应需求 4.2、4.3、4.4、4.5、8.3
 """
 
 from __future__ import annotations
@@ -167,8 +167,8 @@ def caution_index_closes_strategy(draw):
 
 
 # ---------------------------------------------------------------------------
-# Property 2: DANGER 市场风险清空结果
-# Feature: screening-system-enhancement, Property 2: DANGER 清空
+# Property 2: DANGER 市场风险强势股通过
+# Feature: screening-system-enhancement, Property 2: DANGER 强势股通过
 # ---------------------------------------------------------------------------
 
 
@@ -179,12 +179,12 @@ def caution_index_closes_strategy(draw):
 )
 def test_danger_clears_all_items(data, index_closes):
     """
-    # Feature: screening-system-enhancement, Property 2: DANGER 清空
+    # Feature: screening-system-enhancement, Property 2: DANGER 强势股通过
 
-    **Validates: Requirements 4.2**
+    **Validates: Requirements 4.2, 8.3**
 
     For any stocks_data 和策略配置，当大盘风险等级为 DANGER 时，
-    _apply_risk_filters() 返回的列表应为空。
+    _apply_risk_filters() 返回的列表应仅包含 trend_score >= 95 的强势股。
     """
     items, stocks_data = data
 
@@ -210,8 +210,24 @@ def test_danger_clears_all_items(data, index_closes):
     assert risk_level == MarketRiskLevel.DANGER, (
         f"风险等级应为 DANGER，实际为 {risk_level}"
     )
-    assert filtered == [], (
-        f"DANGER 状态下应返回空列表，实际返回 {len(filtered)} 只股票"
+
+    # DANGER 模式下仅允许 trend_score >= 95 的强势股通过（需求 8.3）
+    for item in filtered:
+        assert item.trend_score >= 95.0, (
+            f"DANGER 状态下股票 {item.symbol} 的 trend_score={item.trend_score} "
+            f"应 >= 95（仅强势股通过）"
+        )
+
+    # 确保所有 trend_score >= 95 的股票都通过了（不考虑涨幅和黑名单过滤）
+    expected_strong = {
+        item.symbol for item in items
+        if item.trend_score >= 95.0
+    }
+    actual_symbols = {item.symbol for item in filtered}
+    # 实际通过的应是强势股中未被涨幅/黑名单过滤的子集
+    assert actual_symbols <= expected_strong, (
+        f"DANGER 状态下通过的股票应是强势股的子集："
+        f"expected_strong={expected_strong}, actual={actual_symbols}"
     )
 
 

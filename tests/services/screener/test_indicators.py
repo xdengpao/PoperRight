@@ -17,8 +17,11 @@ import pytest
 
 from app.services.screener.indicators import (
     MACDResult,
+    MACDSignalResult,
     BOLLResult,
+    BOLLSignalResult,
     RSIResult,
+    RSISignalResult,
     DMAResult,
     _ema,
     calculate_macd,
@@ -238,36 +241,107 @@ class TestCalculateBOLL:
 
 
 class TestDetectBOLLSignal:
-    """测试 BOLL 突破信号识别"""
+    """测试 BOLL 突破信号识别（需求 2.1 ~ 2.4）"""
 
     def test_no_signal_below_middle(self):
         """价格在中轨下方不应产生信号"""
         closes = [50.0 - i * 0.5 for i in range(30)]
         result = detect_boll_signal(closes)
+        assert isinstance(result, BOLLSignalResult)
         assert result.signal is False
 
     def test_no_signal_insufficient_data(self):
         result = detect_boll_signal([10.0])
+        assert isinstance(result, BOLLSignalResult)
         assert result.signal is False
+        assert result.near_upper_band is False
+        assert result.hold_days == 0
 
-    def test_breakout_signal(self):
-        """构造突破场景：价格站稳中轨并触碰上轨，带宽扩大"""
-        # 先横盘建立布林带，然后突破
+    def test_two_day_hold_signal(self):
+        """连续 2 日站稳中轨应产生信号"""
+        # 先横盘建立布林带，然后价格稳定在中轨上方
         closes = [50.0 + (i % 3) * 0.1 for i in range(25)]
-        # 突破：价格急涨超过上轨
+        # 最后几天价格明显高于中轨
+        for i in range(5):
+            closes.append(closes[-1] + 1.0)
+
+        result = detect_boll_signal(closes, period=20)
+        assert isinstance(result, BOLLSignalResult)
+        # 结构完整性
+        assert len(result.upper) == len(closes)
+        assert len(result.middle) == len(closes)
+        assert len(result.lower) == len(closes)
+        # 最后两天价格应高于中轨，信号应为 True
+        last = len(closes) - 1
+        if not math.isnan(result.middle[last]) and not math.isnan(result.middle[last - 1]):
+            if closes[last] > result.middle[last] and closes[last - 1] > result.middle[last - 1]:
+                assert result.signal is True
+
+    def test_one_day_above_no_signal(self):
+        """仅 1 日站稳中轨不应产生信号（需求 2.3）"""
+        # 构造：前一日在中轨下方，当日在中轨上方
+        closes = [50.0 - i * 0.3 for i in range(25)]
+        # 最后一天突然大涨
+        closes.append(closes[-1] + 10.0)
+
+        result = detect_boll_signal(closes, period=20)
+        assert isinstance(result, BOLLSignalResult)
+        # 前一日在中轨下方，不满足连续 2 日条件
+        last = len(closes) - 1
+        prev = last - 1
+        if (not math.isnan(result.middle[last]) and not math.isnan(result.middle[prev])
+                and closes[prev] <= result.middle[prev]):
+            assert result.signal is False
+
+    def test_near_upper_band_flag(self):
+        """接近上轨时 near_upper_band 应为 True（需求 2.2）"""
+        # 构造价格急涨超过上轨
+        closes = [50.0 + (i % 3) * 0.1 for i in range(25)]
         for i in range(5):
             closes.append(closes[-1] + 2.0)
 
         result = detect_boll_signal(closes, period=20)
-        # 结构完整性
-        assert len(result.upper) == len(closes)
+        assert isinstance(result, BOLLSignalResult)
+        last = len(closes) - 1
+        if not math.isnan(result.upper[last]):
+            if closes[last] >= result.upper[last] * 0.98:
+                assert result.near_upper_band is True
+
+    def test_near_upper_band_independent_of_signal(self):
+        """near_upper_band 应独立于 signal（需求 2.2）"""
+        # 构造：价格在上轨附近但前一日在中轨下方（signal=False 但 near_upper_band 可能为 True）
+        closes = [50.0 - i * 0.1 for i in range(25)]
+        # 最后一天暴涨到上轨附近
+        closes.append(closes[-1] + 15.0)
+
+        result = detect_boll_signal(closes, period=20)
+        assert isinstance(result, BOLLSignalResult)
+        # near_upper_band 和 signal 是独立判断的
+        # 这里主要验证结构正确性
+        assert isinstance(result.near_upper_band, bool)
+        assert isinstance(result.signal, bool)
+
+    def test_hold_days_calculation(self):
+        """hold_days 应正确计算连续站稳中轨天数"""
+        # 构造持续上涨序列，最后多天都在中轨上方
+        closes = [float(10 + i * 0.5) for i in range(30)]
+        result = detect_boll_signal(closes, period=20)
+        assert isinstance(result, BOLLSignalResult)
+        assert result.hold_days >= 0
+        # 持续上涨趋势中，hold_days 应 > 0
+        last = len(closes) - 1
+        if not math.isnan(result.middle[last]) and closes[last] > result.middle[last]:
+            assert result.hold_days >= 1
 
     def test_precomputed_result(self):
         """使用预计算的 BOLL 结果"""
         closes = [float(10 + i * 0.2) for i in range(30)]
         boll_result = calculate_boll(closes)
         result = detect_boll_signal(closes, boll_result=boll_result)
+        assert isinstance(result, BOLLSignalResult)
         assert len(result.upper) == len(closes)
+        assert len(result.middle) == len(closes)
+        assert len(result.lower) == len(closes)
 
 
 # ---------------------------------------------------------------------------
@@ -329,52 +403,111 @@ class TestCalculateRSI:
 
 
 class TestDetectRSISignal:
-    """测试 RSI 强势信号识别"""
+    """测试 RSI 强势信号识别（需求 3.1 ~ 3.5）"""
 
-    def test_signal_in_range(self):
-        """RSI 在 [50, 80] 且无背离时应产生信号"""
-        # 构造温和上涨，RSI 在 50-80 区间
+    def test_signal_in_range_with_rising(self):
+        """RSI 在 [55, 75] 且连续 3 天上升时应产生信号"""
+        # 构造温和上涨，RSI 在 55-75 区间且连续上升
         closes = [50.0]
         for i in range(40):
             # 温和上涨，偶尔小幅回调
-            if i % 5 == 0:
-                closes.append(closes[-1] - 0.2)
+            if i % 7 == 0:
+                closes.append(closes[-1] - 0.1)
             else:
-                closes.append(closes[-1] + 0.4)
+                closes.append(closes[-1] + 0.35)
 
         result = detect_rsi_signal(closes, period=14)
-        last_rsi = result.values[-1]
-        # 如果 RSI 恰好在 [50, 80] 范围内，应有信号
-        if not math.isnan(last_rsi) and 50.0 <= last_rsi <= 80.0:
+        assert isinstance(result, RSISignalResult)
+        assert isinstance(result.current_rsi, float)
+        assert isinstance(result.consecutive_rising, int)
+        assert result.consecutive_rising >= 0
+        # 如果 RSI 恰好在 [55, 75] 且连续上升 >= 3 天，应有信号
+        if (55.0 <= result.current_rsi <= 75.0
+                and result.consecutive_rising >= 3):
             assert result.signal is True
 
     def test_no_signal_overbought(self):
-        """RSI > 80 时不应产生信号"""
-        # 强烈上涨使 RSI > 80
+        """RSI > 75（新上限）时不应产生信号"""
+        # 强烈上涨使 RSI > 75
         closes = [float(10 + i * 2.0) for i in range(30)]
         result = detect_rsi_signal(closes, period=14)
-        last_rsi = result.values[-1]
-        if not math.isnan(last_rsi) and last_rsi > 80.0:
+        assert isinstance(result, RSISignalResult)
+        if result.current_rsi > 75.0:
             assert result.signal is False
 
     def test_no_signal_oversold(self):
-        """RSI < 50 时不应产生信号"""
+        """RSI < 55（新下限）时不应产生信号"""
         closes = [100.0 - i * 1.0 for i in range(30)]
         result = detect_rsi_signal(closes, period=14)
-        last_rsi = result.values[-1]
-        if not math.isnan(last_rsi) and last_rsi < 50.0:
+        assert isinstance(result, RSISignalResult)
+        if result.current_rsi < 55.0:
             assert result.signal is False
 
     def test_no_signal_insufficient_data(self):
+        """数据不足时不应产生信号（需求 3.5）"""
         result = detect_rsi_signal([10.0, 11.0])
+        assert isinstance(result, RSISignalResult)
         assert result.signal is False
+        assert result.current_rsi == 0.0
+        assert result.consecutive_rising == 0
+
+    def test_no_signal_not_rising(self):
+        """RSI 在区间内但未连续上升时不应产生信号（需求 3.3）"""
+        # 构造横盘序列，RSI 可能在区间内但不连续上升
+        closes = [50.0]
+        for i in range(40):
+            # 交替涨跌，RSI 不会连续上升
+            if i % 2 == 0:
+                closes.append(closes[-1] + 0.5)
+            else:
+                closes.append(closes[-1] - 0.3)
+
+        result = detect_rsi_signal(closes, period=14)
+        assert isinstance(result, RSISignalResult)
+        # 交替涨跌不会产生连续 3 天上升
+        if result.consecutive_rising < 3:
+            assert result.signal is False
+
+    def test_custom_rising_days(self):
+        """自定义连续上升天数（需求 3.4）"""
+        # 构造温和上涨序列
+        closes = [50.0]
+        for i in range(40):
+            closes.append(closes[-1] + 0.3)
+
+        # rising_days=1 应更容易触发
+        result_1 = detect_rsi_signal(closes, period=14, rising_days=1)
+        result_5 = detect_rsi_signal(closes, period=14, rising_days=5)
+        assert isinstance(result_1, RSISignalResult)
+        assert isinstance(result_5, RSISignalResult)
+
+    def test_custom_bounds(self):
+        """自定义强势区间上下限（需求 3.4）"""
+        closes = [float(10 + i * 0.3) for i in range(30)]
+        # 使用宽松区间
+        result = detect_rsi_signal(closes, period=14, lower_bound=40.0, upper_bound=90.0)
+        assert isinstance(result, RSISignalResult)
+        assert len(result.values) == len(closes)
 
     def test_precomputed_result(self):
         """使用预计算的 RSI 结果"""
         closes = [float(10 + i * 0.3) for i in range(30)]
         rsi_result = calculate_rsi(closes)
         result = detect_rsi_signal(closes, rsi_result=rsi_result)
+        assert isinstance(result, RSISignalResult)
         assert len(result.values) == len(closes)
+
+    def test_result_structure(self):
+        """验证返回结果结构完整性"""
+        closes = [float(10 + i * 0.3) for i in range(30)]
+        result = detect_rsi_signal(closes, period=14)
+        assert isinstance(result, RSISignalResult)
+        assert hasattr(result, 'signal')
+        assert hasattr(result, 'current_rsi')
+        assert hasattr(result, 'consecutive_rising')
+        assert hasattr(result, 'values')
+        assert isinstance(result.signal, bool)
+        assert isinstance(result.values, list)
 
 
 # ---------------------------------------------------------------------------

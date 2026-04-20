@@ -91,6 +91,18 @@ class MoneyFlowSignal:
 
 
 @dataclass
+class RelativeMoneyFlowSignal:
+    """相对阈值模式的资金流信号结果"""
+    signal: bool                        # 是否生成信号
+    fallback_needed: bool               # 是否需要回退到其他模式（avg_daily_amount <= 0）
+    consecutive_days: int               # 连续满足条件的天数
+    latest_ratio: float                 # 最近一日净流入占比（%）
+    avg_daily_amount: float             # 日均成交额（万元）
+    relative_threshold_pct: float       # 相对阈值百分比
+    required_consecutive: int           # 要求连续天数
+
+
+@dataclass
 class LargeOrderSignal:
     """大单成交占比信号"""
     signal: bool                        # 是否生成信号
@@ -322,6 +334,93 @@ def check_money_flow_signal(
         consecutive_days=count,
         latest_inflow=daily_inflows[-1],
         threshold=threshold,
+        required_consecutive=consecutive,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 相对阈值模式的资金流信号
+# ---------------------------------------------------------------------------
+
+def check_money_flow_signal_relative(
+    daily_inflows: list[float],
+    daily_amounts: list[float],
+    relative_threshold_pct: float = 5.0,
+    consecutive: int = DEFAULT_MONEY_FLOW_CONSECUTIVE,
+    amount_period: int = DEFAULT_AVG_AMOUNT_PERIOD,
+) -> RelativeMoneyFlowSignal:
+    """
+    相对阈值模式的资金流信号检测（纯函数）。
+
+    信号条件：net_inflow / avg_daily_amount >= relative_threshold_pct%
+    连续 consecutive 天满足条件时触发信号。
+
+    当 avg_daily_amount <= 0 时返回 signal=False 并标记 fallback_needed=True，
+    由调用方决定回退策略。
+
+    Args:
+        daily_inflows: 每日主力资金净流入序列（万元，按时间升序）
+        daily_amounts: 每日成交额序列（万元，按时间升序）
+        relative_threshold_pct: 相对阈值百分比（默认 5.0，即 5%）
+        consecutive: 连续天数要求（默认 2 日）
+        amount_period: 日均成交额计算周期（默认 20 日）
+
+    Returns:
+        RelativeMoneyFlowSignal
+    """
+    n_inflows = len(daily_inflows)
+    n_amounts = len(daily_amounts)
+
+    # 数据不足时返回无信号
+    if n_inflows == 0 or n_amounts == 0:
+        return RelativeMoneyFlowSignal(
+            signal=False,
+            fallback_needed=True,
+            consecutive_days=0,
+            latest_ratio=0.0,
+            avg_daily_amount=0.0,
+            relative_threshold_pct=relative_threshold_pct,
+            required_consecutive=consecutive,
+        )
+
+    # 计算日均成交额（取最近 amount_period 日）
+    window = daily_amounts[-amount_period:] if n_amounts >= amount_period else daily_amounts
+    avg_daily_amount = sum(window) / len(window)
+
+    # avg_daily_amount <= 0 时需要回退
+    if avg_daily_amount <= 0:
+        return RelativeMoneyFlowSignal(
+            signal=False,
+            fallback_needed=True,
+            consecutive_days=0,
+            latest_ratio=0.0,
+            avg_daily_amount=avg_daily_amount,
+            relative_threshold_pct=relative_threshold_pct,
+            required_consecutive=consecutive,
+        )
+
+    # 从末尾向前计算连续满足相对阈值条件的天数
+    threshold_ratio = relative_threshold_pct / 100.0
+    count = 0
+    for i in range(n_inflows - 1, -1, -1):
+        ratio = daily_inflows[i] / avg_daily_amount
+        if ratio >= threshold_ratio:
+            count += 1
+        else:
+            break
+
+    signal = count >= consecutive
+
+    # 计算最近一日的净流入占比（%）
+    latest_ratio = (daily_inflows[-1] / avg_daily_amount) * 100.0
+
+    return RelativeMoneyFlowSignal(
+        signal=signal,
+        fallback_needed=False,
+        consecutive_days=count,
+        latest_ratio=latest_ratio,
+        avg_daily_amount=avg_daily_amount,
+        relative_threshold_pct=relative_threshold_pct,
         required_consecutive=consecutive,
     )
 
