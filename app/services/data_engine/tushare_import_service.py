@@ -15,7 +15,7 @@ import re
 from uuid import uuid4
 
 from app.core.config import settings
-from app.core.redis_client import cache_get, cache_set, get_redis_client
+from app.core.redis_client import cache_delete, cache_get, cache_set, get_redis_client
 from app.services.data_engine.tushare_registry import (
     ApiEntry,
     CodeFormat,
@@ -120,13 +120,27 @@ class TushareImportService:
                 if not params.get("ts_code") and not params.get("sector_code"):
                     raise ValueError("必填参数缺失：需要提供板块代码")
 
-        # 校验日期格式（YYYYMMDD）
+        # 转换 report_year + report_quarter → Tushare period 格式（YYYYMMDD 季末日期）
+        if params.get("report_year") and params.get("report_quarter"):
+            year = params.pop("report_year")
+            quarter = params.pop("report_quarter")
+            quarter_end = {"1": "0331", "2": "0630", "3": "0930", "4": "1231"}
+            end_date = quarter_end.get(str(quarter), "1231")
+            params["period"] = f"{year}{end_date}"
+
+        # 校验日期格式（YYYYMMDD），自动转换 YYYY-MM-DD → YYYYMMDD
         for date_key in ("start_date", "end_date", "trade_date"):
             date_val = params.get(date_key)
-            if date_val and not _DATE_RE.match(str(date_val)):
-                raise ValueError(
-                    f"日期格式错误：{date_key}={date_val}，应为 YYYYMMDD 格式"
-                )
+            if date_val:
+                date_str = str(date_val)
+                # 自动转换 YYYY-MM-DD → YYYYMMDD
+                if len(date_str) == 10 and date_str[4] == "-" and date_str[7] == "-":
+                    date_str = date_str.replace("-", "")
+                    params[date_key] = date_str
+                if not _DATE_RE.match(date_str):
+                    raise ValueError(
+                        f"日期格式错误：{date_key}={date_val}，应为 YYYYMMDD 格式"
+                    )
 
         # 校验代码格式
         if entry.code_format == CodeFormat.STOCK_SYMBOL:
@@ -298,15 +312,11 @@ class TushareImportService:
     async def stop_import(self, task_id: str) -> dict:
         """停止导入任务。
 
-        1. 在 Redis 设置停止信号 tushare:import:stop:{task_id}，TTL 3600
+        1. 在 Redis 设置停止信号
         2. 更新 Redis 进度状态为 "stopped"
         3. 撤销 Celery 任务
-
-        Args:
-            task_id: 导入任务 ID
-
-        Returns:
-            {"message": "停止信号已发送"}
+        4. 更新数据库 tushare_import_log 状态为 "stopped"
+        5. 释放 Redis 并发锁
         """
         # 1. 设置停止信号
         stop_key = f"{_STOP_KEY_PREFIX}{task_id}"
@@ -333,6 +343,46 @@ class TushareImportService:
             logger.info("已撤销 Celery 任务 %s", task_id)
         except Exception as exc:
             logger.warning("撤销 Celery 任务 %s 失败: %s", task_id, exc)
+
+        # 4. 更新数据库状态并释放并发锁
+        try:
+            from datetime import datetime
+
+            from sqlalchemy import select, update
+
+            from app.core.database import AsyncSessionPG
+            from app.models.tushare_import import TushareImportLog
+
+            async with AsyncSessionPG() as session:
+                # 查找该任务的 api_name
+                result = await session.execute(
+                    select(TushareImportLog).where(
+                        TushareImportLog.celery_task_id == task_id
+                    )
+                )
+                log = result.scalar_one_or_none()
+                if log:
+                    api_name = log.api_name
+                    # 更新状态为 stopped
+                    if log.status in ("running", "pending"):
+                        await session.execute(
+                            update(TushareImportLog)
+                            .where(TushareImportLog.id == log.id)
+                            .values(
+                                status="stopped",
+                                error_message="用户手动停止",
+                                finished_at=datetime.utcnow(),
+                            )
+                        )
+                        await session.commit()
+
+                    # 5. 释放并发锁
+                    try:
+                        await cache_delete(f"{_LOCK_KEY_PREFIX}{api_name}")
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("停止任务后清理失败 task_id=%s: %s", task_id, exc)
 
         return {"message": "停止信号已发送"}
 
@@ -365,6 +415,7 @@ class TushareImportService:
                 "failed": progress.get("failed", 0),
                 "status": progress.get("status", "unknown"),
                 "current_item": progress.get("current_item", ""),
+                "error_message": progress.get("error_message", ""),
             }
         except (json.JSONDecodeError, TypeError):
             return {"status": "unknown"}
@@ -372,6 +423,37 @@ class TushareImportService:
     # ------------------------------------------------------------------
     # 公开接口：导入历史
     # ------------------------------------------------------------------
+
+    async def get_last_import_times(self) -> dict[str, str]:
+        """获取每个 API 接口的最近成功导入时间。
+
+        从 tushare_import_log 表查询每个 api_name 的最新 finished_at（status='completed'）。
+
+        Returns:
+            {api_name: finished_at_iso_string} 字典
+        """
+        from sqlalchemy import func, select
+
+        from app.core.database import AsyncSessionPG
+        from app.models.tushare_import import TushareImportLog
+
+        async with AsyncSessionPG() as session:
+            stmt = (
+                select(
+                    TushareImportLog.api_name,
+                    func.max(TushareImportLog.finished_at).label("last_time"),
+                )
+                .where(TushareImportLog.status == "completed")
+                .group_by(TushareImportLog.api_name)
+            )
+            result = await session.execute(stmt)
+            rows = result.all()
+
+        return {
+            row.api_name: row.last_time.isoformat() if row.last_time else None
+            for row in rows
+            if row.last_time is not None
+        }
 
     async def get_import_history(self, limit: int = 20) -> list[dict]:
         """获取最近导入历史记录。

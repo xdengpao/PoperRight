@@ -179,7 +179,8 @@ describe('Feature: tushare-data-import, Property 10: 必填参数校验', () => 
    */
   it('必填参数未填写时导入按钮禁用', async () => {
     // 只测试需要用户手动输入的必填参数类型
-    const userInputParams = ['stock_code', 'index_code', 'hs_type', 'sector_code'] as const
+    // 注意: stock_code 已被修复为可选参数（留空表示全市场），不再阻止提交
+    const userInputParams = ['index_code', 'hs_type', 'sector_code'] as const
     const requiredParamArb = fc.subarray([...userInputParams], { minLength: 1 })
 
     await fc.assert(

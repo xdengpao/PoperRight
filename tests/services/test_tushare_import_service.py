@@ -145,7 +145,15 @@ class TestValidateParams:
         """日期格式不符合 YYYYMMDD 时抛出 ValueError。"""
         entry = _make_entry(required_params=[ParamType.DATE_RANGE])
         with pytest.raises(ValueError, match="日期格式错误"):
-            svc._validate_params(entry, {"start_date": "2024-01-01"})
+            svc._validate_params(entry, {"start_date": "not-a-date"})
+
+    def test_date_format_auto_convert(self, svc: TushareImportService) -> None:
+        """YYYY-MM-DD 格式自动转换为 YYYYMMDD。"""
+        entry = _make_entry(required_params=[ParamType.DATE_RANGE])
+        params = {"start_date": "2024-01-01", "end_date": "2024-01-31"}
+        result = svc._validate_params(entry, params)
+        assert result["start_date"] == "20240101"
+        assert result["end_date"] == "20240131"
 
     def test_invalid_stock_code_format(self, svc: TushareImportService) -> None:
         """股票代码格式不符合 6 位数字时抛出 ValueError。"""

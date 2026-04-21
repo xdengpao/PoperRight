@@ -56,6 +56,7 @@ class TushareImportStatusResponse(BaseModel):
     failed: int
     status: str
     current_item: str
+    error_message: str = ""
 
 
 class TushareImportStopResponse(BaseModel):
@@ -166,6 +167,7 @@ async def get_import_status(task_id: str) -> TushareImportStatusResponse:
         failed=result.get("failed", 0),
         status=result.get("status", "unknown"),
         current_item=result.get("current_item", ""),
+        error_message=result.get("error_message", ""),
     )
 
 
@@ -175,6 +177,13 @@ async def stop_import(task_id: str) -> TushareImportStopResponse:
     svc = TushareImportService()
     result = await svc.stop_import(task_id)
     return TushareImportStopResponse(message=result["message"])
+
+
+@router.get("/import/last-times")
+async def get_last_import_times() -> dict[str, str]:
+    """获取每个 API 接口的最近成功导入时间"""
+    svc = TushareImportService()
+    return await svc.get_last_import_times()
 
 
 @router.get("/import/history")

@@ -167,7 +167,20 @@ async def _process_import(
     total_records = 0
 
     try:
-        if entry.batch_by_code:
+        # 判断是否需要分批处理：
+        # 1. 注册表明确标记 batch_by_code=True
+        # 2. 接口支持 stock_code 参数但用户未传 ts_code → 自动按全市场分批
+        use_batch = entry.batch_by_code
+        if not use_batch and not params.get("ts_code"):
+            from app.services.data_engine.tushare_registry import ParamType
+            has_stock_param = (
+                ParamType.STOCK_CODE in entry.required_params
+                or ParamType.STOCK_CODE in entry.optional_params
+            )
+            if has_stock_param:
+                use_batch = True
+
+        if use_batch:
             result = await _process_batched(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
@@ -181,10 +194,12 @@ async def _process_import(
 
         if status == "stopped":
             await _finalize_log(log_id, "stopped", total_records)
-            await _update_progress(task_id, status="stopped", completed=total_records)
+            await _update_progress(task_id, status="stopped",
+                                   total=total_records, completed=total_records)
         else:
             await _finalize_log(log_id, "completed", total_records)
-            await _update_progress(task_id, status="completed", completed=total_records)
+            await _update_progress(task_id, status="completed",
+                                   total=total_records, completed=total_records)
 
         return result
 
@@ -192,7 +207,7 @@ async def _process_import(
         error_msg = str(exc)[:500]
         logger.error("Tushare 导入失败 api=%s: %s", api_name, exc, exc_info=True)
         await _finalize_log(log_id, "failed", total_records, error_msg)
-        await _update_progress(task_id, status="failed")
+        await _update_progress(task_id, status="failed", error_message=error_msg)
         return {"status": "failed", "error": error_msg, "record_count": total_records}
 
     finally:
@@ -214,11 +229,25 @@ async def _process_single(
     rate_delay: float,
 ) -> dict:
     """非分批模式：一次 API 调用获取全部数据。"""
-    data = await _call_api_with_retry(adapter, entry.api_name, params, entry)
+    # 设置初始进度（单次调用视为 1 步）
+    await _update_progress(task_id, status="running", total=1, completed=0,
+                           current_item=entry.api_name)
+
+    # 支持 extra_config 中的 tushare_api_name（实际 Tushare 接口名）和 default_params（默认参数）
+    actual_api_name = entry.extra_config.get("tushare_api_name", entry.api_name)
+    call_params = {**entry.extra_config.get("default_params", {}), **params}
+
+    data = await _call_api_with_retry(adapter, actual_api_name, call_params, entry)
     rows = TushareAdapter._rows_from_data(data)
 
     if not rows:
         return {"status": "completed", "record_count": 0}
+
+    # 支持 extra_config.inject_fields：向每行注入固定字段值
+    inject_fields = entry.extra_config.get("inject_fields")
+    if inject_fields:
+        for row in rows:
+            row.update(inject_fields)
 
     mapped_rows = _apply_field_mappings(rows, entry)
     converted_rows = _convert_codes(mapped_rows, entry)
@@ -229,8 +258,8 @@ async def _process_single(
     else:
         await _write_to_postgresql(converted_rows, entry)
 
-    await _update_progress(task_id, status="running", completed=len(converted_rows),
-                           total=len(converted_rows))
+    await _update_progress(task_id, status="running", completed=1,
+                           total=1)
 
     return {"status": "completed", "record_count": len(converted_rows)}
 
@@ -513,6 +542,7 @@ async def _update_progress(
     completed: int | None = None,
     failed: int | None = None,
     current_item: str = "",
+    error_message: str = "",
 ) -> None:
     """更新 Redis 中的导入进度。"""
     progress_key = f"{_PROGRESS_KEY_PREFIX}{task_id}"
@@ -537,6 +567,8 @@ async def _update_progress(
     if failed is not None:
         progress["failed"] = failed
     progress["current_item"] = current_item
+    if error_message:
+        progress["error_message"] = error_message
 
     await _redis_set(progress_key, json.dumps(progress), ex=_PROGRESS_TTL)
 
@@ -590,18 +622,96 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
         简单 INSERT（无 ON CONFLICT）
 
     使用 AsyncSessionPG，事务保证单批原子性。
+    自动过滤掉目标表中不存在的列，避免 Tushare 原始字段名与 DB 列名不匹配导致的错误。
+    自动将 Tushare 日期字符串（YYYYMMDD）转换为 Python date 对象。
     """
     if not rows:
         return
 
+    from datetime import date as date_type
+    from datetime import datetime as datetime_type
+    from decimal import Decimal, InvalidOperation
+
+    from sqlalchemy import Boolean, Date, DateTime, Numeric
     from sqlalchemy import text
 
-    from app.core.database import AsyncSessionPG
+    from app.core.database import AsyncSessionPG, PGBase
 
-    # 收集所有列名（取第一行的键）
-    columns = list(rows[0].keys())
+    # 确保所有 ORM 模型已注册到 PGBase.metadata（Celery worker 中可能未自动导入）
+    import app.models.stock  # noqa: F401
+    import app.models.tushare_import  # noqa: F401
+    import app.models.sector  # noqa: F401
+
+    # 获取目标表的实际列名集合和列类型信息
+    table_columns: set[str] | None = None
+    date_columns: set[str] = set()
+    bool_columns: set[str] = set()
+    numeric_columns: set[str] = set()
+    table_obj = PGBase.metadata.tables.get(entry.target_table)
+    if table_obj is not None:
+        table_columns = {col.name for col in table_obj.columns}
+        for col in table_obj.columns:
+            if isinstance(col.type, (Date, DateTime)):
+                date_columns.add(col.name)
+            elif isinstance(col.type, Boolean):
+                bool_columns.add(col.name)
+            elif isinstance(col.type, Numeric):
+                numeric_columns.add(col.name)
+    else:
+        logger.warning(
+            "目标表 %s 未在 ORM metadata 中找到，跳过列过滤和类型转换",
+            entry.target_table,
+        )
+
+    # 收集所有列名（取第一行的键），过滤掉目标表中不存在的列
+    raw_columns = list(rows[0].keys())
+    if table_columns is not None:
+        columns = [c for c in raw_columns if c in table_columns]
+    else:
+        columns = raw_columns
+
     if not columns:
         return
+
+    # 过滤行数据，只保留有效列，并自动转换类型
+    def _coerce_row(row: dict) -> dict:
+        """过滤列并将 Tushare 原始值转换为 asyncpg 兼容的 Python 类型。
+
+        - Date 列：YYYYMMDD / YYYY-MM-DD 字符串 → date 对象
+        - Boolean 列：int (0/1) → bool
+        - Numeric 列：str → Decimal
+        """
+        result = {}
+        for k, v in row.items():
+            if table_columns is not None and k not in table_columns:
+                continue
+            if v is None:
+                result[k] = v
+                continue
+            # Date/DateTime 列：字符串 → date
+            if k in date_columns and isinstance(v, str):
+                try:
+                    if len(v) == 8 and v.isdigit():
+                        v = date_type(int(v[:4]), int(v[4:6]), int(v[6:8]))
+                    elif len(v) == 10 and "-" in v:
+                        v = date_type.fromisoformat(v)
+                    else:
+                        v = None
+                except (ValueError, TypeError):
+                    v = None
+            # Boolean 列：int → bool
+            elif k in bool_columns and not isinstance(v, bool):
+                v = bool(v)
+            # Numeric 列：str → Decimal
+            elif k in numeric_columns and isinstance(v, str):
+                try:
+                    v = Decimal(v) if v else None
+                except (InvalidOperation, ValueError):
+                    v = None
+            result[k] = v
+        return result
+
+    filtered_rows = [_coerce_row(row) for row in rows]
 
     # 构建 INSERT 语句
     col_list = ", ".join(columns)
@@ -621,14 +731,28 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
             c for c in columns if c not in entry.conflict_columns
         ]
         if update_cols:
-            set_clause = ", ".join(
-                f"{col} = EXCLUDED.{col}" for col in update_cols
-            )
-            sql = (
-                f"INSERT INTO {entry.target_table} ({col_list}) "
-                f"VALUES ({val_placeholders}) "
-                f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {set_clause}"
-            )
+            # 只更新 INSERT 列表中存在的列（用 EXCLUDED 引用），
+            # updated_at 特殊处理为 NOW()，不在 INSERT 中的列跳过
+            set_parts = []
+            columns_set = set(columns)
+            for col in update_cols:
+                if col == "updated_at":
+                    set_parts.append("updated_at = NOW()")
+                elif col in columns_set:
+                    set_parts.append(f"{col} = EXCLUDED.{col}")
+            set_clause = ", ".join(set_parts) if set_parts else ""
+            if set_clause:
+                sql = (
+                    f"INSERT INTO {entry.target_table} ({col_list}) "
+                    f"VALUES ({val_placeholders}) "
+                    f"ON CONFLICT ({conflict_cols}) DO UPDATE SET {set_clause}"
+                )
+            else:
+                sql = (
+                    f"INSERT INTO {entry.target_table} ({col_list}) "
+                    f"VALUES ({val_placeholders}) "
+                    f"ON CONFLICT ({conflict_cols}) DO NOTHING"
+                )
         else:
             # 没有可更新的列，退化为 DO NOTHING
             sql = (
@@ -647,7 +771,7 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 
     async with AsyncSessionPG() as session:
         try:
-            for row in rows:
+            for row in filtered_rows:
                 await session.execute(stmt, row)
             await session.commit()
         except Exception:

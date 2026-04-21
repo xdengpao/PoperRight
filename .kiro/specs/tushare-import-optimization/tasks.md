@@ -1,0 +1,141 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration tests
+  - **Property 1: Bug Condition** - Tushare 导入 5 项 UX 缺陷探索
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bugs exist
+  - **DO NOT attempt to fix the tests or the code when they fail**
+  - **NOTE**: These tests encode the expected behavior - they will validate the fixes when they pass after implementation
+  - **GOAL**: Surface counterexamples that demonstrate each bug exists
+  - **Scoped PBT Approach**: Scope each property to the concrete failing case(s) from the Bug Condition specifications
+  - **前端测试** (`frontend/src/views/__tests__/TushareImportView.bugfix.property.test.ts`, fast-check):
+    - Bug 1 — Loading 状态: 对任意 `api` where `canImport(api)=true`，模拟点击"开始导入"按钮，断言按钮立即进入 loading 状态（`disabled=true`, 文字变为"导入中..."）。isBugCondition: `action=="click_import" AND canImport(api)==true AND button.loading==false`
+    - Bug 2 — 日期默认值: 对任意 `api` where `date_range` in `required_params` or `optional_params`，展开子分类后断言 `start_date` 输入框的值为一年前日期（`today - 365 days`），而非空字符串。isBugCondition: `getParam(api.api_name, 'start_date') == ""`
+    - Bug 3 — Stock Code 可选: 构造 `required_params` 包含 `stock_code` 的 API，留空 stock_code，断言"开始导入"按钮不被禁用（`requiredParamsFilled(api)` 应返回 true）。isBugCondition: `"stock_code" IN required_params AND stock_code_value=="" AND requiredParamsFilled(api)==false`
+    - Bug 4 — 批量选择: 检查子分类中是否存在 checkbox 和"批量导入已选"按钮。isBugCondition: `selectedApis.length > 1 AND NO batchImport mechanism exists`
+  - **后端测试** (`tests/properties/test_tushare_import_bugfix.py`, Hypothesis):
+    - Bug 5 — 错误信息: 调用 `_update_progress(task_id, status="failed")`，断言 Redis 进度数据包含 `error_message` 字段。isBugCondition: `task.status=="failed" AND error_message is undefined`
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests FAIL (this is correct - it proves the bugs exist)
+  - Document counterexamples found:
+    - Bug 1: `startImport(api)` 调用后按钮状态不变，无 loading class，无 disabled 属性
+    - Bug 2: `getParam(api_name, 'start_date')` 返回空字符串，start_date 输入框 value 为空
+    - Bug 3: `requiredParamsFilled()` 对 stock_code 为空时返回 false，按钮被禁用
+    - Bug 4: 无 checkbox 元素，无"批量导入已选"按钮
+    - Bug 5: `_update_progress(task_id, status="failed")` 不接受 error_message 参数，Redis 数据无 error_message 字段
+  - Mark task complete when tests are written, run, and failures are documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - 非 Bug 输入行为保持不变
+  - **IMPORTANT**: Follow observation-first methodology
+  - **前端测试** (`frontend/src/views/__tests__/TushareImportView.preservation.property.test.ts`, fast-check):
+    - Observe on UNFIXED code: `requiredParamsFilled(api)` 对 `hs_type`/`sector_code`/`index_code` 为空时返回 false
+    - Observe on UNFIXED code: `canImport(api)` 在 `health.connected=false` 或 `token_available=false` 时返回 false
+    - Observe on UNFIXED code: `end_date` 默认值为 `todayStr`
+    - Observe on UNFIXED code: `buildImportParams()` 对非 date_range 参数的构建逻辑
+    - Write property-based tests (fast-check):
+      - 对任意 `api` 和任意非 stock_code 必填参数 `p`（如 `hs_type`, `sector_code`, `index_code`）为空时，`requiredParamsFilled(api)` 返回 false
+      - 对任意 `api` where `health.connected=false` 或 `token_available=false`，`canImport(api)` 返回 false
+      - 对任意 `api` with `date_range` 参数，`end_date` 输入框默认值为今天日期
+      - 对任意 `api`，`buildImportParams()` 中 `report_period` 默认 year=currentYear/quarter='1'，`freq` 默认 '1min'
+  - **后端测试** (`tests/properties/test_tushare_import_bugfix.py`, Hypothesis):
+    - Observe on UNFIXED code: `_update_progress()` 正确写入 status/total/completed/failed/current_item
+    - Observe on UNFIXED code: `get_import_status()` 正确读取上述字段
+    - Write property-based test: 对任意 status/total/completed/failed/current_item 组合，`_update_progress()` 写入后 `get_import_status()` 能正确读取
+  - Verify tests pass on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7_
+
+- [x] 3. Fix for Tushare 导入 5 项 UX 缺陷
+
+  - [x] 3.1 Bug 1 — 按钮 Loading 状态 (`frontend/src/views/TushareImportView.vue`)
+    - 新增 `const loadingApis = reactive(new Set<string>())` 状态
+    - 修改 `startImport()`: 在 API 调用前 `loadingApis.add(api.api_name)`，在 `finally` 块中 `loadingApis.delete(api.api_name)`
+    - 修改模板中所有"开始导入"按钮: `:disabled="!canImport(api) || loadingApis.has(api.api_name)"`
+    - 按钮文字根据 loading 状态切换: `{{ loadingApis.has(api.api_name) ? '导入中...' : '开始导入' }}`
+    - 添加 `btn-loading` CSS class 用于 loading 状态视觉反馈
+    - _Bug_Condition: isBugCondition_1(input) where action=="click_import" AND canImport(api)==true AND button.loading==false_
+    - _Expected_Behavior: 按钮立即进入 loading 状态（disabled=true, text="导入中..."），请求完成后恢复_
+    - _Preservation: 非 loading 状态下按钮行为不变，canImport 逻辑不变_
+    - _Requirements: 2.1_
+
+  - [x] 3.2 Bug 2 — 日期默认最近一年 (`frontend/src/views/TushareImportView.vue`)
+    - 新增 `const oneYearAgoStr` 常量: `new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10)`
+    - 修改模板中 start_date 输入框（股票数据和指数专题两处）: `:value="getParam(api.api_name, 'start_date') || oneYearAgoStr"`
+    - 修改 `buildImportParams()` 中 `date_range` 分支: `start_date` fallback 改为 `|| oneYearAgoStr`
+    - _Bug_Condition: isBugCondition_2(input) where paramType=="date_range" AND getParam(api.api_name, "start_date")==""_
+    - _Expected_Behavior: start_date 默认为 today - 365 天_
+    - _Preservation: end_date 默认值保持为 todayStr，非 date_range 参数不受影响_
+    - _Requirements: 2.2_
+
+  - [x] 3.3 Bug 3 — Stock Code 可选校验 (`frontend/src/views/TushareImportView.vue`)
+    - 修改 `requiredParamsFilled()`: 在 `else` 分支前增加 `else if (p === 'stock_code') { continue }` — 跳过 stock_code 的非空校验
+    - _Bug_Condition: isBugCondition_3(input) where "stock_code" IN required_params AND stock_code_value=="" AND requiredParamsFilled(api)==false_
+    - _Expected_Behavior: stock_code 留空时 requiredParamsFilled() 返回 true_
+    - _Preservation: 非 stock_code 必填参数（hs_type, sector_code, index_code）为空时仍返回 false_
+    - _Requirements: 2.3_
+
+  - [x] 3.4 Bug 4 — 批量选择导入 (`frontend/src/views/TushareImportView.vue`)
+    - 新增 `const selectedApis = reactive(new Map<string, Set<string>>())` — 按子分类存储已勾选的 API 名称
+    - 新增 `toggleApiSelection(subcategory, apiName)` 函数
+    - 新增 `toggleAllApis(subcategory, apis)` 全选/取消全选函数
+    - 新增 `getSelectedCount(subcategory)` 计算已选数量
+    - 在每个 `api-item` 前添加 checkbox，绑定到 `selectedApis`
+    - 在子分类 header 中添加全选 checkbox
+    - 在子分类的 `api-list` 底部添加"批量导入已选 (N)" 按钮，仅当有已勾选项时显示
+    - 新增 `async batchImport(subcategory, apis)` 函数: 遍历已勾选的 API 列表，使用 `for...of` 顺序调用 `startImport(api)`
+    - 添加批量选择相关 CSS 样式
+    - _Bug_Condition: isBugCondition_4(input) where selectedApis.length > 1 AND NO batchImport mechanism exists_
+    - _Expected_Behavior: 勾选 K 个 API 后点击"批量导入已选"，依次为 K 个 API 调用 startImport()_
+    - _Preservation: 单个"开始导入"按钮的行为不变_
+    - _Requirements: 2.4_
+
+  - [x] 3.5 Bug 5 — 失败原因显示（后端）
+    - 修改 `_update_progress()` 签名 (`app/tasks/tushare_import.py`): 添加 `error_message: str = ""` 参数
+    - 修改 `_update_progress()` 实现: 当 `error_message` 非空时写入 Redis 进度数据的 `error_message` 字段
+    - 修改 `_process_import()` except 分支: `_update_progress(task_id, status="failed", error_message=error_msg)`
+    - 修改 `TushareImportService.get_import_status()` (`app/services/data_engine/tushare_import_service.py`): 返回值增加 `error_message` 字段
+    - 修改 `TushareImportStatusResponse` (`app/api/v1/tushare.py`): 添加 `error_message: str = ""` 字段
+    - 修改 `get_import_status()` 端点: 返回 `error_message` 字段
+    - _Bug_Condition: isBugCondition_5(input) where task.status=="failed" AND error_message is undefined_
+    - _Expected_Behavior: Redis 进度数据包含 error_message，API 返回 error_message 字段_
+    - _Preservation: 非 failed 状态的进度数据不受影响，现有字段（total/completed/failed/status/current_item）不变_
+    - _Requirements: 2.5_
+
+  - [x] 3.6 Bug 5 — 失败原因显示（前端）(`frontend/src/views/TushareImportView.vue`)
+    - 修改 `ImportTask` 类型: 添加 `error_message?: string` 字段
+    - 修改活跃任务模板: 在 `status === 'failed'` 时显示 `task.error_message`（红色文字，位于状态徽章下方）
+    - 修改 `fetchTaskStatus()`: 从 API 响应中读取 `error_message` 字段
+    - 修改导入历史表格: 在"状态"列中，失败记录显示 `log.error_message`（已有 `error_message` 字段在 `ImportLog` 类型中）
+    - _Bug_Condition: 前端不显示 error_message_
+    - _Expected_Behavior: 失败任务在活跃任务区域和历史记录中显示具体错误原因_
+    - _Preservation: 成功/运行中任务的显示不变_
+    - _Requirements: 2.5_
+
+  - [x] 3.7 Verify bug condition exploration tests now pass
+    - **Property 1: Expected Behavior** - 5 项缺陷修复验证
+    - **IMPORTANT**: Re-run the SAME tests from task 1 - do NOT write new tests
+    - The tests from task 1 encode the expected behavior
+    - When these tests pass, it confirms the expected behavior is satisfied
+    - Run bug condition exploration tests from step 1:
+      - `cd frontend && npx vitest --run src/views/__tests__/TushareImportView.bugfix.property.test.ts`
+      - `pytest tests/properties/test_tushare_import_bugfix.py -k "bug_condition"`
+    - **EXPECTED OUTCOME**: Tests PASS (confirms all 5 bugs are fixed)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5_
+
+  - [x] 3.8 Verify preservation tests still pass
+    - **Property 2: Preservation** - 非 Bug 输入行为保持不变
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2:
+      - `cd frontend && npx vitest --run src/views/__tests__/TushareImportView.preservation.property.test.ts`
+      - `pytest tests/properties/test_tushare_import_bugfix.py -k "preservation"`
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix (no regressions)
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Run full frontend test suite: `cd frontend && npx vitest --run`
+  - Run full backend test suite: `pytest`
+  - Ensure all existing tests (including `TushareImportView.property.test.ts` and `test_tushare_import_properties.py`) still pass
+  - Ensure all new bugfix and preservation tests pass
+  - Ask the user if questions arise

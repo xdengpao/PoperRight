@@ -35,10 +35,24 @@
             <span class="subcategory-count">{{ group.apis.length }} 个接口</span>
           </button>
           <div v-if="expandedSubcategories.has(group.subcategory)" class="api-list">
+            <div class="batch-select-header">
+              <label class="batch-checkbox-label" @click.stop>
+                <input type="checkbox" class="batch-checkbox"
+                  :checked="getSelectedCount(group.subcategory) === group.apis.length && group.apis.length > 0"
+                  :indeterminate="getSelectedCount(group.subcategory) > 0 && getSelectedCount(group.subcategory) < group.apis.length"
+                  @change="toggleAllApis(group.subcategory, group.apis)" />
+                <span>全选</span>
+              </label>
+            </div>
             <div v-if="isMidFreqSubcategory(group.subcategory)" class="mid-freq-warning">
               ⚠️ 分钟级数据量较大，建议按单只股票或短日期范围分批导入</div>
             <div v-for="api in group.apis" :key="api.api_name" class="api-item">
               <div class="api-item-header">
+                <label class="batch-checkbox-label" @click.stop>
+                  <input type="checkbox" class="batch-checkbox"
+                    :checked="selectedApis.get(group.subcategory)?.has(api.api_name) ?? false"
+                    @change="toggleApiSelection(group.subcategory, api.api_name)" />
+                </label>
                 <span class="api-name">{{ api.api_name }}</span>
                 <span class="api-label">{{ api.label }}</span>
                 <span class="tier-badge" :class="'tier-' + api.token_tier">{{ tierLabel(api.token_tier) }}</span>
@@ -48,7 +62,7 @@
                   <div v-if="p === 'date_range'" class="param-field">
                     <label class="param-label">日期范围<span v-if="api.required_params.includes(p)" class="req">*</span></label>
                     <div class="date-range-inputs">
-                      <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'start_date')"
+                      <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'start_date') || oneYearAgoStr"
                         @input="setParam(api.api_name, 'start_date', ($event.target as HTMLInputElement).value)" aria-label="开始日期" />
                       <span class="date-sep">至</span>
                       <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'end_date') || todayStr"
@@ -111,9 +125,21 @@
                       @input="setParam(api.api_name, 'sector_code', ($event.target as HTMLInputElement).value)" />
                   </div>
                 </template>
-                <button class="btn btn-primary btn-import" :disabled="!canImport(api)" @click="startImport(api)"
-                  :title="importButtonTitle(api)" :aria-label="'开始导入 ' + api.api_name">开始导入</button>
+                <button class="btn btn-primary btn-import" :class="{ 'btn-loading': loadingApis.has(api.api_name) }"
+                  :disabled="!canImport(api) || loadingApis.has(api.api_name)" @click="startImport(api)"
+                  :title="importButtonTitle(api)" :aria-label="'开始导入 ' + api.api_name">{{ loadingApis.has(api.api_name) ? '导入中...' : '开始导入' }}</button>
+                <span v-if="formatLastImportTime(api.api_name)" class="last-import-time">
+                  最近: {{ formatLastImportTime(api.api_name) }}
+                </span>
               </div>
+            </div>
+            <div class="batch-import-bar">
+              <button class="btn btn-primary btn-batch-import"
+                :disabled="getSelectedCount(group.subcategory) === 0"
+                @click="batchImport(group.subcategory, group.apis)"
+                :aria-label="'批量导入已选 ' + getSelectedCount(group.subcategory) + ' 个接口'">
+                批量导入已选 ({{ getSelectedCount(group.subcategory) }})
+              </button>
             </div>
           </div>
         </div>
@@ -134,10 +160,24 @@
             <span class="subcategory-count">{{ group.apis.length }} 个接口</span>
           </button>
           <div v-if="expandedSubcategories.has(group.subcategory)" class="api-list">
+            <div class="batch-select-header">
+              <label class="batch-checkbox-label" @click.stop>
+                <input type="checkbox" class="batch-checkbox"
+                  :checked="getSelectedCount(group.subcategory) === group.apis.length && group.apis.length > 0"
+                  :indeterminate="getSelectedCount(group.subcategory) > 0 && getSelectedCount(group.subcategory) < group.apis.length"
+                  @change="toggleAllApis(group.subcategory, group.apis)" />
+                <span>全选</span>
+              </label>
+            </div>
             <div v-if="isMidFreqSubcategory(group.subcategory)" class="mid-freq-warning">
               ⚠️ 分钟级数据量较大，建议按单只指数或短日期范围分批导入</div>
             <div v-for="api in group.apis" :key="api.api_name" class="api-item">
               <div class="api-item-header">
+                <label class="batch-checkbox-label" @click.stop>
+                  <input type="checkbox" class="batch-checkbox"
+                    :checked="selectedApis.get(group.subcategory)?.has(api.api_name) ?? false"
+                    @change="toggleApiSelection(group.subcategory, api.api_name)" />
+                </label>
                 <span class="api-name">{{ api.api_name }}</span>
                 <span class="api-label">{{ api.label }}</span>
                 <span class="tier-badge" :class="'tier-' + api.token_tier">{{ tierLabel(api.token_tier) }}</span>
@@ -147,7 +187,7 @@
                   <div v-if="p === 'date_range'" class="param-field">
                     <label class="param-label">日期范围<span v-if="api.required_params.includes(p)" class="req">*</span></label>
                     <div class="date-range-inputs">
-                      <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'start_date')"
+                      <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'start_date') || oneYearAgoStr"
                         @input="setParam(api.api_name, 'start_date', ($event.target as HTMLInputElement).value)" aria-label="开始日期" />
                       <span class="date-sep">至</span>
                       <input type="date" class="form-input param-input" :value="getParam(api.api_name, 'end_date') || todayStr"
@@ -210,9 +250,21 @@
                       @input="setParam(api.api_name, 'sector_code', ($event.target as HTMLInputElement).value)" />
                   </div>
                 </template>
-                <button class="btn btn-primary btn-import" :disabled="!canImport(api)" @click="startImport(api)"
-                  :title="importButtonTitle(api)" :aria-label="'开始导入 ' + api.api_name">开始导入</button>
+                <button class="btn btn-primary btn-import" :class="{ 'btn-loading': loadingApis.has(api.api_name) }"
+                  :disabled="!canImport(api) || loadingApis.has(api.api_name)" @click="startImport(api)"
+                  :title="importButtonTitle(api)" :aria-label="'开始导入 ' + api.api_name">{{ loadingApis.has(api.api_name) ? '导入中...' : '开始导入' }}</button>
+                <span v-if="formatLastImportTime(api.api_name)" class="last-import-time">
+                  最近: {{ formatLastImportTime(api.api_name) }}
+                </span>
               </div>
+            </div>
+            <div class="batch-import-bar">
+              <button class="btn btn-primary btn-batch-import"
+                :disabled="getSelectedCount(group.subcategory) === 0"
+                @click="batchImport(group.subcategory, group.apis)"
+                :aria-label="'批量导入已选 ' + getSelectedCount(group.subcategory) + ' 个接口'">
+                批量导入已选 ({{ getSelectedCount(group.subcategory) }})
+              </button>
             </div>
           </div>
         </div>
@@ -221,7 +273,12 @@
 
     <!-- ── 活跃任务 ── -->
     <section v-if="activeTasks.length > 0" class="card" aria-label="活跃任务">
-      <h2 class="section-title">🔄 活跃任务</h2>
+      <div class="section-header">
+        <h2 class="section-title">🔄 活跃任务</h2>
+        <button v-if="hasTerminalTasks" class="btn btn-secondary btn-sm" @click="clearTerminalTasks">
+          清除已结束任务
+        </button>
+      </div>
       <div v-for="task in activeTasks" :key="task.task_id" class="active-task">
         <div class="task-header">
           <span class="task-api-name">{{ task.api_name }}</span>
@@ -237,6 +294,9 @@
           <span class="task-counts">已完成 {{ task.completed }}/{{ task.total }}
             <span v-if="task.failed > 0" class="task-failed">失败 {{ task.failed }}</span></span>
           <span v-if="task.current_item" class="task-current">当前: {{ task.current_item }}</span>
+        </div>
+        <div v-if="task.status === 'failed' && task.error_message" class="task-error-message">
+          {{ task.error_message }}
         </div>
       </div>
     </section>
@@ -256,7 +316,9 @@
             <td class="api-name-cell">{{ log.api_name }}</td>
             <td>{{ formatTime(log.started_at) }}</td>
             <td>{{ log.record_count.toLocaleString() }} 条</td>
-            <td><span class="status-badge" :class="historyStatusClass(log.status)">{{ historyStatusLabel(log.status) }}</span></td>
+            <td><span class="status-badge" :class="historyStatusClass(log.status)">{{ historyStatusLabel(log.status) }}</span>
+              <div v-if="log.status === 'failed' && log.error_message" class="history-error-message">{{ log.error_message }}</div>
+            </td>
             <td>{{ formatDuration(log.started_at, log.finished_at) }}</td>
           </tr>
         </tbody>
@@ -306,6 +368,7 @@ export interface ImportTask {
   completed: number
   failed: number
   current_item: string
+  error_message?: string
 }
 
 /** 导入历史记录 */
@@ -346,18 +409,25 @@ const registryList = ref<ApiItem[]>([])
 const paramValues = reactive<Record<string, Record<string, string>>>({})
 const expandedSubcategories = reactive(new Set<string>())
 
+const loadingApis = reactive(new Set<string>())
+
+/** 按子分类存储已勾选的 API 名称 */
+const selectedApis = reactive(new Map<string, Set<string>>())
+
 const activeTasks = ref<ImportTask[]>([])
 const pollTimers = ref<Record<string, ReturnType<typeof setInterval>>>({})
 
 const historyLoading = ref(false)
 const historyList = ref<ImportLog[]>([])
+const lastImportTimes = ref<Record<string, string>>({})
 
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
 const todayStr = new Date().toISOString().slice(0, 10)
+const oneYearAgoStr = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10)
 const currentYear = new Date().getFullYear().toString()
 const yearOptions = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() - i).toString())
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped'])
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'unknown'])
 const POLL_INTERVAL = 3000
 
 // ── 计算属性 ──────────────────────────────────────────────────────────────────
@@ -412,9 +482,12 @@ function setParam(apiName: string, key: string, value: string): void {
 function requiredParamsFilled(api: ApiItem): boolean {
   for (const p of api.required_params) {
     if (p === 'date_range') {
-      if (!getParam(api.api_name, 'start_date')) return false
+      // start_date 有默认值 oneYearAgoStr，无需校验
+      continue
     } else if (p === 'report_period' || p === 'freq' || p === 'market') {
       continue // 有默认值或允许空
+    } else if (p === 'stock_code') {
+      continue // 留空表示全市场，无需校验
     } else {
       if (!getParam(api.api_name, p)) return false
     }
@@ -438,12 +511,48 @@ function toggleSubcategory(sub: string): void {
   else expandedSubcategories.add(sub)
 }
 
+/** 切换单个 API 的选中状态 */
+function toggleApiSelection(subcategory: string, apiName: string): void {
+  if (!selectedApis.has(subcategory)) {
+    selectedApis.set(subcategory, new Set<string>())
+  }
+  const set = selectedApis.get(subcategory)!
+  if (set.has(apiName)) set.delete(apiName)
+  else set.add(apiName)
+}
+
+/** 全选/取消全选子分类下的所有 API */
+function toggleAllApis(subcategory: string, apis: ApiItem[]): void {
+  const current = selectedApis.get(subcategory)
+  if (current && current.size === apis.length) {
+    // 已全选 → 取消全选
+    selectedApis.set(subcategory, new Set<string>())
+  } else {
+    // 未全选 → 全选
+    selectedApis.set(subcategory, new Set(apis.map(a => a.api_name)))
+  }
+}
+
+/** 获取子分类已选数量 */
+function getSelectedCount(subcategory: string): number {
+  return selectedApis.get(subcategory)?.size ?? 0
+}
+
+/** 批量导入已选 API，顺序执行 */
+async function batchImport(subcategory: string, apis: ApiItem[]): Promise<void> {
+  const selected = selectedApis.get(subcategory)
+  if (!selected || selected.size === 0) return
+  const toImport = apis.filter(a => selected.has(a.api_name))
+  for (const api of toImport) {
+    await startImport(api)
+  }
+}
+
 function buildImportParams(api: ApiItem): Record<string, string> {
   const params: Record<string, string> = {}
   for (const p of [...api.required_params, ...api.optional_params]) {
     if (p === 'date_range') {
-      const s = getParam(api.api_name, 'start_date')
-      if (s) params['start_date'] = s
+      params['start_date'] = getParam(api.api_name, 'start_date') || oneYearAgoStr
       params['end_date'] = getParam(api.api_name, 'end_date') || todayStr
     } else if (p === 'report_period') {
       params['report_year'] = getParam(api.api_name, 'report_year') || currentYear
@@ -460,12 +569,20 @@ function buildImportParams(api: ApiItem): Record<string, string> {
 
 // ── 任务状态工具 ──────────────────────────────────────────────────────────────
 
+const hasTerminalTasks = computed(() =>
+  activeTasks.value.some(t => TERMINAL_STATUSES.has(t.status)),
+)
+
+function clearTerminalTasks(): void {
+  activeTasks.value = activeTasks.value.filter(t => !TERMINAL_STATUSES.has(t.status))
+}
+
 function taskPct(t: ImportTask): number {
   return t.total <= 0 ? 0 : Math.min(100, Math.round((t.completed / t.total) * 100))
 }
 
 function taskStatusLabel(s: string): string {
-  return ({ pending: '等待中', running: '运行中', completed: '已完成', failed: '失败', stopped: '已停止' } as Record<string, string>)[s] ?? s
+  return ({ pending: '等待中', running: '运行中', completed: '已完成', failed: '失败', stopped: '已停止', unknown: '已丢失' } as Record<string, string>)[s] ?? s
 }
 
 function taskStatusClass(s: string): string {
@@ -534,6 +651,7 @@ async function fetchRegistry(): Promise<void> {
 
 async function startImport(api: ApiItem): Promise<void> {
   const params = buildImportParams(api)
+  loadingApis.add(api.api_name)
   try {
     const { data } = await apiClient.post<{ task_id: string; log_id: number; status: string }>(
       '/data/tushare/import', { api_name: api.api_name, params },
@@ -550,6 +668,8 @@ async function startImport(api: ApiItem): Promise<void> {
     } else {
       alert(e instanceof Error ? e.message : '启动导入失败')
     }
+  } finally {
+    loadingApis.delete(api.api_name)
   }
 }
 
@@ -562,13 +682,42 @@ async function fetchTaskStatus(taskId: string): Promise<void> {
     const { data } = await apiClient.get<ImportTask>(`/data/tushare/import/status/${taskId}`)
     const idx = activeTasks.value.findIndex(t => t.task_id === taskId)
     if (idx >= 0) {
+      // 后端返回 unknown 表示 Redis 进度数据已过期（服务重启等），标记为失败并清理
+      if (data.status === 'unknown') {
+        activeTasks.value[idx] = {
+          ...activeTasks.value[idx],
+          status: 'failed',
+          error_message: '任务状态丢失（服务可能已重启）',
+        }
+        stopPolling(taskId)
+        fetchHistory()
+        fetchLastImportTimes()
+        return
+      }
       activeTasks.value[idx] = { ...activeTasks.value[idx], ...data }
       if (TERMINAL_STATUSES.has(data.status)) {
         stopPolling(taskId)
         fetchHistory()
+        fetchLastImportTimes()
       }
     }
-  } catch { /* 静默处理轮询错误 */ }
+  } catch {
+    // 网络错误（后端不可达）：增加失败计数，连续 3 次失败后标记任务为丢失
+    const idx = activeTasks.value.findIndex(t => t.task_id === taskId)
+    if (idx >= 0) {
+      const task = activeTasks.value[idx]
+      const errCount = (task as unknown as Record<string, number>)._pollErrors ?? 0
+      ;(task as unknown as Record<string, number>)._pollErrors = errCount + 1
+      if (errCount + 1 >= 3) {
+        activeTasks.value[idx] = {
+          ...task,
+          status: 'failed',
+          error_message: '无法连接后端服务',
+        }
+        stopPolling(taskId)
+      }
+    }
+  }
 }
 
 async function fetchHistory(): Promise<void> {
@@ -581,6 +730,23 @@ async function fetchHistory(): Promise<void> {
   } finally {
     historyLoading.value = false
   }
+}
+
+async function fetchLastImportTimes(): Promise<void> {
+  try {
+    const { data } = await apiClient.get<Record<string, string>>('/data/tushare/import/last-times')
+    lastImportTimes.value = data
+  } catch { /* 静默处理 */ }
+}
+
+function formatLastImportTime(apiName: string): string {
+  const iso = lastImportTimes.value[apiName]
+  if (!iso) return ''
+  try {
+    const d = new Date(iso)
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+  } catch { return '' }
 }
 
 // ── 轮询管理 ──────────────────────────────────────────────────────────────────
@@ -606,6 +772,7 @@ onMounted(() => {
   checkHealth()
   fetchRegistry()
   fetchHistory()
+  fetchLastImportTimes()
 })
 
 onUnmounted(() => {
@@ -628,6 +795,10 @@ onUnmounted(() => {
 .section-title {
   font-size: 15px; font-weight: 600; color: #e6edf3; margin: 0 0 14px;
 }
+.section-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;
+}
+.section-header .section-title { margin: 0; }
 .empty { text-align: center; color: #484f58; padding: 24px; font-size: 13px; }
 
 /* ── 连接状态栏 ── */
@@ -658,6 +829,17 @@ onUnmounted(() => {
 .btn-danger:hover:not(:disabled) { background: #f85149; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 .btn-import { flex-shrink: 0; align-self: flex-end; }
+.last-import-time {
+  font-size: 12px; color: #484f58; white-space: nowrap; align-self: flex-end;
+}
+.btn-loading { opacity: 0.7; cursor: wait; position: relative; }
+.btn-loading::after {
+  content: ''; display: inline-block; width: 12px; height: 12px;
+  border: 2px solid rgba(255,255,255,0.3); border-top-color: #fff;
+  border-radius: 50%; animation: btn-spin 0.6s linear infinite;
+  margin-left: 6px; vertical-align: middle;
+}
+@keyframes btn-spin { to { transform: rotate(360deg); } }
 
 /* ── 子分类折叠 ── */
 .subcategory-group { border-bottom: 1px solid #21262d; }
@@ -742,6 +924,13 @@ onUnmounted(() => {
 .task-failed { color: #f85149; }
 .task-current { color: #58a6ff; }
 
+/* ── 任务错误信息 ── */
+.task-error-message {
+  margin-top: 6px; padding: 6px 10px; font-size: 13px; color: #f85149;
+  background: #3a1a1a; border: 1px solid #f8514933; border-radius: 4px;
+  word-break: break-word;
+}
+
 /* ── 导入历史表格 ── */
 .data-table { width: 100%; border-collapse: collapse; }
 .data-table th, .data-table td {
@@ -750,4 +939,29 @@ onUnmounted(() => {
 .data-table th { color: #8b949e; font-weight: 500; }
 .data-table td { color: #e6edf3; }
 .api-name-cell { font-family: monospace; color: #58a6ff; }
+
+/* ── 历史错误信息 ── */
+.history-error-message {
+  margin-top: 4px; font-size: 12px; color: #f85149; word-break: break-word;
+}
+
+/* ── 批量选择 ── */
+.batch-select-header {
+  display: flex; align-items: center; padding: 6px 0; margin-bottom: 4px;
+  border-bottom: 1px solid #21262d;
+}
+.batch-checkbox-label {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font-size: 13px; color: #8b949e; user-select: none;
+}
+.batch-checkbox {
+  width: 16px; height: 16px; accent-color: #1f6feb; cursor: pointer;
+}
+.batch-import-bar {
+  display: flex; justify-content: flex-end; padding: 10px 0 4px;
+  border-top: 1px solid #21262d; margin-top: 4px;
+}
+.btn-batch-import {
+  padding: 6px 20px; font-size: 13px; font-weight: 500;
+}
 </style>

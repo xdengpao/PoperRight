@@ -36,9 +36,10 @@ class Settings(BaseSettings):
     tushare_api_token: str = ""
     tushare_api_url: str = "http://api.tushare.pro"
 
-    # Tushare 三级权限 Token 配置
-    tushare_token_basic: str = ""       # 6000 积分及以下权限接口
-    tushare_token_advanced: str = ""    # 6000 积分以上权限接口
+    # Tushare 四级权限 Token 配置（按积分等级分别配置，未配置时回退到 tushare_api_token）
+    tushare_token_basic: str = ""       # 2000 积分及以下权限接口
+    tushare_token_advanced: str = ""    # 2000-6000 积分权限接口（包含6000积分）
+    tushare_token_premium: str = ""     # 6000 积分以上权限接口
     tushare_token_special: str = ""     # 需单独开通权限的接口
 
     # AkShare 数据源配置

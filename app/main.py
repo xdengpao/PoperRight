@@ -32,11 +32,64 @@ async def _ensure_default_admin() -> None:
             print(f"[init] 管理员 '{settings.default_admin_username}' 已存在，跳过创建")
 
 
+async def _cleanup_stale_import_tasks() -> None:
+    """清理服务重启后残留的 running 状态导入任务。
+
+    将 tushare_import_log 中 status='running' 的记录标记为 failed，
+    并清理对应的 Redis 并发锁。
+    """
+    from sqlalchemy import update
+
+    from app.models.tushare_import import TushareImportLog
+
+    async with AsyncSessionPG() as session:
+        result = await session.execute(
+            select(TushareImportLog).where(TushareImportLog.status == "running")
+        )
+        stale_logs = result.scalars().all()
+
+        if not stale_logs:
+            return
+
+        from datetime import datetime
+        now = datetime.utcnow()
+        stale_ids = [log.id for log in stale_logs]
+        stale_api_names = {log.api_name for log in stale_logs}
+
+        await session.execute(
+            update(TushareImportLog)
+            .where(TushareImportLog.id.in_(stale_ids))
+            .values(
+                status="failed",
+                error_message="服务重启，任务中断",
+                finished_at=now,
+            )
+        )
+        await session.commit()
+
+    # 清理 Redis 并发锁（独立 try，不影响数据库更新）
+    try:
+        from app.core.redis_client import cache_delete
+        for api_name in stale_api_names:
+            try:
+                await cache_delete(f"tushare:import:lock:{api_name}")
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    print(f"[init] 已清理 {len(stale_ids)} 个残留导入任务: {stale_api_names}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时初始化资源
     await pubsub_relay.start()
     await _ensure_default_admin()
+    try:
+        await _cleanup_stale_import_tasks()
+    except Exception as exc:
+        print(f"[init] ⚠ 清理残留导入任务失败（不影响启动）: {exc}")
     yield
     # 关闭时释放资源
     await pubsub_relay.stop()
