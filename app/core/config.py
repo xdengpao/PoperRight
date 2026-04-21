@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     tushare_api_token: str = ""
     tushare_api_url: str = "http://api.tushare.pro"
 
+    # Tushare 三级权限 Token 配置
+    tushare_token_basic: str = ""       # 6000 积分及以下权限接口
+    tushare_token_advanced: str = ""    # 6000 积分以上权限接口
+    tushare_token_special: str = ""     # 需单独开通权限的接口
+
     # AkShare 数据源配置
     akshare_request_timeout: float = 30.0
     akshare_max_retries: int = 3

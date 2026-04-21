@@ -42,6 +42,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/DataManageView.vue'),
         meta: { title: '在线数据' },
       },
+      // Tushare 数据导入
+      {
+        path: 'data/online/tushare',
+        name: 'DataOnlineTushare',
+        component: () => import('@/views/TushareImportView.vue'),
+        meta: { title: 'Tushare 数据导入' },
+      },
       // 本地数据（原本地数据导入）
       {
         path: 'data/local',

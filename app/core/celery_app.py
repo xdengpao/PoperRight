@@ -19,6 +19,7 @@ celery_app = Celery(
         "app.tasks.review",
         "app.tasks.sector_sync",
         "app.tasks.risk_cleanup",
+        "app.tasks.tushare_import",
     ],
 )
 
@@ -35,6 +36,7 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.data_sync.*": {"queue": "data_sync"},
         "app.tasks.sector_sync.*": {"queue": "data_sync"},
+        "app.tasks.tushare_import.*": {"queue": "data_sync"},
         "app.tasks.screening.*": {"queue": "screening"},
         "app.tasks.backtest.*": {"queue": "backtest"},
         "app.tasks.review.*": {"queue": "review"},

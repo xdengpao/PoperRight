@@ -29,6 +29,8 @@ class DataSource(str, Enum):
     DC = "DC"    # 东方财富
     TI = "TI"    # 同花顺
     TDX = "TDX"  # 通达信
+    CI = "CI"    # 中信行业
+    THS = "THS"  # 同花顺概念/行业板块
 
 
 class SectorType(str, Enum):

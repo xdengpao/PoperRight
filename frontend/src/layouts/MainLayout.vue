@@ -27,7 +27,33 @@
                 </button>
                 <ul v-if="expandedMenus.has(item.path)" class="nav-sub-list">
                   <li v-for="child in item.children" :key="child.path">
+                    <!-- 子菜单有自己的子菜单 -->
+                    <template v-if="child.children && child.children.length">
+                      <button
+                        class="nav-link nav-child nav-parent"
+                        :class="{ active: isChildActive(child) }"
+                        @click="toggleExpand(child.path)"
+                      >
+                        <span class="nav-icon">{{ child.icon }}</span>
+                        <span class="nav-label">{{ child.label }}</span>
+                        <span class="nav-arrow" :class="{ expanded: expandedMenus.has(child.path) }">▸</span>
+                      </button>
+                      <ul v-if="expandedMenus.has(child.path)" class="nav-sub-list">
+                        <li v-for="grandchild in child.children" :key="grandchild.path">
+                          <router-link
+                            :to="grandchild.path"
+                            class="nav-link nav-grandchild"
+                            :class="{ active: isActiveRoute(grandchild.path) }"
+                          >
+                            <span class="nav-icon">{{ grandchild.icon }}</span>
+                            <span class="nav-label">{{ grandchild.label }}</span>
+                          </router-link>
+                        </li>
+                      </ul>
+                    </template>
+                    <!-- 子菜单无自己的子菜单 -->
                     <router-link
+                      v-else
                       :to="child.path"
                       class="nav-link nav-child"
                       :class="{ active: isActiveRoute(child.path) }"
@@ -171,7 +197,13 @@ const menuGroups: Record<string, NavItem[]> = {
     {
       path: '/data', label: '数据管理', icon: '💾',
       children: [
-        { path: '/data/online', label: '在线数据', icon: '🌐' },
+        {
+          path: '/data/online', label: '在线数据', icon: '🌐',
+          children: [
+            { path: '/data/online', label: '数据总览', icon: '📊' },
+            { path: '/data/online/tushare', label: 'tushare', icon: '📡' },
+          ],
+        },
         { path: '/data/local', label: '本地数据', icon: '📁' },
       ],
     },
@@ -200,17 +232,24 @@ const menuGroups: Record<string, NavItem[]> = {
 const filteredMenuGroups = computed(() => {
   const result: Record<string, NavItem[]> = {}
   const userRole = authStore.role
+
+  function filterChildren(children: NavItem[]): NavItem[] {
+    return children
+      .filter((c) => !c.roles || c.roles.includes(userRole))
+      .map((c) => {
+        if (c.children) {
+          return { ...c, children: filterChildren(c.children) }
+        }
+        return c
+      })
+  }
+
   for (const [group, items] of Object.entries(menuGroups)) {
     const filtered = items
       .filter((item) => !item.roles || item.roles.includes(userRole))
       .map((item) => {
         if (item.children) {
-          return {
-            ...item,
-            children: item.children.filter(
-              (c) => !c.roles || c.roles.includes(userRole),
-            ),
-          }
+          return { ...item, children: filterChildren(item.children) }
         }
         return item
       })
@@ -227,7 +266,7 @@ function isActiveRoute(path: string): boolean {
 
 // --- Expandable sub-menus ---
 
-const expandedMenus = ref<Set<string>>(new Set(['/data']))
+const expandedMenus = ref<Set<string>>(new Set(['/data', '/data/online']))
 
 function toggleExpand(path: string) {
   if (expandedMenus.value.has(path)) {
@@ -238,7 +277,12 @@ function toggleExpand(path: string) {
 }
 
 function isChildActive(item: NavItem): boolean {
-  return !!item.children?.some((c) => route.path === c.path)
+  if (!item.children) return false
+  return item.children.some((c) => {
+    if (route.path === c.path) return true
+    if (c.children) return c.children.some((gc) => route.path === gc.path)
+    return false
+  })
 }
 
 // --- Notification ---
@@ -401,6 +445,10 @@ function handleLogout() {
 .nav-child {
   padding-left: 36px;
   font-size: 13px;
+}
+.nav-grandchild {
+  padding-left: 52px;
+  font-size: 12px;
 }
 
 /* Main area */

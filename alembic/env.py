@@ -41,6 +41,7 @@ if config.config_file_name is not None:
 # 在此导入所有模型，确保 autogenerate 能检测到表结构变更
 # 随着模型增加，在此处添加对应导入
 from app.core.database import PGBase, TSBase  # noqa: E402
+import app.models.tushare_import  # noqa: E402, F401  — Tushare 导入相关表
 
 # ---------------------------------------------------------------------------
 # 根据命令行参数选择目标数据库
