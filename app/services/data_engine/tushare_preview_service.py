@@ -99,6 +99,45 @@ class ImportLogItem(BaseModel):
     finished_at: str | None
 
 
+class CompletenessReport(BaseModel):
+    """完整性校验结果
+
+    包含时序数据（基于交易日历）或非时序数据（基于代码集合）的完整性校验信息。
+    """
+
+    check_type: str  # 校验类型："time_series" / "code_based" / "unsupported"
+    expected_count: int  # 预期数量
+    actual_count: int  # 实际数量
+    missing_count: int  # 缺失数量
+    completeness_rate: float  # 完整率（0.0 ~ 1.0）
+    missing_items: list[str]  # 缺失项列表（日期或代码）
+    time_range: dict | None  # 校验时间范围，如 {"start": "20240101", "end": "20241231"}
+    message: str | None  # 附加提示信息
+
+
+class IntegrityRequest(BaseModel):
+    """完整性校验请求体
+
+    用于 POST /{api_name}/check-integrity 端点的请求参数。
+    """
+
+    data_time_start: str | None = None  # 数据时间范围起始
+    data_time_end: str | None = None  # 数据时间范围结束
+
+
+class ChartDataResponse(BaseModel):
+    """图表数据响应
+
+    独立于表格分页的图表数据，按时间升序排列，用于前端图表渲染。
+    """
+
+    rows: list[dict]  # 数据行（按时间升序）
+    time_field: str | None  # 时间字段名
+    chart_type: str | None  # 推荐图表类型：candlestick / line / bar / None
+    columns: list[ColumnInfo]  # 列信息
+    total_available: int  # 可用数据总量
+
+
 # ---------------------------------------------------------------------------
 # 常量：时间字段映射表
 # ---------------------------------------------------------------------------
@@ -223,11 +262,26 @@ _TIME_FIELD_PRIORITY: list[str] = [
 # 常量：图表类型推断
 # ---------------------------------------------------------------------------
 
-# K 线表集合（展示 K 线图）
+# K 线表集合（优先级最高，展示 K 线图）
 KLINE_TABLES: set[str] = {"kline", "sector_kline"}
 
-# 资金流向子分类（展示折线图）
+# 资金流向子分类（保留向后兼容）
 MONEYFLOW_SUBCATEGORY: str = "资金流向数据"
+
+# 完整图表类型映射：subcategory → chart_type
+# 优先按 KLINE_TABLES 判断 K 线图，其次按此映射判断折线/柱状图
+CHART_TYPE_MAP: dict[str, str] = {
+    # 折线图
+    "资金流向数据": "line",
+    "两融及转融通": "line",
+    "特色数据": "line",
+    "大盘指数每日指标": "line",
+    "指数技术面因子（专业版）": "line",
+    # 柱状图
+    "打板专题数据": "bar",
+    "沪深市场每日交易统计": "bar",
+    "深圳市场每日交易情况": "bar",
+}
 
 # ---------------------------------------------------------------------------
 # 常量：导入状态颜色映射
@@ -338,24 +392,30 @@ class TusharePreviewService:
         return result
 
     @staticmethod
-    def _infer_chart_type_pure(target_table: str, subcategory: str) -> str | None:
-        """基于 target_table 和 subcategory 推断图表类型。
+    def _infer_chart_type_pure(
+        target_table: str, subcategory: str, time_field: str | None = None
+    ) -> str | None:
+        """基于 target_table、subcategory 和 time_field 推断图表类型。
 
-        规则：
-        - kline / sector_kline → candlestick（K 线图）
-        - subcategory == "资金流向数据" → line（折线图）
-        - 其余 → None（仅表格）
+        规则优先级：
+        1. target_table 在 KLINE_TABLES 中 → candlestick（K 线图）
+        2. subcategory 在 CHART_TYPE_MAP 中 → 对应类型（折线图/柱状图）
+        3. time_field 非 None → line（默认折线图）
+        4. time_field 为 None → None（不展示图表）
 
         Args:
             target_table: 目标数据表名
             subcategory: 接口子分类
+            time_field: 时间字段名，None 表示无时间字段
 
         Returns:
-            图表类型字符串或 None
+            图表类型字符串（"candlestick" / "line" / "bar"）或 None
         """
         if target_table in KLINE_TABLES:
             return "candlestick"
-        if subcategory == MONEYFLOW_SUBCATEGORY:
+        if subcategory in CHART_TYPE_MAP:
+            return CHART_TYPE_MAP[subcategory]
+        if time_field is not None:
             return "line"
         return None
 
@@ -522,6 +582,144 @@ class TusharePreviewService:
             CSS 颜色类名
         """
         return _STATUS_COLOR_MAP.get(status, "default")
+
+    @staticmethod
+    def _compute_missing_dates_pure(
+        expected_dates: set[str], actual_dates: set[str]
+    ) -> list[str]:
+        """计算缺失交易日列表（纯函数）。
+
+        对预期交易日集合与实际日期集合求差集，返回排序后的缺失日期列表。
+
+        Args:
+            expected_dates: 预期交易日集合（来自交易日历）
+            actual_dates: 实际存在的日期集合（来自目标数据表）
+
+        Returns:
+            按升序排列的缺失日期列表
+        """
+        return sorted(expected_dates - actual_dates)
+
+    @staticmethod
+    def _compute_missing_codes_pure(
+        expected_codes: set[str], actual_codes: set[str]
+    ) -> list[str]:
+        """计算缺失代码列表（纯函数）。
+
+        对预期代码集合与实际代码集合求差集，返回排序后的缺失代码列表。
+
+        Args:
+            expected_codes: 预期代码集合（来自 stock_info 表）
+            actual_codes: 实际存在的代码集合（来自目标数据表）
+
+        Returns:
+            按升序排列的缺失代码列表
+        """
+        return sorted(expected_codes - actual_codes)
+
+    @staticmethod
+    def _determine_check_type_pure(
+        time_field: str | None, has_ts_code: bool
+    ) -> str:
+        """判断校验类型（纯函数）。
+
+        根据时间字段和 ts_code 列的存在情况，判断应使用的校验策略：
+        - 有时间字段 → 时序数据校验（基于交易日历）
+        - 无时间字段但有 ts_code → 非时序数据校验（基于代码集合）
+        - 两者都没有 → 不支持校验
+
+        Args:
+            time_field: 时间字段名，None 表示无时间字段
+            has_ts_code: 目标数据表是否包含 ts_code 列
+
+        Returns:
+            校验类型字符串："time_series" / "code_based" / "unsupported"
+        """
+        if time_field is not None:
+            return "time_series"
+        if has_ts_code:
+            return "code_based"
+        return "unsupported"
+
+    @staticmethod
+    def _build_completeness_report_pure(
+        check_type: str,
+        expected: set[str],
+        actual: set[str],
+        missing: list[str],
+        time_range: dict | None = None,
+        message: str | None = None,
+    ) -> dict:
+        """构建完整性报告数据（纯函数）。
+
+        根据预期集合、实际集合和缺失列表，计算完整率并组装报告字典。
+        当预期集合为空时，完整率为 1.0（视为完整）。
+
+        Args:
+            check_type: 校验类型（"time_series" / "code_based" / "unsupported"）
+            expected: 预期项集合
+            actual: 实际项集合
+            missing: 缺失项列表
+            time_range: 校验时间范围，如 {"start": "20240101", "end": "20241231"}
+            message: 附加提示信息
+
+        Returns:
+            完整性报告字典，包含 check_type、expected_count、actual_count、
+            missing_count、completeness_rate、missing_items、time_range、message
+        """
+        expected_count = len(expected)
+        actual_count = len(actual)
+        missing_count = len(missing)
+        rate = actual_count / expected_count if expected_count > 0 else 1.0
+        return {
+            "check_type": check_type,
+            "expected_count": expected_count,
+            "actual_count": actual_count,
+            "missing_count": missing_count,
+            "completeness_rate": round(rate, 4),
+            "missing_items": missing,
+            "time_range": time_range,
+            "message": message,
+        }
+
+    @staticmethod
+    def _estimate_count_pure(
+        reltuples: float, threshold: int = 1_000_000
+    ) -> tuple[bool, int]:
+        """判断是否使用 COUNT 估算（纯函数）。
+
+        当 PostgreSQL pg_class.reltuples 值超过阈值时，使用估算值替代
+        精确 COUNT(*)，避免大表全表扫描导致的查询延迟。
+
+        Args:
+            reltuples: PostgreSQL pg_class.reltuples 值（表的估算行数）
+            threshold: 使用估算的阈值，默认 1,000,000
+
+        Returns:
+            (use_estimate, count) 元组 ——
+            use_estimate 为 True 时使用估算值 int(reltuples)，
+            为 False 时返回 0 表示需要执行精确 COUNT(*)
+        """
+        if reltuples > threshold:
+            return True, int(reltuples)
+        return False, 0
+
+    @staticmethod
+    def _clamp_chart_limit_pure(limit: int | None) -> int:
+        """图表数据 limit clamp（纯函数）。
+
+        将图表数据请求的 limit 参数限制在 [1, 500] 范围内。
+        未提供时使用默认值 250。
+
+        Args:
+            limit: 用户请求的数据条数，None 表示使用默认值
+
+        Returns:
+            clamp 后的 limit 值，范围 [1, 500]，默认 250
+        """
+        if limit is None:
+            return 250
+        return max(1, min(500, limit))
 
     # ------------------------------------------------------------------
     # 异步方法：依赖数据库
@@ -752,17 +950,6 @@ class TusharePreviewService:
         # 7. 构建 SQL 并执行查询
         SessionFactory = self._get_session(entry.storage_engine)
 
-        # 查询总记录数
-        count_sql = self._build_query_sql_pure(
-            entry.target_table,
-            time_field,
-            scope_filters,
-            data_time_start=effective_data_time_start,
-            data_time_end=effective_data_time_end,
-            ts_code=ts_code_filter,
-            count_only=True,
-        )
-
         # 查询分页数据
         data_sql = self._build_query_sql_pure(
             entry.target_table,
@@ -775,10 +962,61 @@ class TusharePreviewService:
             page_size=clamped_page_size,
         )
 
+        # 查询总记录数：优先尝试 reltuples 估算，大表跳过精确 COUNT(*)
+        # 仅在无额外过滤条件时使用 reltuples 估算
+        # （有 WHERE 条件时 reltuples 不能反映过滤后的行数）
+        has_filters = bool(
+            scope_filters
+            or (time_field and effective_data_time_start)
+            or (time_field and effective_data_time_end)
+            or ts_code_filter
+        )
+
+        count_sql = self._build_query_sql_pure(
+            entry.target_table,
+            time_field,
+            scope_filters,
+            data_time_start=effective_data_time_start,
+            data_time_end=effective_data_time_end,
+            ts_code=ts_code_filter,
+            count_only=True,
+        )
+
         async with SessionFactory() as session:
-            # 总数
-            count_result = await session.execute(text(count_sql), bind_params)
-            total = count_result.scalar() or 0
+            # 总数：尝试 reltuples 估算
+            total: int = 0
+            use_estimate = False
+
+            if not has_filters:
+                try:
+                    reltuples_sql = (
+                        "SELECT reltuples FROM pg_class "
+                        "WHERE relname = :table_name"
+                    )
+                    rel_result = await session.execute(
+                        text(reltuples_sql),
+                        {"table_name": entry.target_table},
+                    )
+                    rel_row = rel_result.scalar()
+                    if rel_row is not None:
+                        use_estimate, estimated_count = (
+                            self._estimate_count_pure(float(rel_row))
+                        )
+                        if use_estimate:
+                            total = estimated_count
+                except Exception:
+                    # reltuples 查询失败时回退到精确 COUNT
+                    logger.debug(
+                        "reltuples 查询失败，回退到精确 COUNT: %s",
+                        entry.target_table,
+                    )
+
+            # 若未使用估算，执行精确 COUNT(*)
+            if not use_estimate:
+                count_result = await session.execute(
+                    text(count_sql), bind_params
+                )
+                total = count_result.scalar() or 0
 
             # 分页数据
             data_result = await session.execute(text(data_sql), bind_params)
@@ -810,7 +1048,7 @@ class TusharePreviewService:
         # 9. 构建列信息和图表类型
         columns = self._get_column_info_pure(table_columns, entry.field_mappings)
         chart_type = self._infer_chart_type_pure(
-            entry.target_table, entry.subcategory
+            entry.target_table, entry.subcategory, time_field
         )
 
         # 10. 构建作用域提示信息
@@ -980,3 +1218,389 @@ class TusharePreviewService:
             )
             for record in records
         ]
+
+    async def check_integrity(
+        self,
+        api_name: str,
+        *,
+        data_time_start: str | None = None,
+        data_time_end: str | None = None,
+    ) -> CompletenessReport:
+        """执行数据完整性校验。
+
+        根据目标数据表的特征自动选择校验策略：
+        - 时序数据：基于 SSE 交易日历比对缺失交易日
+        - 非时序数据：基于全部 A 股代码集合比对缺失代码
+        - 不支持校验：既无时间字段也无 ts_code 列的表
+
+        Args:
+            api_name: Tushare 接口名称
+            data_time_start: 数据时间范围起始（如 "20240101"），可选
+            data_time_end: 数据时间范围结束（如 "20241231"），可选
+
+        Returns:
+            CompletenessReport 完整性校验结果
+
+        Raises:
+            ValueError: api_name 不在注册表中
+        """
+        # 1. 从注册表获取 ApiEntry
+        entry = TUSHARE_API_REGISTRY.get(api_name)
+        if entry is None:
+            raise ValueError(f"接口 {api_name} 未注册")
+
+        # 2. 获取时间字段
+        time_field = self._get_time_field_pure(entry.target_table)
+
+        # 3. 检查目标表是否包含 ts_code 列
+        SessionFactory = self._get_session(entry.storage_engine)
+        async with SessionFactory() as session:
+            col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
+            col_result = await session.execute(text(col_sql))
+            table_columns = list(col_result.keys()) if col_result.keys() else []
+
+        has_ts_code = "ts_code" in table_columns
+
+        # 4. 判断校验类型
+        check_type = self._determine_check_type_pure(time_field, has_ts_code)
+
+        # 5. 获取作用域过滤条件
+        scope_filters = self._build_scope_filter_pure(entry)
+
+        # 6. 根据校验类型执行对应逻辑
+        if check_type == "time_series":
+            return await self._check_integrity_time_series(
+                entry, time_field, scope_filters,
+                data_time_start=data_time_start,
+                data_time_end=data_time_end,
+            )
+        elif check_type == "code_based":
+            return await self._check_integrity_code_based(
+                entry, scope_filters,
+            )
+        else:
+            # 不支持校验
+            report_data = self._build_completeness_report_pure(
+                check_type="unsupported",
+                expected=set(),
+                actual=set(),
+                missing=[],
+                message="该数据表不支持完整性校验",
+            )
+            return CompletenessReport(**report_data)
+
+    async def _check_integrity_time_series(
+        self,
+        entry: ApiEntry,
+        time_field: str | None,
+        scope_filters: list[tuple[str, dict[str, Any]]],
+        *,
+        data_time_start: str | None = None,
+        data_time_end: str | None = None,
+    ) -> CompletenessReport:
+        """时序数据完整性校验（内部方法）。
+
+        基于 SSE 交易日历，比对目标表在指定时间范围内的实际日期集合，
+        计算缺失的交易日。
+
+        Args:
+            entry: API 接口注册信息
+            time_field: 时间字段名
+            scope_filters: 作用域过滤条件
+            data_time_start: 时间范围起始
+            data_time_end: 时间范围结束
+
+        Returns:
+            CompletenessReport 时序数据校验结果
+        """
+        SessionFactory = self._get_session(entry.storage_engine)
+
+        # 若未指定时间范围，查询目标表的 MIN/MAX 时间字段作为默认范围
+        if data_time_start is None or data_time_end is None:
+            where_clauses: list[str] = []
+            bind_params: dict[str, Any] = {}
+            for clause, params_dict in scope_filters:
+                where_clauses.append(clause)
+                bind_params.update(params_dict)
+
+            where_sql = ""
+            if where_clauses:
+                where_sql = " WHERE " + " AND ".join(where_clauses)
+
+            range_sql = (
+                f"SELECT MIN({time_field}), MAX({time_field}) "
+                f"FROM {entry.target_table}{where_sql}"
+            )
+            async with SessionFactory() as session:
+                range_result = await session.execute(
+                    text(range_sql), bind_params
+                )
+                range_row = range_result.one_or_none()
+                if range_row and range_row[0] is not None:
+                    if data_time_start is None:
+                        data_time_start = str(range_row[0])
+                    if data_time_end is None:
+                        data_time_end = str(range_row[1])
+
+        # 若仍无时间范围（表为空），返回空结果
+        if data_time_start is None or data_time_end is None:
+            report_data = self._build_completeness_report_pure(
+                check_type="time_series",
+                expected=set(),
+                actual=set(),
+                missing=[],
+                time_range=None,
+                message="目标数据表无数据，无法确定校验范围",
+            )
+            return CompletenessReport(**report_data)
+
+        time_range = {"start": data_time_start, "end": data_time_end}
+
+        # 查询 trade_calendar 获取 SSE 交易日集合
+        cal_sql = (
+            "SELECT cal_date FROM trade_calendar "
+            "WHERE exchange = :exchange AND is_open = :is_open "
+            "AND cal_date >= :cal_start AND cal_date <= :cal_end"
+        )
+        cal_params = {
+            "exchange": "SSE",
+            "is_open": 1,
+            "cal_start": data_time_start,
+            "cal_end": data_time_end,
+        }
+
+        async with AsyncSessionPG() as pg_session:
+            cal_result = await pg_session.execute(text(cal_sql), cal_params)
+            expected_dates: set[str] = {
+                str(row[0]) for row in cal_result.fetchall()
+            }
+
+        # 查询目标表在时间范围内的 DISTINCT 日期集合（应用 scope_filter）
+        where_clauses_data: list[str] = []
+        bind_params_data: dict[str, Any] = {}
+        for clause, params_dict in scope_filters:
+            where_clauses_data.append(clause)
+            bind_params_data.update(params_dict)
+
+        where_clauses_data.append(f"{time_field} >= :data_time_start")
+        where_clauses_data.append(f"{time_field} <= :data_time_end")
+        bind_params_data["data_time_start"] = data_time_start
+        bind_params_data["data_time_end"] = data_time_end
+
+        where_sql_data = " WHERE " + " AND ".join(where_clauses_data)
+        actual_sql = (
+            f"SELECT DISTINCT {time_field} FROM {entry.target_table}"
+            f"{where_sql_data}"
+        )
+
+        async with SessionFactory() as session:
+            actual_result = await session.execute(
+                text(actual_sql), bind_params_data
+            )
+            actual_dates: set[str] = {
+                str(row[0]) for row in actual_result.fetchall()
+            }
+
+        # 计算缺失交易日
+        missing = self._compute_missing_dates_pure(expected_dates, actual_dates)
+
+        report_data = self._build_completeness_report_pure(
+            check_type="time_series",
+            expected=expected_dates,
+            actual=actual_dates,
+            missing=missing,
+            time_range=time_range,
+        )
+        return CompletenessReport(**report_data)
+
+    async def _check_integrity_code_based(
+        self,
+        entry: ApiEntry,
+        scope_filters: list[tuple[str, dict[str, Any]]],
+    ) -> CompletenessReport:
+        """非时序数据完整性校验（内部方法）。
+
+        基于 stock_info 表的全部 A 股代码集合，比对目标表中实际存在的
+        ts_code 集合，计算缺失的代码。
+
+        Args:
+            entry: API 接口注册信息
+            scope_filters: 作用域过滤条件
+
+        Returns:
+            CompletenessReport 非时序数据校验结果
+        """
+        # 查询 stock_info 表获取全部 A 股 ts_code 集合
+        async with AsyncSessionPG() as pg_session:
+            expected_result = await pg_session.execute(
+                text("SELECT DISTINCT ts_code FROM stock_info")
+            )
+            expected_codes: set[str] = {
+                str(row[0]) for row in expected_result.fetchall()
+            }
+
+        # 查询目标表的 DISTINCT ts_code 集合（应用 scope_filter）
+        SessionFactory = self._get_session(entry.storage_engine)
+
+        where_clauses: list[str] = []
+        bind_params: dict[str, Any] = {}
+        for clause, params_dict in scope_filters:
+            where_clauses.append(clause)
+            bind_params.update(params_dict)
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        actual_sql = (
+            f"SELECT DISTINCT ts_code FROM {entry.target_table}{where_sql}"
+        )
+
+        async with SessionFactory() as session:
+            actual_result = await session.execute(
+                text(actual_sql), bind_params
+            )
+            actual_codes: set[str] = {
+                str(row[0]) for row in actual_result.fetchall()
+            }
+
+        # 计算缺失代码
+        missing = self._compute_missing_codes_pure(expected_codes, actual_codes)
+
+        report_data = self._build_completeness_report_pure(
+            check_type="code_based",
+            expected=expected_codes,
+            actual=actual_codes,
+            missing=missing,
+            message="预期集合基于全部 A 股代码，实际覆盖范围可能因接口特性而异",
+        )
+        return CompletenessReport(**report_data)
+
+    async def query_chart_data(
+        self,
+        api_name: str,
+        *,
+        limit: int = 250,
+        data_time_start: str | None = None,
+        data_time_end: str | None = None,
+    ) -> ChartDataResponse:
+        """查询图表数据（独立于表格分页）。
+
+        返回按时间字段升序排列的最近 N 条数据，用于前端图表渲染。
+        limit 范围 [1, 500]，默认 250。无时间字段时返回空响应。
+
+        Args:
+            api_name: Tushare 接口名称
+            limit: 返回数据条数，范围 [1, 500]，默认 250
+            data_time_start: 数据时间范围起始（如 "20240101"），可选
+            data_time_end: 数据时间范围结束（如 "20241231"），可选
+
+        Returns:
+            ChartDataResponse 图表数据响应
+
+        Raises:
+            ValueError: api_name 不在注册表中
+        """
+        # 1. 从注册表获取 ApiEntry
+        entry = TUSHARE_API_REGISTRY.get(api_name)
+        if entry is None:
+            raise ValueError(f"接口 {api_name} 未注册")
+
+        # 2. clamp limit 参数
+        clamped_limit = self._clamp_chart_limit_pure(limit)
+
+        # 3. 获取时间字段
+        time_field = self._get_time_field_pure(entry.target_table)
+
+        # 4. 无时间字段时返回空 ChartDataResponse
+        if time_field is None:
+            return ChartDataResponse(
+                rows=[],
+                time_field=None,
+                chart_type=None,
+                columns=[],
+                total_available=0,
+            )
+
+        # 5. 获取作用域过滤条件
+        scope_filters = self._build_scope_filter_pure(entry)
+
+        # 6. 构建 WHERE 子句和参数
+        where_clauses: list[str] = []
+        bind_params: dict[str, Any] = {}
+
+        for clause, params_dict in scope_filters:
+            where_clauses.append(clause)
+            bind_params.update(params_dict)
+
+        # 时间范围过滤
+        if data_time_start:
+            where_clauses.append(f"{time_field} >= :data_time_start")
+            bind_params["data_time_start"] = data_time_start
+        if data_time_end:
+            where_clauses.append(f"{time_field} <= :data_time_end")
+            bind_params["data_time_end"] = data_time_end
+
+        where_sql = ""
+        if where_clauses:
+            where_sql = " WHERE " + " AND ".join(where_clauses)
+
+        # 7. 构建 SQL：按时间降序取最近 N 条，查询后反转为升序
+        data_sql = (
+            f"SELECT * FROM {entry.target_table}{where_sql} "
+            f"ORDER BY {time_field} DESC LIMIT {clamped_limit}"
+        )
+
+        # 构建 COUNT SQL（用于 total_available）
+        count_sql = f"SELECT COUNT(*) FROM {entry.target_table}{where_sql}"
+
+        # 8. 执行查询
+        SessionFactory = self._get_session(entry.storage_engine)
+
+        async with SessionFactory() as session:
+            # 查询总可用数据量
+            count_result = await session.execute(text(count_sql), bind_params)
+            total_available = count_result.scalar() or 0
+
+            # 查询图表数据
+            data_result = await session.execute(text(data_sql), bind_params)
+            rows_raw = data_result.mappings().all()
+            rows = [dict(r) for r in rows_raw]
+
+            # 获取列名
+            if rows_raw:
+                table_columns = list(rows_raw[0].keys())
+            else:
+                col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
+                col_result = await session.execute(text(col_sql))
+                table_columns = (
+                    list(col_result.keys()) if col_result.keys() else []
+                )
+
+        # 9. 序列化行数据（处理 datetime 等不可 JSON 序列化的类型）
+        serialized_rows: list[dict[str, Any]] = []
+        for row in rows:
+            serialized: dict[str, Any] = {}
+            for k, v in row.items():
+                if isinstance(v, datetime):
+                    serialized[k] = v.isoformat()
+                else:
+                    serialized[k] = v
+            serialized_rows.append(serialized)
+
+        # 10. 反转为升序（图表需要时间升序）
+        serialized_rows.reverse()
+
+        # 11. 构建列信息和图表类型
+        columns = self._get_column_info_pure(table_columns, entry.field_mappings)
+        chart_type = self._infer_chart_type_pure(
+            entry.target_table, entry.subcategory, time_field
+        )
+
+        return ChartDataResponse(
+            rows=serialized_rows,
+            time_field=time_field,
+            chart_type=chart_type,
+            columns=columns,
+            total_available=total_available,
+        )

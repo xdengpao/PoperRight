@@ -27,7 +27,7 @@
         <tbody>
           <tr v-for="(row, idx) in rows" :key="idx">
             <td v-for="col in columns" :key="col.name" :class="cellClass(col.type)">
-              {{ formatCell(row[col.name], col.type) }}
+              {{ formatCell(row[col.name], col.type, col.name) }}
             </td>
           </tr>
         </tbody>
@@ -100,6 +100,86 @@
   </div>
 </template>
 
+<script lang="ts">
+/**
+ * PreviewTable 导出的纯函数与常量
+ *
+ * 数值精度规则映射、字段精度获取函数、单元格格式化函数。
+ * 独立于组件实例，便于单元测试和属性测试导入。
+ *
+ * 需求: 6.1-6.8, 7.1-7.4
+ */
+
+/**
+ * 数值精度规则映射
+ * 按优先级定义字段名正则 → 小数位数映射
+ */
+export const PRECISION_RULES: Array<{ pattern: RegExp; decimals: number }> = [
+  // 成交量类（0 位小数）— 优先匹配
+  { pattern: /^(vol|volume)$/i, decimals: 0 },
+  // 价格类（2 位小数）
+  { pattern: /(open|high|low|close|price|avg_price|amount)/i, decimals: 2 },
+  // 涨跌幅类（2 位小数）
+  { pattern: /(pct_chg|change)/i, decimals: 2 },
+  // 换手率类（2 位小数）
+  { pattern: /turnover_rate/i, decimals: 2 },
+  // 市值类（2 位小数）
+  { pattern: /(total_mv|circ_mv|market_cap)/i, decimals: 2 },
+  // 市盈率/市净率类（2 位小数）
+  { pattern: /^(pe|pb|pe_ttm|ps|ps_ttm)(_|$)/i, decimals: 2 },
+]
+
+/** 默认精度（未匹配任何规则时使用） */
+export const DEFAULT_PRECISION = 4
+
+/**
+ * 根据字段名获取显示精度（纯函数）
+ *
+ * 遍历 PRECISION_RULES，返回第一个匹配的 decimals，
+ * 无匹配返回 DEFAULT_PRECISION。
+ */
+export function getFieldPrecision(fieldName: string): number {
+  for (const rule of PRECISION_RULES) {
+    if (rule.pattern.test(fieldName)) {
+      return rule.decimals
+    }
+  }
+  return DEFAULT_PRECISION
+}
+
+/**
+ * 格式化单元格显示值（纯函数）
+ *
+ * - null/undefined → '—'
+ * - 数值型 + 整数 → 直接显示整数（大数值添加千分位）
+ * - 数值型 + 浮点数 → 按字段精度 toFixed，大数值添加千分位
+ * - 其他 → String(value)
+ */
+export function formatCell(value: unknown, type: string, fieldName: string): string {
+  if (value === null || value === undefined) return '—'
+  if (type === 'number' && typeof value === 'number') {
+    // 整数值直接显示为整数（不添加小数位）
+    if (Number.isInteger(value)) {
+      if (Math.abs(value) >= 10000) {
+        return value.toLocaleString('en-US', { useGrouping: true, maximumFractionDigits: 0 })
+      }
+      return String(value)
+    }
+    // 浮点数按字段精度格式化
+    const precision = getFieldPrecision(fieldName)
+    const formatted = value.toFixed(precision)
+    // 大数值（|value| >= 10000）添加千分位分隔符
+    if (Math.abs(value) >= 10000) {
+      const [intPart, decPart] = formatted.split('.')
+      const withCommas = Number(intPart).toLocaleString('en-US')
+      return decPart ? `${withCommas}.${decPart}` : withCommas
+    }
+    return formatted
+  }
+  return String(value)
+}
+</script>
+
 <script setup lang="ts">
 /**
  * PreviewTable - 数据预览表格组件
@@ -107,7 +187,7 @@
  * 根据 columns 动态生成表头，支持分页控件（20/50/100 条切换、页码导航）。
  * 表格上方显示总记录数，空数据时显示「暂无数据」提示。
  *
- * 需求: 3.1-3.5
+ * 需求: 3.1-3.5, 6.1-6.8, 7.1-7.4
  */
 import { computed } from 'vue'
 import type { ColumnInfo } from '@/stores/tusharePreview'
@@ -182,16 +262,6 @@ function cellClass(type: string): string {
   if (type === 'number') return 'cell-number'
   if (type === 'date' || type === 'datetime') return 'cell-date'
   return ''
-}
-
-function formatCell(value: unknown, type: string): string {
-  if (value === null || value === undefined) return '—'
-  if (type === 'number' && typeof value === 'number') {
-    // 整数直接显示，浮点数保留合理精度
-    if (Number.isInteger(value)) return value.toLocaleString()
-    return value.toLocaleString(undefined, { maximumFractionDigits: 4 })
-  }
-  return String(value)
 }
 </script>
 

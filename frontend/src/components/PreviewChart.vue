@@ -1,5 +1,22 @@
 <template>
   <div v-if="shouldShow" class="preview-chart">
+    <!-- 列选择器：仅折线图/柱状图时显示 -->
+    <div v-if="showColumnSelector" class="column-selector">
+      <span class="column-selector-label">展示列：</span>
+      <label
+        v-for="col in numericColumns"
+        :key="col.name"
+        class="column-selector-item"
+      >
+        <input
+          type="checkbox"
+          :value="col.name"
+          :checked="activeColumns.includes(col.name)"
+          @change="toggleColumn(col.name)"
+        />
+        <span class="column-selector-text">{{ col.label }}</span>
+      </label>
+    </div>
     <v-chart
       :option="chartOption"
       :autoresize="true"
@@ -21,8 +38,9 @@
  *
  * 对应需求：4.1-4.4
  */
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import type { ColumnInfo } from '@/stores/tusharePreview'
+import { getDefaultSelectedColumns } from '@/stores/tusharePreview'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, LineChart, BarChart } from 'echarts/charts'
@@ -52,6 +70,11 @@ const props = defineProps<{
   rows: Record<string, unknown>[]
   timeField: string | null
   columns: ColumnInfo[]
+  selectedColumns?: string[]
+}>()
+
+const emit = defineEmits<{
+  'update:selectedColumns': [value: string[]]
 }>()
 
 // ─── K 线图所需列名 ──────────────────────────────────────────────────────────
@@ -66,12 +89,60 @@ const hasCandlestickColumns = computed(() => {
   return CANDLESTICK_FIELDS.every((f) => colNames.has(f))
 })
 
-/** 获取数值类型的列（用于折线图） */
+/** 获取数值类型的列（用于折线图/柱状图） */
 const numericColumns = computed(() => {
   return props.columns.filter(
     (c) => c.type === 'number' && c.name !== props.timeField,
   )
 })
+
+/** 是否显示列选择器（仅折线图/柱状图） */
+const showColumnSelector = computed(() => {
+  return (props.chartType === 'line' || props.chartType === 'bar') && numericColumns.value.length > 0
+})
+
+/** 当前生效的选中列名列表 */
+const activeColumns = computed(() => {
+  if (props.selectedColumns && props.selectedColumns.length > 0) {
+    // 过滤掉不在当前数值列中的列名
+    const validNames = new Set(numericColumns.value.map((c) => c.name))
+    const filtered = props.selectedColumns.filter((name) => validNames.has(name))
+    return filtered.length > 0 ? filtered : getDefaultSelectedColumns(numericColumns.value.map((c) => c.name))
+  }
+  return getDefaultSelectedColumns(numericColumns.value.map((c) => c.name))
+})
+
+/** 用于折线图/柱状图的列（根据 activeColumns 过滤） */
+const chartColumns = computed(() => {
+  const active = new Set(activeColumns.value)
+  return numericColumns.value.filter((c) => active.has(c.name))
+})
+
+/** 当数值列变化时，自动发出默认选中列 */
+watch(
+  () => numericColumns.value.map((c) => c.name).join(','),
+  () => {
+    if (props.chartType === 'line' || props.chartType === 'bar') {
+      const defaults = getDefaultSelectedColumns(numericColumns.value.map((c) => c.name))
+      emit('update:selectedColumns', defaults)
+    }
+  },
+)
+
+/** 切换列选中状态 */
+function toggleColumn(colName: string) {
+  const current = [...activeColumns.value]
+  const idx = current.indexOf(colName)
+  if (idx >= 0) {
+    // 至少保留一列
+    if (current.length > 1) {
+      current.splice(idx, 1)
+    }
+  } else {
+    current.push(colName)
+  }
+  emit('update:selectedColumns', current)
+}
 
 /** 是否应该显示图表 */
 const shouldShow = computed(() => {
@@ -237,7 +308,7 @@ function buildCandlestickOption() {
 /** 构建折线图配置 */
 function buildLineOption() {
   const times = timeData.value
-  const cols = numericColumns.value
+  const cols = chartColumns.value
 
   // 颜色列表（暗色主题友好）
   const colors = ['#58a6ff', '#3fb950', '#f0883e', '#bc8cff', '#f85149', '#79c0ff', '#56d364']
@@ -285,7 +356,7 @@ function buildLineOption() {
 /** 构建柱状图配置 */
 function buildBarOption() {
   const times = timeData.value
-  const cols = numericColumns.value
+  const cols = chartColumns.value
 
   const colors = ['#58a6ff', '#3fb950', '#f0883e', '#bc8cff', '#f85149', '#79c0ff', '#56d364']
 
@@ -334,6 +405,40 @@ function buildBarOption() {
   border: 1px solid #21262d;
   border-radius: 6px;
   padding: 12px;
+}
+
+.column-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #21262d;
+}
+
+.column-selector-label {
+  color: #8b949e;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.column-selector-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.column-selector-item input[type="checkbox"] {
+  accent-color: #58a6ff;
+  cursor: pointer;
+}
+
+.column-selector-text {
+  color: #c9d1d9;
+  font-size: 12px;
 }
 
 .preview-chart-echart {

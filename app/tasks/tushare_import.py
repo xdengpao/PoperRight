@@ -23,11 +23,16 @@ import time
 from datetime import datetime
 from typing import Any
 
+import warnings
+
 from app.core.celery_app import celery_app
+from app.core.config import settings
+from app.services.data_engine.date_batch_splitter import DateBatchSplitter
 from app.services.data_engine.tushare_adapter import TushareAdapter, TushareAPIError
 from app.services.data_engine.tushare_registry import (
     ApiEntry,
     CodeFormat,
+    ParamType,
     RateLimitGroup,
     StorageEngine,
     get_entry,
@@ -42,12 +47,17 @@ logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 50
 
-# 频率限制（秒）：按 RateLimitGroup 分组
-_RATE_LIMIT_MAP: dict[RateLimitGroup, float] = {
-    RateLimitGroup.KLINE: 0.18,
-    RateLimitGroup.FUNDAMENTALS: 0.40,
-    RateLimitGroup.MONEY_FLOW: 0.30,
-}
+# 频率限制（秒）：按 RateLimitGroup 分组，从配置读取
+def _build_rate_limit_map() -> dict[RateLimitGroup, float]:
+    """从 settings 构建频率限制映射，支持运行时通过环境变量调整。"""
+    return {
+        RateLimitGroup.KLINE: settings.rate_limit_kline,
+        RateLimitGroup.FUNDAMENTALS: settings.rate_limit_fundamentals,
+        RateLimitGroup.MONEY_FLOW: settings.rate_limit_money_flow,
+    }
+
+
+_RATE_LIMIT_MAP: dict[RateLimitGroup, float] = _build_rate_limit_map()
 
 # Redis 键前缀和 TTL
 _PROGRESS_KEY_PREFIX = "tushare:import:"
@@ -58,6 +68,85 @@ _PROGRESS_TTL = 86400  # 24h
 # 网络超时重试配置
 _MAX_NETWORK_RETRIES = 3
 _RATE_LIMIT_WAIT = 60  # 频率限制等待秒数
+
+
+# ---------------------------------------------------------------------------
+# 截断检测辅助函数
+# ---------------------------------------------------------------------------
+
+# 连续截断告警阈值
+_CONSECUTIVE_TRUNCATION_THRESHOLD = 3
+
+
+def check_chunk_config(
+    date_chunk_days: int,
+    max_rows: int,
+    estimated_daily_rows: int | None,
+    api_name: str,
+) -> bool:
+    """预检查步长配置合理性。
+
+    根据接口的 date_chunk_days 和 max_rows 配置，验证步长是否可能导致数据截断。
+    如果 estimated_daily_rows 可用，检查 date_chunk_days * estimated_daily_rows 是否超过 max_rows。
+
+    Args:
+        date_chunk_days: 日期分批步长（天数）
+        max_rows: 单次 API 返回行数上限
+        estimated_daily_rows: 预估每日行数（从 extra_config 读取，可能为 None）
+        api_name: 接口名称（用于日志）
+
+    Returns:
+        True 表示配置合理，False 表示步长可能过大
+
+    对应需求：6.1
+    """
+    if estimated_daily_rows is None or estimated_daily_rows <= 0:
+        # 无预估数据，无法判断，视为合理
+        return True
+
+    estimated_total = date_chunk_days * estimated_daily_rows
+    if estimated_total >= max_rows:
+        logger.warning(
+            "接口 %s 步长配置可能过大：date_chunk_days=%d × estimated_daily_rows=%d = %d >= max_rows=%d，"
+            "建议减小 date_chunk_days",
+            api_name, date_chunk_days, estimated_daily_rows, estimated_total, max_rows,
+        )
+        return False
+
+    return True
+
+
+def check_truncation(
+    row_count: int,
+    max_rows: int,
+    api_name: str,
+    chunk_start: str,
+    chunk_end: str,
+) -> bool:
+    """检测单个子区间是否被截断。
+
+    当 API 返回行数达到或超过 max_rows 阈值时，判定为数据可能被截断。
+
+    Args:
+        row_count: 实际返回行数
+        max_rows: 单次 API 返回行数上限
+        api_name: 接口名称（用于日志）
+        chunk_start: 子区间起始日期 YYYYMMDD
+        chunk_end: 子区间结束日期 YYYYMMDD
+
+    Returns:
+        True 表示检测到截断
+
+    对应需求：6.2
+    """
+    if row_count >= max_rows:
+        logger.warning(
+            "子区间 %s~%s 返回 %d 行（达到上限，数据可能被截断），api=%s, max_rows=%d",
+            chunk_start, chunk_end, row_count, api_name, max_rows,
+        )
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +224,81 @@ def run_import(
 
 
 # ---------------------------------------------------------------------------
+# 分批策略路由（纯函数，可独立测试）
+# ---------------------------------------------------------------------------
+
+def determine_batch_strategy(
+    entry: ApiEntry,
+    params: dict,
+) -> str:
+    """根据注册表配置和用户参数，确定分批策略。
+
+    纯函数，不依赖外部状态，便于属性测试验证路由优先级。
+
+    优先级路由：
+    1. batch_by_code → "by_code"（若同时 batch_by_date 且有日期范围 → "by_code_and_date"）
+    2. INDEX_CODE 且未指定 ts_code → "by_index"
+    3. batch_by_date 且有日期范围 → "by_date"
+    4. 兜底：未声明 batch_by_date 但运行时检测到 DATE_RANGE 参数且有日期范围 → "by_date_fallback"
+    5. 以上均不满足 → "single"
+
+    Args:
+        entry: 接口注册信息
+        params: 用户传入的导入参数
+
+    Returns:
+        策略标识字符串：
+        "by_code", "by_code_and_date", "by_index", "by_date", "by_date_fallback", "single"
+
+    对应需求：4.1, 4.2
+    """
+    has_date_params = bool(params.get("start_date") and params.get("end_date"))
+    has_ts_code = bool(params.get("ts_code"))
+
+    # 优先级 1：batch_by_code
+    use_batch_code = entry.batch_by_code
+    if not use_batch_code and not has_ts_code:
+        # 接口支持 stock_code 参数但用户未传 ts_code → 自动按全市场分批
+        has_stock_param = (
+            ParamType.STOCK_CODE in entry.required_params
+            or ParamType.STOCK_CODE in entry.optional_params
+        )
+        if has_stock_param:
+            use_batch_code = True
+
+    if use_batch_code:
+        # 双重分批：同时 batch_by_date 且有日期范围
+        if entry.batch_by_date and has_date_params:
+            return "by_code_and_date"
+        return "by_code"
+
+    # 优先级 2：INDEX_CODE 且未指定 ts_code
+    if not has_ts_code:
+        has_index_param = (
+            ParamType.INDEX_CODE in entry.required_params
+            or ParamType.INDEX_CODE in entry.optional_params
+        )
+        if has_index_param:
+            return "by_index"
+
+    # 优先级 3：batch_by_date 声明 + 有日期范围
+    if entry.batch_by_date and has_date_params:
+        return "by_date"
+
+    # 优先级 4：兜底 — 未声明 batch_by_date 但运行时检测到 DATE_RANGE 参数且有日期范围
+    if not entry.batch_by_date and has_date_params:
+        has_date_range = (
+            ParamType.DATE_RANGE in entry.required_params
+            or ParamType.DATE_RANGE in entry.optional_params
+        )
+        if has_date_range:
+            return "by_date_fallback"
+
+    # 优先级 5：单次调用
+    return "single"
+
+
+# ---------------------------------------------------------------------------
 # 核心处理逻辑
 # ---------------------------------------------------------------------------
 
@@ -149,9 +313,11 @@ async def _process_import(
 
     1. 从 API_Registry 获取接口元数据
     2. 创建 TushareAdapter
-    3. 如果 batch_by_code=True，按代码分批处理
+    3. 通过 determine_batch_strategy() 确定分批策略
     4. 每批：检查停止信号 → 调用 API → 字段映射 → 代码转换 → 写入 DB → 更新进度
     5. 完成后更新 tushare_import_log
+
+    对应需求：4.1, 4.2, 5.3
     """
     entry = get_entry(api_name)
     if entry is None:
@@ -167,49 +333,47 @@ async def _process_import(
     total_records = 0
 
     try:
-        # 判断是否需要分批处理：
-        # 1. 注册表明确标记 batch_by_code=True
-        # 2. 接口支持 stock_code 参数但用户未传 ts_code → 自动按全市场分批
-        # 3. 接口支持 index_code 参数但用户未传 ts_code → 自动按全部指数分批
-        use_batch = entry.batch_by_code
-        use_index_batch = False
-        if not use_batch and not params.get("ts_code"):
-            from app.services.data_engine.tushare_registry import ParamType
-            has_stock_param = (
-                ParamType.STOCK_CODE in entry.required_params
-                or ParamType.STOCK_CODE in entry.optional_params
-            )
-            has_index_param = (
-                ParamType.INDEX_CODE in entry.required_params
-                or ParamType.INDEX_CODE in entry.optional_params
-            )
-            if has_stock_param:
-                use_batch = True
-            elif has_index_param:
-                use_index_batch = True
+        # 使用纯函数确定分批策略
+        strategy = determine_batch_strategy(entry, params)
 
-        if use_batch:
+        if strategy == "by_code" or strategy == "by_code_and_date":
             result = await _process_batched(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
-        elif use_index_batch:
+        elif strategy == "by_index":
             result = await _process_batched_index(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
+        elif strategy == "by_date":
+            result = await _process_batched_by_date(
+                entry, adapter, params, task_id, log_id, rate_delay,
+            )
+        elif strategy == "by_date_fallback":
+            # 兜底：未声明 batch_by_date 但运行时检测到 DATE_RANGE + 日期参数
+            logger.warning(
+                "接口 %s 未声明 batch_by_date=True 但检测到 DATE_RANGE 参数和日期范围，"
+                "使用默认步长 %d 天进行兜底日期分批。建议在注册表中显式配置 batch_by_date。",
+                api_name, _DATE_BATCH_DAYS,
+            )
+            result = await _process_batched_by_date(
+                entry, adapter, params, task_id, log_id, rate_delay,
+            )
         else:
+            # strategy == "single"
             result = await _process_single(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
 
         total_records = result.get("record_count", 0)
         status = result.get("status", "completed")
+        batch_stats = result.get("batch_stats")
 
         if status == "stopped":
-            await _finalize_log(log_id, "stopped", total_records)
+            await _finalize_log(log_id, "stopped", total_records, batch_stats=batch_stats)
             await _update_progress(task_id, status="stopped",
                                    total=total_records, completed=total_records)
         else:
-            await _finalize_log(log_id, "completed", total_records)
+            await _finalize_log(log_id, "completed", total_records, batch_stats=batch_stats)
             await _update_progress(task_id, status="completed",
                                    total=total_records, completed=total_records)
 
@@ -243,7 +407,7 @@ async def _process_single(
     """非分批模式：一次 API 调用获取全部数据。"""
     # 设置初始进度（单次调用视为 1 步）
     await _update_progress(task_id, status="running", total=1, completed=0,
-                           current_item=entry.api_name)
+                           current_item=entry.api_name, batch_mode="single")
 
     # 支持 extra_config 中的 tushare_api_name（实际 Tushare 接口名）和 default_params（默认参数）
     actual_api_name = entry.extra_config.get("tushare_api_name", entry.api_name)
@@ -278,13 +442,241 @@ async def _process_single(
         await _write_to_postgresql(converted_rows, entry)
 
     await _update_progress(task_id, status="running", completed=1,
-                           total=1)
+                           total=1, batch_mode="single")
 
     return {"status": "completed", "record_count": len(converted_rows)}
 
 
 # ---------------------------------------------------------------------------
-# 分批处理
+# 按日期分批处理
+# ---------------------------------------------------------------------------
+
+# Tushare 单次返回行数上限（超过此数量说明数据被截断）
+_TUSHARE_MAX_ROWS = 3000
+
+# 日期分批默认步长（天）
+_DATE_BATCH_DAYS = 30
+
+
+def _generate_date_chunks(
+    start_date: str, end_date: str, chunk_days: int = _DATE_BATCH_DAYS,
+) -> list[tuple[str, str]]:
+    """将日期范围拆分为多个子区间（YYYYMMDD 格式）。
+
+    .. deprecated::
+        请使用 ``DateBatchSplitter.split()`` 替代。本函数保留仅为向后兼容，
+        内部已委托给 DateBatchSplitter。
+
+    Args:
+        start_date: 起始日期 YYYYMMDD
+        end_date: 结束日期 YYYYMMDD
+        chunk_days: 每个子区间的天数
+
+    Returns:
+        [(chunk_start, chunk_end), ...] 列表
+    """
+    warnings.warn(
+        "_generate_date_chunks 已弃用，请使用 DateBatchSplitter.split() 替代",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return DateBatchSplitter.split(start_date, end_date, chunk_days)
+
+
+async def _process_batched_by_date(
+    entry: ApiEntry,
+    adapter: TushareAdapter,
+    params: dict,
+    task_id: str,
+    log_id: int,
+    rate_delay: float,
+) -> dict:
+    """按日期分批模式：将大日期范围拆分为小区间逐批调用 API。
+
+    使用 DateBatchSplitter 进行日期拆分，步长取自注册表 entry.date_chunk_days。
+    截断阈值取自 entry.extra_config.get("max_rows", 3000)。
+
+    适用于带 DATE_RANGE 参数且单次调用可能超过 Tushare 行数上限的接口
+    （如 dc_daily、ths_daily、tdx_daily、top_list 等）。
+
+    对应需求：3.1, 3.2, 4.3, 4.4
+    """
+    start_date = params.get("start_date", "")
+    end_date = params.get("end_date", "")
+    if not start_date or not end_date:
+        # 没有日期范围，退回单次调用
+        return await _process_single(
+            entry, adapter, params, task_id, log_id, rate_delay,
+        )
+
+    # 使用注册表配置的步长（兜底策略使用默认值 30）
+    chunk_days = entry.date_chunk_days if entry.date_chunk_days > 0 else _DATE_BATCH_DAYS
+    chunks = DateBatchSplitter.split(start_date, end_date, chunk_days)
+
+    # 使用注册表配置的 max_rows 阈值（默认 3000）
+    max_rows = entry.extra_config.get("max_rows", _TUSHARE_MAX_ROWS)
+
+    # 预检查步长配置合理性（对应需求 6.1）
+    estimated_daily_rows = entry.extra_config.get("estimated_daily_rows")
+    check_chunk_config(chunk_days, max_rows, estimated_daily_rows, entry.api_name)
+
+    total = len(chunks)
+    completed = 0
+    total_records = 0
+    success_chunks = 0
+    consecutive_truncation_count = 0
+    truncation_error_logged = False
+    truncation_warnings: list[dict] = []
+    needs_smaller_chunk = False
+
+    await _update_progress(
+        task_id, status="running", total=total, completed=0,
+        current_item=f"{start_date}-{end_date}",
+        batch_mode="by_date",
+    )
+
+    actual_api_name = entry.extra_config.get("tushare_api_name", entry.api_name)
+    default_params = entry.extra_config.get("default_params", {})
+    inject_fields = entry.extra_config.get("inject_fields")
+    use_trade_date_loop = entry.extra_config.get("use_trade_date_loop", False)
+
+    for chunk_start, chunk_end in chunks:
+        # 检查停止信号
+        if await _check_stop_signal(task_id):
+            logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
+            # 构建已完成部分的分批统计
+            batch_stats: dict = {
+                "batch_mode": "by_date",
+                "total_chunks": total,
+                "success_chunks": success_chunks,
+                "truncation_count": len(truncation_warnings),
+                "truncation_details": [
+                    {
+                        "chunk": f"{w['chunk_start']}-{w['chunk_end']}",
+                        "rows": w["row_count"],
+                        "max_rows": w["max_rows"],
+                    }
+                    for w in truncation_warnings[:10]
+                ],
+            }
+            return {"status": "stopped", "record_count": total_records, "batch_stats": batch_stats}
+
+        # 构建本次 API 调用参数
+        call_params = {**default_params, **params}
+        call_params["start_date"] = chunk_start
+        call_params["end_date"] = chunk_end
+
+        # 处理 use_trade_date_loop 模式：将 start_date 转为 trade_date，移除日期范围参数
+        if use_trade_date_loop:
+            call_params["trade_date"] = chunk_start
+            call_params.pop("start_date", None)
+            call_params.pop("end_date", None)
+
+        try:
+            data = await _call_api_with_retry(
+                adapter, actual_api_name, call_params, entry,
+            )
+            rows = TushareAdapter._rows_from_data(data)
+
+            if rows:
+                if inject_fields:
+                    for row in rows:
+                        row.update(inject_fields)
+
+                mapped_rows = _apply_field_mappings(rows, entry)
+                converted_rows = _convert_codes(mapped_rows, entry)
+
+                try:
+                    if entry.storage_engine == StorageEngine.TS:
+                        await _write_to_timescaledb(converted_rows, entry)
+                    else:
+                        await _write_to_postgresql(converted_rows, entry)
+                    total_records += len(converted_rows)
+                    success_chunks += 1
+                except Exception as db_exc:
+                    logger.error(
+                        "DB 写入失败 api=%s chunk=%s~%s: %s",
+                        entry.api_name, chunk_start, chunk_end, db_exc,
+                    )
+
+                # 运行时截断检测（对应需求 6.2）
+                truncated = check_truncation(
+                    len(rows), max_rows, entry.api_name, chunk_start, chunk_end,
+                )
+                if truncated:
+                    consecutive_truncation_count += 1
+                    # 记录截断警告到列表（对应需求 6.3, 7.3）
+                    truncation_warnings.append({
+                        "chunk_start": chunk_start,
+                        "chunk_end": chunk_end,
+                        "row_count": len(rows),
+                        "max_rows": max_rows,
+                    })
+                    # 连续截断检测（对应需求 6.4）
+                    if (
+                        consecutive_truncation_count >= _CONSECUTIVE_TRUNCATION_THRESHOLD
+                        and not truncation_error_logged
+                    ):
+                        logger.error(
+                            "接口 %s 连续 %d 个子区间数据被截断，建议减小 date_chunk_days（当前=%d）",
+                            entry.api_name, consecutive_truncation_count, chunk_days,
+                        )
+                        truncation_error_logged = True
+                        needs_smaller_chunk = True
+                else:
+                    consecutive_truncation_count = 0
+            else:
+                # 无数据返回，重置连续截断计数
+                consecutive_truncation_count = 0
+                success_chunks += 1
+
+        except TushareAPIError as api_exc:
+            if api_exc.code and api_exc.code == -2001:
+                raise
+            logger.error(
+                "API 调用失败 api=%s chunk=%s~%s: %s",
+                entry.api_name, chunk_start, chunk_end, api_exc,
+            )
+        except Exception as exc:
+            logger.error(
+                "处理失败 api=%s chunk=%s~%s: %s",
+                entry.api_name, chunk_start, chunk_end, exc,
+            )
+
+        completed += 1
+        await _update_progress(
+            task_id, status="running",
+            total=total, completed=completed,
+            current_item=f"{chunk_start}-{chunk_end}",
+            batch_mode="by_date",
+            truncation_warnings=truncation_warnings,
+            needs_smaller_chunk=needs_smaller_chunk,
+        )
+
+        # 频率限制
+        time.sleep(rate_delay)
+
+    # 构建分批统计信息（对应需求 8.1, 8.2）
+    batch_stats: dict = {
+        "batch_mode": "by_date",
+        "total_chunks": total,
+        "success_chunks": success_chunks,
+        "truncation_count": len(truncation_warnings),
+        "truncation_details": [
+            {
+                "chunk": f"{w['chunk_start']}-{w['chunk_end']}",
+                "rows": w["row_count"],
+                "max_rows": w["max_rows"],
+            }
+            for w in truncation_warnings[:10]
+        ],
+    }
+
+    return {"status": "completed", "record_count": total_records, "batch_stats": batch_stats}
+
+
+# ---------------------------------------------------------------------------
+# 按代码分批处理
 # ---------------------------------------------------------------------------
 
 async def _process_batched(
@@ -295,83 +687,184 @@ async def _process_batched(
     log_id: int,
     rate_delay: float,
 ) -> dict:
-    """分批模式：按股票代码列表分批调用 API。"""
+    """分批模式：按股票代码列表分批调用 API。
+
+    支持双重分批：当接口同时标记 batch_by_date=True 且用户提供了日期范围参数时，
+    在每个 ts_code 的调用中额外按日期子区间逐批调用，避免单只股票长日期范围数据截断。
+
+    对应需求：1.8, 4.1
+    """
     # 获取股票列表
     stock_codes = await _get_stock_list()
     if not stock_codes:
         return {"status": "completed", "record_count": 0}
 
-    total = len(stock_codes)
+    # 判断是否需要双重分批：batch_by_date=True 且用户提供了 start_date + end_date
+    has_date_params = bool(params.get("start_date") and params.get("end_date"))
+    dual_batch = entry.batch_by_date and has_date_params
+
+    # 双重分批时，预先拆分日期区间
+    date_chunks: list[tuple[str, str]] = []
+    if dual_batch:
+        chunk_days = entry.date_chunk_days if entry.date_chunk_days > 0 else _DATE_BATCH_DAYS
+        date_chunks = DateBatchSplitter.split(
+            params["start_date"], params["end_date"], chunk_days,
+        )
+
+    # 计算总进度：双重分批时 total = 股票数 × 日期子区间数，否则 total = 股票数
+    num_codes = len(stock_codes)
+    num_date_chunks = len(date_chunks) if dual_batch else 1
+    total = num_codes * num_date_chunks
     completed = 0
     total_records = 0
 
-    await _update_progress(task_id, status="running", total=total, completed=0)
+    # 截断检测阈值（双重分批时使用）
+    max_rows = entry.extra_config.get("max_rows", _TUSHARE_MAX_ROWS)
+
+    # 确定 batch_mode 标识（对应需求 7.4）
+    batch_mode = "by_code_and_date" if dual_batch else "by_code"
+
+    await _update_progress(task_id, status="running", total=total, completed=0,
+                           batch_mode=batch_mode)
+
+    inject_fields = entry.extra_config.get("inject_fields")
 
     # 按 BATCH_SIZE 分批
-    for batch_start in range(0, total, BATCH_SIZE):
+    for batch_start in range(0, num_codes, BATCH_SIZE):
         batch = stock_codes[batch_start: batch_start + BATCH_SIZE]
 
         for ts_code in batch:
-            # 检查停止信号
-            if await _check_stop_signal(task_id):
-                logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
-                return {"status": "stopped", "record_count": total_records}
+            if dual_batch:
+                # 双重分批：对当前 ts_code 按日期子区间逐批调用
+                for chunk_start, chunk_end in date_chunks:
+                    # 检查停止信号
+                    if await _check_stop_signal(task_id):
+                        logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
+                        return {"status": "stopped", "record_count": total_records}
 
-            # 构建本次 API 调用参数
-            call_params = {**params, "ts_code": ts_code}
-
-            try:
-                data = await _call_api_with_retry(
-                    adapter, entry.api_name, call_params, entry,
-                )
-                rows = TushareAdapter._rows_from_data(data)
-
-                if rows:
-                    # 支持 extra_config.inject_fields：向每行注入固定字段值
-                    inject_fields = entry.extra_config.get("inject_fields")
-                    if inject_fields:
-                        for row in rows:
-                            row.update(inject_fields)
-
-                    mapped_rows = _apply_field_mappings(rows, entry)
-                    converted_rows = _convert_codes(mapped_rows, entry)
+                    # 构建本次 API 调用参数（ts_code + 日期子区间）
+                    call_params = {**params, "ts_code": ts_code,
+                                   "start_date": chunk_start, "end_date": chunk_end}
 
                     try:
-                        if entry.storage_engine == StorageEngine.TS:
-                            await _write_to_timescaledb(converted_rows, entry)
-                        else:
-                            await _write_to_postgresql(converted_rows, entry)
-                        total_records += len(converted_rows)
-                    except Exception as db_exc:
-                        # 数据库写入失败：回滚当前批次，继续下一批
+                        data = await _call_api_with_retry(
+                            adapter, entry.api_name, call_params, entry,
+                        )
+                        rows = TushareAdapter._rows_from_data(data)
+
+                        if rows:
+                            if inject_fields:
+                                for row in rows:
+                                    row.update(inject_fields)
+
+                            mapped_rows = _apply_field_mappings(rows, entry)
+                            converted_rows = _convert_codes(mapped_rows, entry)
+
+                            try:
+                                if entry.storage_engine == StorageEngine.TS:
+                                    await _write_to_timescaledb(converted_rows, entry)
+                                else:
+                                    await _write_to_postgresql(converted_rows, entry)
+                                total_records += len(converted_rows)
+                            except Exception as db_exc:
+                                logger.error(
+                                    "DB 写入失败 api=%s ts_code=%s chunk=%s~%s: %s",
+                                    entry.api_name, ts_code, chunk_start, chunk_end, db_exc,
+                                )
+
+                            # 截断检测：单个子区间返回行数达到上限
+                            if len(rows) >= max_rows:
+                                logger.warning(
+                                    "双重分批子区间 ts_code=%s %s~%s 返回 %d 行（可能被截断），"
+                                    "api=%s, max_rows=%d",
+                                    ts_code, chunk_start, chunk_end, len(rows),
+                                    entry.api_name, max_rows,
+                                )
+
+                    except TushareAPIError as api_exc:
+                        if api_exc.code and api_exc.code == -2001:
+                            raise  # Token 无效，终止整个任务
                         logger.error(
-                            "DB 写入失败 api=%s ts_code=%s: %s",
-                            entry.api_name, ts_code, db_exc,
+                            "API 调用失败 api=%s ts_code=%s chunk=%s~%s: %s",
+                            entry.api_name, ts_code, chunk_start, chunk_end, api_exc,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "处理失败 api=%s ts_code=%s chunk=%s~%s: %s",
+                            entry.api_name, ts_code, chunk_start, chunk_end, exc,
                         )
 
-            except TushareAPIError as api_exc:
-                # Token 无效不重试，其他 API 错误记录后继续
-                if api_exc.code and api_exc.code == -2001:
-                    raise  # Token 无效，终止整个任务
-                logger.error(
-                    "API 调用失败 api=%s ts_code=%s: %s",
-                    entry.api_name, ts_code, api_exc,
-                )
-            except Exception as exc:
-                logger.error(
-                    "处理失败 api=%s ts_code=%s: %s",
-                    entry.api_name, ts_code, exc,
+                    completed += 1
+                    await _update_progress(
+                        task_id, status="running",
+                        total=total, completed=completed,
+                        current_item=f"{ts_code}:{chunk_start}-{chunk_end}",
+                        batch_mode=batch_mode,
+                    )
+
+                    # 频率限制
+                    time.sleep(rate_delay)
+            else:
+                # 原有逻辑：单次调用（非双重分批）
+                # 检查停止信号
+                if await _check_stop_signal(task_id):
+                    logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
+                    return {"status": "stopped", "record_count": total_records}
+
+                # 构建本次 API 调用参数
+                call_params = {**params, "ts_code": ts_code}
+
+                try:
+                    data = await _call_api_with_retry(
+                        adapter, entry.api_name, call_params, entry,
+                    )
+                    rows = TushareAdapter._rows_from_data(data)
+
+                    if rows:
+                        if inject_fields:
+                            for row in rows:
+                                row.update(inject_fields)
+
+                        mapped_rows = _apply_field_mappings(rows, entry)
+                        converted_rows = _convert_codes(mapped_rows, entry)
+
+                        try:
+                            if entry.storage_engine == StorageEngine.TS:
+                                await _write_to_timescaledb(converted_rows, entry)
+                            else:
+                                await _write_to_postgresql(converted_rows, entry)
+                            total_records += len(converted_rows)
+                        except Exception as db_exc:
+                            # 数据库写入失败：回滚当前批次，继续下一批
+                            logger.error(
+                                "DB 写入失败 api=%s ts_code=%s: %s",
+                                entry.api_name, ts_code, db_exc,
+                            )
+
+                except TushareAPIError as api_exc:
+                    # Token 无效不重试，其他 API 错误记录后继续
+                    if api_exc.code and api_exc.code == -2001:
+                        raise  # Token 无效，终止整个任务
+                    logger.error(
+                        "API 调用失败 api=%s ts_code=%s: %s",
+                        entry.api_name, ts_code, api_exc,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "处理失败 api=%s ts_code=%s: %s",
+                        entry.api_name, ts_code, exc,
+                    )
+
+                completed += 1
+                await _update_progress(
+                    task_id, status="running",
+                    total=total, completed=completed,
+                    current_item=ts_code,
+                    batch_mode=batch_mode,
                 )
 
-            completed += 1
-            await _update_progress(
-                task_id, status="running",
-                total=total, completed=completed,
-                current_item=ts_code,
-            )
-
-            # 频率限制
-            time.sleep(rate_delay)
+                # 频率限制
+                time.sleep(rate_delay)
 
     return {"status": "completed", "record_count": total_records}
 
@@ -586,7 +1079,8 @@ async def _process_batched_index(
     completed = 0
     total_records = 0
 
-    await _update_progress(task_id, status="running", total=total, completed=0)
+    await _update_progress(task_id, status="running", total=total, completed=0,
+                           batch_mode="by_index")
 
     for ts_code in index_codes:
         if await _check_stop_signal(task_id):
@@ -630,7 +1124,8 @@ async def _process_batched_index(
             logger.error("处理失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, exc)
 
         completed += 1
-        await _update_progress(task_id, status="running", total=total, completed=completed, current_item=ts_code)
+        await _update_progress(task_id, status="running", total=total, completed=completed,
+                               current_item=ts_code, batch_mode="by_index")
         time.sleep(rate_delay)
 
     return {"status": "completed", "record_count": total_records}
@@ -648,8 +1143,26 @@ async def _update_progress(
     failed: int | None = None,
     current_item: str = "",
     error_message: str = "",
+    batch_mode: str = "",
+    truncation_warnings: list[dict] | None = None,
+    needs_smaller_chunk: bool = False,
 ) -> None:
-    """更新 Redis 中的导入进度。"""
+    """更新 Redis 中的导入进度。
+
+    Args:
+        task_id: 任务唯一标识
+        status: 任务状态（running/completed/failed/stopped）
+        total: 总步数
+        completed: 已完成步数（单调递增）
+        failed: 失败步数
+        current_item: 当前处理项标识
+        error_message: 错误信息
+        batch_mode: 当前分批策略（by_date/by_code/by_code_and_date/by_index/single）
+        truncation_warnings: 截断警告列表，每项包含 chunk_start/chunk_end/row_count/max_rows
+        needs_smaller_chunk: 连续截断检测标志，建议用户减小步长
+
+    对应需求：7.1, 7.2, 7.3, 7.4, 7.5
+    """
     progress_key = f"{_PROGRESS_KEY_PREFIX}{task_id}"
 
     # 读取现有进度
@@ -675,6 +1188,18 @@ async def _update_progress(
     if error_message:
         progress["error_message"] = error_message
 
+    # 分批模式标识（对应需求 7.4）
+    if batch_mode:
+        progress["batch_mode"] = batch_mode
+
+    # 截断警告列表（对应需求 7.3）
+    if truncation_warnings is not None:
+        progress["truncation_warnings"] = truncation_warnings
+
+    # 连续截断标志（对应需求 7.5）
+    if needs_smaller_chunk:
+        progress["needs_smaller_chunk"] = True
+
     await _redis_set(progress_key, json.dumps(progress), ex=_PROGRESS_TTL)
 
 
@@ -687,14 +1212,57 @@ async def _finalize_log(
     status: str,
     record_count: int,
     error_message: str | None = None,
+    batch_stats: dict | None = None,
 ) -> None:
-    """更新 tushare_import_log 记录的终态。"""
+    """更新 tushare_import_log 记录的终态。
+
+    Args:
+        log_id: 导入日志记录 ID
+        status: 终态状态（completed/failed/stopped）
+        record_count: 总导入记录数
+        error_message: 错误信息（可选）
+        batch_stats: 分批统计信息（可选），序列化为 JSON 存入 extra_info 列。
+            结构示例：{"batch_mode": "by_date", "total_chunks": 12,
+            "success_chunks": 11, "truncation_count": 1,
+            "truncation_details": [...]}
+
+    对应需求：8.1, 8.2
+    """
     from sqlalchemy import update
 
     from app.core.database import AsyncSessionPG
     from app.models.tushare_import import TushareImportLog
 
     try:
+        # 序列化 batch_stats 为 JSON 字符串（存入 extra_info 列）
+        extra_info_str: str | None = None
+        if batch_stats is not None:
+            try:
+                extra_info_str = json.dumps(batch_stats, ensure_ascii=False)
+                # extra_info 列最大 2000 字符，超长时截断
+                if len(extra_info_str) > 2000:
+                    extra_info_str = extra_info_str[:2000]
+            except (TypeError, ValueError) as json_exc:
+                logger.warning("序列化 batch_stats 失败 log_id=%d: %s", log_id, json_exc)
+                extra_info_str = None
+
+        # 处理截断警告：追加到 error_message（对应需求 8.2）
+        final_error_message = error_message
+        if batch_stats and batch_stats.get("truncation_count", 0) > 0:
+            truncation_details = batch_stats.get("truncation_details", [])
+            # 最多记录前 10 个截断子区间
+            limited_details = truncation_details[:10]
+            truncation_summary = "; ".join(
+                f"{d.get('chunk', '?')}({d.get('rows', '?')}行)"
+                for d in limited_details
+            )
+            truncation_msg = f"截断警告({batch_stats['truncation_count']}个子区间): {truncation_summary}"
+
+            if final_error_message:
+                final_error_message = f"{final_error_message}; {truncation_msg}"
+            else:
+                final_error_message = truncation_msg
+
         async with AsyncSessionPG() as session:
             stmt = (
                 update(TushareImportLog)
@@ -702,8 +1270,9 @@ async def _finalize_log(
                 .values(
                     status=status,
                     record_count=record_count,
-                    error_message=error_message[:500] if error_message else None,
+                    error_message=final_error_message[:500] if final_error_message else None,
                     finished_at=datetime.now(),
+                    extra_info=extra_info_str,
                 )
             )
             await session.execute(stmt)
@@ -844,6 +1413,36 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
         return result
 
     filtered_rows = [_coerce_row(row) for row in rows]
+
+    # 过滤掉关键列值为 NULL 的行（Tushare 有时返回不完整数据）
+    # 1. 数据库中实际 NOT NULL 的列（排除自增主键和有默认值的列）
+    # 2. ON CONFLICT 冲突列（NULL 值无法参与唯一约束匹配）
+    must_not_null: set[str] = set()
+    if table_obj is not None:
+        must_not_null |= {
+            col.name for col in table_obj.columns
+            if not col.nullable and col.server_default is None
+            and not col.primary_key and not col.autoincrement
+        }
+    if entry.conflict_columns:
+        must_not_null |= set(entry.conflict_columns)
+    # 只检查本次 INSERT 涉及的列
+    check_cols = must_not_null & set(columns)
+    if check_cols:
+        before_count = len(filtered_rows)
+        filtered_rows = [
+            row for row in filtered_rows
+            if all(row.get(c) is not None for c in check_cols)
+        ]
+        skipped = before_count - len(filtered_rows)
+        if skipped:
+            logger.warning(
+                "跳过 %d 行（关键列含 NULL 值），表=%s 检查列=%s",
+                skipped, entry.target_table, check_cols,
+            )
+
+    if not filtered_rows:
+        return
 
     # 构建 INSERT 语句（列名加双引号避免 SQL 保留字冲突，如 limit）
     col_list = ", ".join(f'"{col}"' for col in columns)

@@ -465,13 +465,14 @@ class TushareImportService:
         """获取最近导入历史记录。
 
         从 tushare_import_log 表查询最近 N 条记录，按 started_at 降序排列。
+        extra_info 列存储 JSON 格式的分批统计信息，解析后作为 dict 返回。
 
         Args:
             limit: 返回记录数上限，默认 20
 
         Returns:
             包含 id, api_name, params_json, status, record_count,
-            error_message, started_at, finished_at 的字典列表
+            error_message, extra_info, started_at, finished_at 的字典列表
         """
         from sqlalchemy import select
 
@@ -496,6 +497,7 @@ class TushareImportService:
                 "record_count": log.record_count,
                 "error_message": log.error_message,
                 "celery_task_id": log.celery_task_id,
+                "extra_info": self._parse_extra_info(log.extra_info),
                 "started_at": (
                     log.started_at.isoformat() if log.started_at else None
                 ),
@@ -505,6 +507,24 @@ class TushareImportService:
             }
             for log in logs
         ]
+
+    @staticmethod
+    def _parse_extra_info(raw: str | None) -> dict | None:
+        """解析 extra_info JSON 字符串为字典。
+
+        Args:
+            raw: JSON 格式字符串或 None
+
+        Returns:
+            解析后的字典，若为 None/空字符串/解析失败则返回 None
+        """
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("extra_info JSON 解析失败: %s", raw)
+            return None
 
     # ------------------------------------------------------------------
     # 内部辅助：创建导入日志记录

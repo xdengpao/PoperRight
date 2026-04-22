@@ -411,6 +411,7 @@ class TestGetImportHistory:
         mock_log.status = "completed"
         mock_log.record_count = 5200
         mock_log.error_message = None
+        mock_log.extra_info = None
         mock_log.started_at = datetime(2024, 1, 15, 10, 30, 0)
         mock_log.finished_at = datetime(2024, 1, 15, 10, 30, 3)
 
@@ -435,8 +436,118 @@ class TestGetImportHistory:
             assert record["status"] == "completed"
             assert record["record_count"] == 5200
             assert record["error_message"] is None
+            assert record["extra_info"] is None
             assert record["started_at"] == "2024-01-15T10:30:00"
             assert record["finished_at"] == "2024-01-15T10:30:03"
+
+    async def test_returns_parsed_extra_info(self, svc: TushareImportService) -> None:
+        """extra_info 包含有效 JSON 时返回解析后的字典。"""
+        from datetime import datetime
+
+        mock_log = MagicMock()
+        mock_log.id = 2
+        mock_log.api_name = "daily_basic"
+        mock_log.params_json = {"start_date": "20240101", "end_date": "20240131"}
+        mock_log.status = "completed"
+        mock_log.record_count = 15000
+        mock_log.error_message = None
+        mock_log.celery_task_id = "task-abc"
+        mock_log.extra_info = '{"batch_mode": "by_date", "total_chunks": 31, "success_chunks": 31, "truncation_count": 0}'
+        mock_log.started_at = datetime(2024, 1, 15, 10, 0, 0)
+        mock_log.finished_at = datetime(2024, 1, 15, 10, 5, 0)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_log]
+
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = mock_result
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "app.core.database.AsyncSessionPG",
+            return_value=mock_session,
+        ):
+            result = await svc.get_import_history(limit=20)
+
+            assert len(result) == 1
+            record = result[0]
+            assert record["extra_info"] == {
+                "batch_mode": "by_date",
+                "total_chunks": 31,
+                "success_chunks": 31,
+                "truncation_count": 0,
+            }
+
+    async def test_returns_none_for_invalid_extra_info_json(
+        self, svc: TushareImportService
+    ) -> None:
+        """extra_info 包含无效 JSON 时返回 None 并记录警告。"""
+        from datetime import datetime
+
+        mock_log = MagicMock()
+        mock_log.id = 3
+        mock_log.api_name = "margin"
+        mock_log.params_json = {}
+        mock_log.status = "completed"
+        mock_log.record_count = 100
+        mock_log.error_message = None
+        mock_log.celery_task_id = "task-xyz"
+        mock_log.extra_info = "not-valid-json{{"
+        mock_log.started_at = datetime(2024, 2, 1, 8, 0, 0)
+        mock_log.finished_at = datetime(2024, 2, 1, 8, 1, 0)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_log]
+
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = mock_result
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "app.core.database.AsyncSessionPG",
+            return_value=mock_session,
+        ):
+            result = await svc.get_import_history(limit=20)
+
+            assert len(result) == 1
+            assert result[0]["extra_info"] is None
+
+    async def test_returns_none_for_empty_extra_info(
+        self, svc: TushareImportService
+    ) -> None:
+        """extra_info 为空字符串时返回 None。"""
+        from datetime import datetime
+
+        mock_log = MagicMock()
+        mock_log.id = 4
+        mock_log.api_name = "ggt_daily"
+        mock_log.params_json = {}
+        mock_log.status = "completed"
+        mock_log.record_count = 50
+        mock_log.error_message = None
+        mock_log.celery_task_id = "task-empty"
+        mock_log.extra_info = ""
+        mock_log.started_at = datetime(2024, 3, 1, 9, 0, 0)
+        mock_log.finished_at = datetime(2024, 3, 1, 9, 0, 30)
+
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [mock_log]
+
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = mock_result
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        with patch(
+            "app.core.database.AsyncSessionPG",
+            return_value=mock_session,
+        ):
+            result = await svc.get_import_history(limit=20)
+
+            assert len(result) == 1
+            assert result[0]["extra_info"] is None
 
 
 # ===========================================================================

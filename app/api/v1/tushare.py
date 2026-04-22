@@ -92,6 +92,7 @@ class TushareImportLogItem(BaseModel):
     record_count: int
     error_message: str | None
     celery_task_id: str | None
+    extra_info: dict | None = None
     started_at: str | None
     finished_at: str | None
 

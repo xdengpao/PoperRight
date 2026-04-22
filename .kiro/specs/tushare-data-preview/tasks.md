@@ -43,7 +43,7 @@
     - 实现 `_build_incremental_filter` 方法：从导入记录的 `params_json` 提取 start_date/end_date/trade_date/ts_code 重建查询条件
     - _Requirements: 5.1-5.4, 7.2, 7.3, 7.4, 8.1-8.6, 10.1-10.3_
 
-  - [ ]* 1.3 编写后端属性测试（Property 1-7, 9）
+  - [x] 1.3 编写后端属性测试（Property 1-7, 9）
     - 新建 `tests/properties/test_tushare_preview_properties.py`
     - 编写以下属性测试（使用 Hypothesis，`@settings(max_examples=100)`）：
       - **Property 1: Registry grouping preserves all entries with correct counts**
@@ -73,7 +73,7 @@
     - 每个测试标注 `# Feature: tushare-data-preview, Property N: ...`
     - _Requirements: 2.1, 2.4, 2.5, 3.2, 4.1-4.4, 6.2, 6.3, 8.3, 8.4, 9.4_
 
-  - [ ]* 1.4 编写后端服务层单元测试
+  - [x] 1.4 编写后端服务层单元测试
     - 新建 `tests/services/test_tushare_preview_service.py`
     - 编写以下单元测试（Mock 数据库 session）：
       - `test_query_preview_data_returns_correct_columns`
@@ -108,7 +108,7 @@
     - 在 `app/api/v1/__init__.py` 中导入并注册 `tushare_preview_router`
     - _Requirements: 8.1_
 
-  - [ ]* 3.3 编写 API 端点集成测试
+  - [x] 3.3 编写 API 端点集成测试
     - 新建 `tests/api/test_tushare_preview_api.py`
     - 编写以下测试（Mock TusharePreviewService）：
       - `test_preview_endpoint_returns_paginated_data`
@@ -198,7 +198,7 @@
     - 数据时间范围筛选器在无时间字段时禁用并显示提示
     - _Requirements: 1.2-1.5, 2.1-2.5, 3.1-3.5, 4.1-4.5, 5.1-5.4, 6.1-6.4, 7.1-7.5, 9.1, 9.5, 10.1-10.4_
 
-  - [ ]* 6.4 编写前端属性测试（Property 1, 3, 8）
+  - [x] 6.4 编写前端属性测试（Property 1, 3, 8）
     - 新建 `frontend/src/views/__tests__/tusharePreview.property.test.ts`
     - 编写以下属性测试（使用 fast-check，`fc.assert(property, { numRuns: 100 })`）：
       - **Property 1: Registry grouping preserves all entries with correct counts**
@@ -213,7 +213,7 @@
     - 每个测试标注 `// Feature: tushare-data-preview, Property N: ...`
     - _Requirements: 2.1, 2.5, 4.1-4.4, 10.4_
 
-  - [ ]* 6.5 编写前端单元测试
+  - [x] 6.5 编写前端单元测试
     - 新建 `frontend/src/views/__tests__/TusharePreviewView.test.ts`
     - 编写以下单元测试（使用 Vitest + @vue/test-utils）：
       - Tab 导航渲染和切换

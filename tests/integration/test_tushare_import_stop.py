@@ -99,7 +99,7 @@ class TestStopDuringBatchProcessing:
         async def mock_write_ts(rows, entry):
             ts_write_calls.append({"rows": list(rows), "table": entry.target_table})
 
-        async def mock_finalize(log_id, status, record_count, error_message=None):
+        async def mock_finalize(log_id, status, record_count, error_message=None, batch_stats=None):
             finalize_log_calls.append({
                 "log_id": log_id,
                 "status": status,
@@ -245,7 +245,7 @@ class TestStopBeforeProcessing:
         async def mock_write_ts(rows, entry):
             ts_write_calls.append({"rows": list(rows)})
 
-        async def mock_finalize(log_id, status, record_count, error_message=None):
+        async def mock_finalize(log_id, status, record_count, error_message=None, batch_stats=None):
             finalize_log_calls.append({
                 "log_id": log_id,
                 "status": status,
@@ -312,7 +312,7 @@ class TestStopBeforeProcessing:
         async def mock_write_pg(rows, entry):
             pg_write_calls.append({"rows": list(rows)})
 
-        async def mock_finalize(log_id, status, record_count, error_message=None):
+        async def mock_finalize(log_id, status, record_count, error_message=None, batch_stats=None):
             finalize_log_calls.append({
                 "log_id": log_id,
                 "status": status,

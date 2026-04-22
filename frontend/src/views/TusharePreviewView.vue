@@ -133,7 +133,80 @@
                   :disabled="store.previewLoading"
                   @click="handleIncrementalQuery"
                 >查看增量数据</button>
+                <button
+                  class="btn btn-secondary"
+                  :disabled="!store.selectedApiName || store.integrityLoading"
+                  @click="handleCheckIntegrity"
+                >{{ store.integrityLoading ? '校验中...' : '完整性校验' }}</button>
               </div>
+            </div>
+          </section>
+
+          <!-- 完整性校验结果（可折叠卡片） -->
+          <section
+            v-if="store.integrityReport"
+            class="card integrity-report-section"
+            aria-label="完整性校验结果"
+          >
+            <div class="integrity-header">
+              <span class="integrity-title">🔍 完整性校验结果</span>
+              <button class="integrity-close-btn" @click="store.clearIntegrityReport()" aria-label="关闭校验结果">✕</button>
+            </div>
+            <!-- 数据完整时绿色提示 -->
+            <div v-if="store.integrityReport.missing_count === 0" class="integrity-complete">
+              ✅ 数据完整，无缺失
+            </div>
+            <!-- 有缺失时红色高亮摘要 -->
+            <template v-else>
+              <div class="integrity-summary integrity-missing">
+                <div class="integrity-summary-row">
+                  <span class="integrity-stat-label">校验类型：</span>
+                  <span>{{ integrityCheckTypeLabel }}</span>
+                  <span class="integrity-stat-label">预期数量：</span>
+                  <span>{{ store.integrityReport.expected_count.toLocaleString() }}</span>
+                  <span class="integrity-stat-label">实际数量：</span>
+                  <span>{{ store.integrityReport.actual_count.toLocaleString() }}</span>
+                  <span class="integrity-stat-label">缺失数量：</span>
+                  <span class="integrity-missing-count">{{ store.integrityReport.missing_count.toLocaleString() }}</span>
+                  <span class="integrity-stat-label">完整率：</span>
+                  <span>{{ (store.integrityReport.completeness_rate * 100).toFixed(2) }}%</span>
+                </div>
+              </div>
+              <!-- 缺失详情列表 -->
+              <div class="integrity-details">
+                <div class="integrity-details-header">
+                  <span class="integrity-details-title">缺失详情</span>
+                  <button
+                    v-if="store.integrityReport.missing_items.length > 50"
+                    class="integrity-expand-btn"
+                    @click="integrityDetailsExpanded = !integrityDetailsExpanded"
+                  >{{ integrityDetailsExpanded ? '收起' : `展开全部 (${store.integrityReport.missing_items.length})` }}</button>
+                </div>
+                <div class="integrity-missing-list">
+                  <span
+                    v-for="item in visibleMissingItems"
+                    :key="item"
+                    class="integrity-missing-item"
+                  >{{ item }}</span>
+                </div>
+              </div>
+            </template>
+            <!-- 摘要信息（数据完整时也显示） -->
+            <div v-if="store.integrityReport.missing_count === 0" class="integrity-summary">
+              <div class="integrity-summary-row">
+                <span class="integrity-stat-label">校验类型：</span>
+                <span>{{ integrityCheckTypeLabel }}</span>
+                <span class="integrity-stat-label">预期数量：</span>
+                <span>{{ store.integrityReport.expected_count.toLocaleString() }}</span>
+                <span class="integrity-stat-label">实际数量：</span>
+                <span>{{ store.integrityReport.actual_count.toLocaleString() }}</span>
+                <span class="integrity-stat-label">完整率：</span>
+                <span>{{ (store.integrityReport.completeness_rate * 100).toFixed(2) }}%</span>
+              </div>
+            </div>
+            <!-- 附加提示信息 -->
+            <div v-if="store.integrityReport.message" class="integrity-message">
+              ⓘ {{ store.integrityReport.message }}
             </div>
           </section>
 
@@ -206,10 +279,12 @@
           <!-- 图表区域 -->
           <PreviewChart
             v-if="showChart"
-            :chart-type="store.previewData?.chart_type ?? null"
-            :rows="store.previewData?.rows ?? []"
-            :time-field="store.previewData?.time_field ?? null"
-            :columns="store.previewData?.columns ?? []"
+            :chart-type="chartDisplayType"
+            :rows="chartDisplayRows"
+            :time-field="chartDisplayTimeField"
+            :columns="chartDisplayColumns"
+            :selected-columns="store.selectedChartColumns"
+            @update:selected-columns="store.setSelectedChartColumns"
           />
 
           <!-- 数据表格区域 -->
@@ -236,11 +311,12 @@
  *
  * 提供已导入 Tushare 数据的预览功能，包括：
  * - 左侧分类选择器（按 category → subcategory 分组）
- * - 右侧查询条件栏（导入时间、数据时间、增量查询）
+ * - 右侧查询条件栏（导入时间、数据时间、增量查询、完整性校验）
+ * - 完整性校验结果展示（可折叠卡片）
  * - 导入记录列表（可折叠，点击查看该次导入数据）
- * - 图表 + 表格展示（支持模式切换）
+ * - 图表 + 表格展示（支持模式切换，图表使用独立数据源）
  *
- * 需求: 1.2-1.5, 2.1-2.5, 3.1-3.5, 4.1-4.5, 5.1-5.4, 6.1-6.4, 7.1-7.5, 9.1, 9.5, 10.1-10.4
+ * 需求: 1.1-1.6, 2.1-2.5, 3.1-3.5, 4.1-4.5, 5.1-5.4, 6.1-6.4, 7.1-7.5, 9.1, 9.5, 10.1-10.6, 11.1-11.5
  */
 import { ref, reactive, computed, onMounted } from 'vue'
 import TushareTabNav from '@/components/TushareTabNav.vue'
@@ -260,6 +336,8 @@ const store = useTusharePreviewStore()
 const expandedSubcategories = reactive(new Set<string>())
 const importLogsExpanded = ref(true)
 const activeImportShortcut = ref<string | null>(null)
+/** 完整性校验缺失详情是否展开（超过 50 条时默认折叠） */
+const integrityDetailsExpanded = ref(false)
 
 // ── 分类标签映射 ──────────────────────────────────────────────────────────────
 
@@ -302,6 +380,43 @@ const showNoSuccessMessage = computed(() => {
   return !hasSuccess && store.importLogs.length >= 0 && !store.importLogsLoading
     && store.previewData?.incremental_info === undefined
     && store.filters.incremental
+})
+
+/** 完整性校验类型标签 */
+const integrityCheckTypeLabel = computed(() => {
+  const labels: Record<string, string> = {
+    time_series: '时序数据校验',
+    code_based: '代码集合校验',
+    unsupported: '不支持校验',
+  }
+  return labels[store.integrityReport?.check_type ?? ''] ?? store.integrityReport?.check_type ?? ''
+})
+
+/** 可见的缺失项列表（超过 50 条时默认只显示前 50 条） */
+const visibleMissingItems = computed(() => {
+  const items = store.integrityReport?.missing_items ?? []
+  if (items.length <= 50 || integrityDetailsExpanded.value) return items
+  return items.slice(0, 50)
+})
+
+/** 图表使用的 chart_type（优先使用 chartData） */
+const chartDisplayType = computed(() => {
+  return store.chartData?.chart_type ?? store.previewData?.chart_type ?? null
+})
+
+/** 图表使用的数据行（优先使用 chartData） */
+const chartDisplayRows = computed(() => {
+  return store.chartData?.rows ?? store.previewData?.rows ?? []
+})
+
+/** 图表使用的时间字段（优先使用 chartData） */
+const chartDisplayTimeField = computed(() => {
+  return store.chartData?.time_field ?? store.previewData?.time_field ?? null
+})
+
+/** 图表使用的列信息（优先使用 chartData） */
+const chartDisplayColumns = computed(() => {
+  return store.chartData?.columns ?? store.previewData?.columns ?? []
 })
 
 // ── 展示模式 ──────────────────────────────────────────────────────────────────
@@ -445,13 +560,15 @@ function setDataTimeEnd(value: string): void {
   store.filters.dataTimeEnd = value || null
 }
 
-/** 执行查询 */
+/** 执行查询（并行发送表格分页请求和图表数据请求） */
 function handleQuery(): void {
   if (!store.selectedApiName) return
   store.filters.incremental = false
   store.filters.importLogId = null
   store.filters.page = 1
+  // 并行请求表格数据和图表数据
   store.fetchPreviewData(store.selectedApiName, store.filters)
+  store.fetchChartData(store.selectedApiName)
 }
 
 /** 执行增量查询 */
@@ -461,6 +578,16 @@ function handleIncrementalQuery(): void {
   store.filters.importLogId = null
   store.filters.page = 1
   store.fetchPreviewData(store.selectedApiName, store.filters)
+}
+
+/** 执行完整性校验 */
+function handleCheckIntegrity(): void {
+  if (!store.selectedApiName) return
+  integrityDetailsExpanded.value = false
+  const timeRange: { start?: string; end?: string } = {}
+  if (store.filters.dataTimeStart) timeRange.start = store.filters.dataTimeStart
+  if (store.filters.dataTimeEnd) timeRange.end = store.filters.dataTimeEnd
+  store.checkIntegrity(store.selectedApiName, Object.keys(timeRange).length > 0 ? timeRange : undefined)
 }
 
 /** 选择某条导入记录查看数据 */
@@ -863,4 +990,122 @@ onMounted(() => {
 }
 .mode-btn:hover { color: #e6edf3; border-color: #8b949e; }
 .mode-btn.active { color: #e6edf3; background: #1f6feb; border-color: #1f6feb; }
+
+/* ── 完整性校验结果 ── */
+.integrity-report-section { padding: 0; }
+
+.integrity-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #21262d;
+}
+
+.integrity-title {
+  font-weight: 600;
+  font-size: 14px;
+  color: #e6edf3;
+}
+
+.integrity-close-btn {
+  background: none;
+  border: none;
+  color: #484f58;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: inherit;
+  transition: color 0.15s, background 0.15s;
+}
+.integrity-close-btn:hover { color: #e6edf3; background: #21262d; }
+
+.integrity-complete {
+  padding: 16px;
+  color: #3fb950;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.integrity-summary {
+  padding: 12px 16px;
+}
+
+.integrity-summary.integrity-missing {
+  background: #3a1a1a;
+  border-bottom: 1px solid #5a2020;
+}
+
+.integrity-summary-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #e6edf3;
+}
+
+.integrity-stat-label {
+  color: #8b949e;
+  font-weight: 500;
+}
+
+.integrity-missing-count {
+  color: #f85149;
+  font-weight: 600;
+}
+
+.integrity-details {
+  padding: 12px 16px;
+  border-top: 1px solid #21262d;
+}
+
+.integrity-details-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.integrity-details-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #8b949e;
+}
+
+.integrity-expand-btn {
+  background: none;
+  border: none;
+  color: #58a6ff;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  padding: 2px 8px;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.integrity-expand-btn:hover { background: #1a2a3a; }
+
+.integrity-missing-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.integrity-missing-item {
+  display: inline-block;
+  padding: 2px 8px;
+  background: #3a1a1a;
+  color: #f85149;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.integrity-message {
+  padding: 8px 16px 12px;
+  font-size: 12px;
+  color: #d29922;
+}
 </style>

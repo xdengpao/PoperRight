@@ -123,6 +123,9 @@ class TushareImportLog(PGBase):
         TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
     )
     finished_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ, nullable=True)
+    extra_info: Mapped[str | None] = mapped_column(
+        String(2000), nullable=True, comment="JSON 格式的分批统计信息"
+    )
 
     def __repr__(self) -> str:
         return f"<TushareImportLog {self.id} {self.api_name} {self.status}>"
