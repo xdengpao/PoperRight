@@ -2,7 +2,7 @@
 
 ## Overview
 
-本设计文档描述 Tushare 数据在线导入功能的技术架构和实现方案。该功能在现有 A 股量化交易系统的"数据管理 > 在线数据"菜单下新增"tushare"子菜单，提供 Tushare 平台 85+ 个 API 接口的数据导入能力，覆盖股票基础数据、行情数据（低频/中频）、财务数据、参考数据、特色数据、两融及转融通、资金流向、打板专题以及指数专题等全部数据分类。
+本设计文档描述 Tushare 数据在线导入功能的技术架构和实现方案。该功能在现有 A 股量化交易系统的"数据管理 > 在线数据"菜单下新增"tushare"子菜单，提供 Tushare 平台 120+ 个 API 接口的数据导入能力，覆盖股票基础数据、行情数据（低频/中频）、财务数据、参考数据、特色数据、两融及转融通、资金流向、打板专题以及指数专题等全部数据分类。
 
 ### 设计目标
 
@@ -16,7 +16,7 @@
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 导入编排模式 | 注册表驱动（API_Registry） | 85+ 接口逐个写 handler 不可维护，注册表模式统一字段映射和存储目标 |
+| 导入编排模式 | 注册表驱动（API_Registry） | 120+ 接口逐个写 handler 不可维护，注册表模式统一字段映射和存储目标 |
 | 任务队列 | 复用现有 Celery `data_sync` 队列 | 与现有回填任务共享基础设施，避免新增队列配置 |
 | 进度存储 | Redis（与现有 backfill 模式一致） | 轻量、高频更新、自动过期，前端 3 秒轮询 |
 | 财务报表存储 | JSONB 单表 + report_type 区分 | 财报字段 50+，逐字段建列不现实，JSONB 灵活且支持 GIN 索引 |
@@ -397,35 +397,40 @@ def get_entries_by_subcategory(subcategory: str) -> list[ApiEntry]:
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| index_daily | 指数日线行情 | basic | kline | TS | [time, symbol, freq, adj_type] |
+| index_daily | 指数日线行情 | advanced | kline | TS | [time, symbol, freq, adj_type] |
 | index_weekly | 指数周线行情 | basic | kline | TS | [time, symbol, freq, adj_type] |
 | index_monthly | 指数月线行情 | basic | kline | TS | [time, symbol, freq, adj_type] |
 
-##### 指数专题 — 指数行情中频（2个接口）
+##### 指数专题 — 指数行情中频（4个接口）
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| index_1min_realtime | 指数实时分钟行情 | basic | kline | TS | [time, symbol, freq, adj_type] |
-| index_min | 指数历史分钟行情 | basic | kline | TS | [time, symbol, freq, adj_type] |
+| rt_idx_k | 指数实时日线 | special | kline | TS | [time, symbol, freq, adj_type] |
+| rt_idx_min | 指数实时分钟 | special | kline | TS | [time, symbol, freq, adj_type] |
+| rt_idx_min_daily | 指数实时分钟日累计 | special | kline | TS | [time, symbol, freq, adj_type] |
+| idx_mins | 指数历史分钟行情 | special | kline | TS | [time, symbol, freq, adj_type] |
 
 ##### 指数专题 — 指数成分和权重（1个接口）
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| index_weight | 指数成分权重 | basic | index_weight | PG | [index_code, con_code, trade_date] |
+| index_weight | 指数成分权重 | advanced | index_weight | PG | [index_code, con_code, trade_date] |
 
-##### 指数专题 — 申万行业数据（2个接口）
-
-| api_name | label | token_tier | target_table | storage | conflict_columns |
-|----------|-------|-----------|-------------|---------|-----------------|
-| index_classify | 申万行业分类 | basic | sector_info | PG | [sector_code, data_source] (do_update) |
-| sw_daily | 申万行业指数日行情 | basic | sector_kline | TS | — |
-
-##### 指数专题 — 中信行业数据（1个接口）
+##### 指数专题 — 申万行业数据（4个接口）
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| ci_daily | 中信行业行情 | basic | sector_kline | TS | — |
+| index_classify | 申万行业分类 | advanced | sector_info | PG | [sector_code, data_source] (do_update) |
+| index_member_all | 申万行业成分（分级） | advanced | sector_constituent | PG | — |
+| sw_daily | 申万行业指数日行情 | advanced | sector_kline | TS | — |
+| rt_sw_k | 申万实时行情 | special | sector_kline | TS | — |
+
+##### 指数专题 — 中信行业数据（2个接口）
+
+| api_name | label | token_tier | target_table | storage | conflict_columns |
+|----------|-------|-----------|-------------|---------|-----------------|
+| ci_index_member | 中信行业成分 | advanced | sector_constituent | PG | — |
+| ci_daily | 中信行业行情 | advanced | sector_kline | TS | — |
 
 ##### 指数专题 — 大盘指数每日指标（1个接口）
 
@@ -437,20 +442,20 @@ def get_entries_by_subcategory(subcategory: str) -> list[ApiEntry]:
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| index_tech | 指数技术面因子 | special | index_tech | PG | [ts_code, trade_date] |
+| idx_factor_pro | 指数技术面因子（专业版） | advanced | index_tech | PG | [ts_code, trade_date] |
 
 ##### 指数专题 — 沪深市场每日交易统计（2个接口）
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
 | daily_info | 沪深市场每日交易统计 | basic | market_daily_info | PG | [trade_date, exchange, ts_code] |
-| sz_daily_info | 深圳市场每日交易情况 | basic | sz_daily_info | PG | [trade_date, ts_code] |
+| sz_daily_info | 深圳市场每日交易情况 | advanced | sz_daily_info | PG | [trade_date, ts_code] |
 
 ##### 指数专题 — 国际主要指数（1个接口）
 
 | api_name | label | token_tier | target_table | storage | conflict_columns |
 |----------|-------|-----------|-------------|---------|-----------------|
-| index_global | 国际主要指数 | basic | index_global | PG | [ts_code, trade_date] |
+| index_global | 国际主要指数 | advanced | index_global | PG | [ts_code, trade_date] |
 
 ### 2. Import_Service（导入编排服务）
 
@@ -739,17 +744,17 @@ class ApiRegistryItem(BaseModel):
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌─ 指数专题 ──────────────────────────────────────────────┐   │
-│  │ ▸ 指数基本信息                                            │   │
-│  │ ▸ 指数行情数据（低频：日线/周线/月线）                    │   │
-│  │ ▸ 指数行情数据（中频：实时分钟/历史分钟）                 │   │
-│  │ ▸ 指数成分和权重                                          │   │
-│  │ ▸ 申万行业数据                                            │   │
-│  │ ▸ 中信行业数据                                            │   │
-│  │ ▸ 大盘指数每日指标                                        │   │
-│  │ ▸ 指数技术面因子                                          │   │
-│  │ ▸ 沪深市场每日交易统计                                    │   │
+│  │ ▸ 指数基本信息（1个接口）                                 │   │
+│  │ ▸ 指数行情数据（低频：日线/周线/月线）（3个接口）         │   │
+│  │ ▸ 指数行情数据（中频：实时日线/实时分钟/历史分钟）（4个接口）│  │
+│  │ ▸ 指数成分和权重（1个接口）                               │   │
+│  │ ▸ 申万行业数据（分类/成分/日线/实时）（4个接口）          │   │
+│  │ ▸ 中信行业数据（成分/日线）（2个接口）                    │   │
+│  │ ▸ 大盘指数每日指标（1个接口）                             │   │
+│  │ ▸ 指数技术面因子（专业版）（1个接口）                     │   │
+│  │ ▸ 沪深市场每日交易统计（2个接口）                         │   │
 │  │ ▸ 深圳市场每日交易情况                                    │   │
-│  │ ▸ 国际主要指数                                            │   │
+│  │ ▸ 国际主要指数（1个接口）                                 │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌─ 活跃任务 ──────────────────────────────────────────────┐   │
@@ -871,12 +876,12 @@ TUSHARE_TOKEN_SPECIAL=
 
 | 表名 | 引擎 | 复用场景 |
 |------|------|---------|
-| `kline` | TimescaleDB | 股票日K/周K/月K/分钟K + 指数日线/周线/月线/分钟 + 实时行情 |
+| `kline` | TimescaleDB | 股票日K/周K/月K/分钟K + 指数日线/周线/月线/分钟 + 实时行情（含 rt_idx_k/rt_idx_min/rt_idx_min_daily/idx_mins） |
 | `adjustment_factor` | TimescaleDB | 复权因子 |
 | `stock_info` | PostgreSQL | stock_basic/fina_indicator/daily_basic/bak_basic 更新 |
 | `sector_info` | PostgreSQL | index_classify/ths_index/dc_index/tdx_index（data_source 区分） |
-| `sector_constituent` | PostgreSQL | ths_member/dc_member/tdx_member（data_source 区分） |
-| `sector_kline` | TimescaleDB | sw_daily/ci_daily/ths_daily/dc_daily/tdx_daily（data_source 区分） |
+| `sector_constituent` | PostgreSQL | ths_member/dc_member/tdx_member/index_member_all/ci_index_member（data_source 区分） |
+| `sector_kline` | TimescaleDB | sw_daily/rt_sw_k/ci_daily/ths_daily/dc_daily/tdx_daily（data_source 区分） |
 
 ### 枚举扩展
 
@@ -1226,7 +1231,7 @@ class MoneyFlow(PGBase):
 
 | # | 表名 | 主要字段 | 唯一约束 |
 |---|------|---------|---------|
-| 78 | `index_tech` | ts_code, trade_date, close, macd_dif, macd_dea, macd, kdj_k, kdj_d, kdj_j, rsi_6, rsi_12, boll_upper, boll_mid, boll_lower | (ts_code, trade_date) |
+| 78 | `index_tech` | ts_code, trade_date, close, macd_dif, macd_dea, macd, kdj_k, kdj_d, kdj_j, rsi_6, rsi_12, boll_upper, boll_mid, boll_lower | (ts_code, trade_date) |  <!-- 数据来源接口：idx_factor_pro -->
 | 79 | `index_global` | ts_code, trade_date, open, close, high, low, pre_close, change, pct_chg, vol, amount | (ts_code, trade_date) |
 | 80 | `market_daily_info` | trade_date, exchange, ts_code, ts_name, com_count, total_share, float_share, total_mv, float_mv, amount, vol, trans_count | (trade_date, exchange, ts_code) |
 | 81 | `sz_daily_info` | trade_date, ts_code, count, amount, vol, total_share, total_mv, float_share, float_mv | (trade_date, ts_code) |
@@ -1389,7 +1394,7 @@ async def _process_batch(task_id: str, batch: list, entry: ApiEntry):
 | Property 2 | symbol → ts_code 补全 round-trip | 随机生成 6 位数字代码 |
 | Property 3 | 指数代码不变性 | 随机生成指数 ts_code |
 | Property 4 | 四级 Token 路由与回退 | 随机 TokenTier（含 PREMIUM）+ 随机 Token 配置组合 |
-| Property 5 | Registry 条目完整性 | 遍历全部注册条目（85+） |
+| Property 5 | Registry 条目完整性 | 遍历全部注册条目（120+） |
 | Property 6 | 批处理分批数量 | 随机长度的代码列表（0-500） |
 | Property 7 | 进度单调递增 | 随机生成进度更新序列 |
 | Property 8 | 任务终态 | 随机生成任务执行场景（成功/失败/停止） |
@@ -1419,7 +1424,7 @@ async def _process_batch(task_id: str, batch: list, entry: ApiEntry):
 | 测试文件 | 覆盖范围 |
 |---------|---------|
 | `tests/services/test_tushare_import_service.py` | Import_Service 参数校验、四级 Token 路由、任务分发 |
-| `tests/services/test_tushare_registry.py` | API_Registry 注册、查询、分类（85+ 接口） |
+| `tests/services/test_tushare_registry.py` | API_Registry 注册、查询、分类（120+ 接口） |
 | `tests/tasks/test_tushare_import_task.py` | Import_Task 字段映射、代码转换、批处理 |
 | `tests/api/test_tushare_api.py` | REST API 端点请求/响应 |
 | `frontend/src/views/__tests__/TushareImportView.test.ts` | 组件渲染、交互、状态管理 |

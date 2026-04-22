@@ -1,5 +1,6 @@
 <template>
   <div class="tushare-import-view">
+    <TushareTabNav />
     <h1 class="page-title">Tushare 数据导入</h1>
 
     <!-- ── 连接状态 + Token 配置 ── -->
@@ -14,6 +15,7 @@
           <span class="token-label">Token:</span>
           <span class="token-status">基础{{ health.tokens.basic.configured ? '✅' : '❌' }}</span>
           <span class="token-status">高级{{ health.tokens.advanced.configured ? '✅' : '❌' }}</span>
+          <span class="token-status">专业{{ health.tokens.premium.configured ? '✅' : '❌' }}</span>
           <span class="token-status">特殊{{ health.tokens.special.configured ? '✅' : '❌' }}</span>
         </div>
         <button class="btn btn-secondary" :disabled="healthLoading" @click="checkHealth"
@@ -105,10 +107,15 @@
                   </div>
                   <div v-else-if="p === 'freq'" class="param-field">
                     <label class="param-label">频率<span v-if="api.required_params.includes(p)" class="req">*</span></label>
-                    <select class="form-input param-input" :value="getParam(api.api_name, 'freq') || '1min'"
+                    <select class="form-input param-input" :value="getParam(api.api_name, 'freq') || freqDefault(api)"
                       @change="setParam(api.api_name, 'freq', ($event.target as HTMLSelectElement).value)">
-                      <option value="1min">1min</option><option value="5min">5min</option>
-                      <option value="15min">15min</option><option value="30min">30min</option><option value="60min">60min</option>
+                      <template v-if="isWeeklyMonthlyApi(api)">
+                        <option value="W">周线 (W)</option><option value="M">月线 (M)</option>
+                      </template>
+                      <template v-else>
+                        <option value="1min">1min</option><option value="5min">5min</option>
+                        <option value="15min">15min</option><option value="30min">30min</option><option value="60min">60min</option>
+                      </template>
                     </select>
                   </div>
                   <div v-else-if="p === 'hs_type'" class="param-field">
@@ -123,6 +130,13 @@
                     <input type="text" class="form-input param-input" placeholder="板块代码"
                       :value="getParam(api.api_name, 'sector_code')"
                       @input="setParam(api.api_name, 'sector_code', ($event.target as HTMLInputElement).value)" />
+                  </div>
+                  <div v-else-if="p === 'month_range'" class="param-field">
+                    <label class="param-label">月份<span v-if="api.required_params.includes(p)" class="req">*</span></label>
+                    <input type="month" class="form-input param-input"
+                      :value="getParam(api.api_name, 'month') || currentMonthStr"
+                      @input="setParam(api.api_name, 'month', ($event.target as HTMLInputElement).value)"
+                      aria-label="月份" />
                   </div>
                 </template>
                 <button class="btn btn-primary btn-import" :class="{ 'btn-loading': loadingApis.has(api.api_name) }"
@@ -230,10 +244,15 @@
                   </div>
                   <div v-else-if="p === 'freq'" class="param-field">
                     <label class="param-label">频率<span v-if="api.required_params.includes(p)" class="req">*</span></label>
-                    <select class="form-input param-input" :value="getParam(api.api_name, 'freq') || '1min'"
+                    <select class="form-input param-input" :value="getParam(api.api_name, 'freq') || freqDefault(api)"
                       @change="setParam(api.api_name, 'freq', ($event.target as HTMLSelectElement).value)">
-                      <option value="1min">1min</option><option value="5min">5min</option>
-                      <option value="15min">15min</option><option value="30min">30min</option><option value="60min">60min</option>
+                      <template v-if="isWeeklyMonthlyApi(api)">
+                        <option value="W">周线 (W)</option><option value="M">月线 (M)</option>
+                      </template>
+                      <template v-else>
+                        <option value="1min">1min</option><option value="5min">5min</option>
+                        <option value="15min">15min</option><option value="30min">30min</option><option value="60min">60min</option>
+                      </template>
                     </select>
                   </div>
                   <div v-else-if="p === 'hs_type'" class="param-field">
@@ -248,6 +267,13 @@
                     <input type="text" class="form-input param-input" placeholder="板块代码"
                       :value="getParam(api.api_name, 'sector_code')"
                       @input="setParam(api.api_name, 'sector_code', ($event.target as HTMLInputElement).value)" />
+                  </div>
+                  <div v-else-if="p === 'month_range'" class="param-field">
+                    <label class="param-label">月份<span v-if="api.required_params.includes(p)" class="req">*</span></label>
+                    <input type="month" class="form-input param-input"
+                      :value="getParam(api.api_name, 'month') || currentMonthStr"
+                      @input="setParam(api.api_name, 'month', ($event.target as HTMLInputElement).value)"
+                      aria-label="月份" />
                   </div>
                 </template>
                 <button class="btn btn-primary btn-import" :class="{ 'btn-loading': loadingApis.has(api.api_name) }"
@@ -338,6 +364,7 @@
  */
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { apiClient } from '@/api'
+import TushareTabNav from '@/components/TushareTabNav.vue'
 
 // ── 类型定义 ──────────────────────────────────────────────────────────────────
 
@@ -378,6 +405,7 @@ export interface ImportLog {
   status: string
   record_count: number
   error_message: string | null
+  celery_task_id: string | null
   started_at: string
   finished_at: string | null
 }
@@ -388,6 +416,7 @@ interface HealthResponse {
   tokens: {
     basic: { configured: boolean }
     advanced: { configured: boolean }
+    premium: { configured: boolean }
     special: { configured: boolean }
   }
 }
@@ -400,6 +429,7 @@ const health = reactive<HealthResponse>({
   tokens: {
     basic: { configured: false },
     advanced: { configured: false },
+    premium: { configured: false },
     special: { configured: false },
   },
 })
@@ -425,6 +455,7 @@ const lastImportTimes = ref<Record<string, string>>({})
 
 const todayStr = new Date().toISOString().slice(0, 10)
 const oneYearAgoStr = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10)
+const currentMonthStr = todayStr.slice(0, 7)  // YYYY-MM 格式
 const currentYear = new Date().getFullYear().toString()
 const yearOptions = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() - i).toString())
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'unknown'])
@@ -457,7 +488,17 @@ function isMidFreqSubcategory(sub: string): boolean {
 }
 
 function tierLabel(tier: string): string {
-  return ({ basic: '基础', advanced: '高级', special: '特殊' } as Record<string, string>)[tier] ?? tier
+  return ({ basic: '基础', advanced: '高级', premium: '专业', special: '特殊' } as Record<string, string>)[tier] ?? tier
+}
+
+/** 判断是否为周/月行情接口（频率选择器显示 W/M 而非分钟） */
+function isWeeklyMonthlyApi(api: ApiItem): boolean {
+  return api.api_name === 'stk_weekly_monthly'
+}
+
+/** 根据接口类型返回频率默认值 */
+function freqDefault(api: ApiItem): string {
+  return isWeeklyMonthlyApi(api) ? 'W' : '1min'
 }
 
 /** 合并 required + optional 并去重 */
@@ -484,10 +525,12 @@ function requiredParamsFilled(api: ApiItem): boolean {
     if (p === 'date_range') {
       // start_date 有默认值 oneYearAgoStr，无需校验
       continue
-    } else if (p === 'report_period' || p === 'freq' || p === 'market') {
+    } else if (p === 'report_period' || p === 'freq' || p === 'market' || p === 'month_range') {
       continue // 有默认值或允许空
     } else if (p === 'stock_code') {
       continue // 留空表示全市场，无需校验
+    } else if (p === 'index_code') {
+      continue // 留空表示全部指数，无需校验
     } else {
       if (!getParam(api.api_name, p)) return false
     }
@@ -558,7 +601,11 @@ function buildImportParams(api: ApiItem): Record<string, string> {
       params['report_year'] = getParam(api.api_name, 'report_year') || currentYear
       params['report_quarter'] = getParam(api.api_name, 'report_quarter') || '1'
     } else if (p === 'freq') {
-      params['freq'] = getParam(api.api_name, 'freq') || '1min'
+      params['freq'] = getParam(api.api_name, 'freq') || freqDefault(api)
+    } else if (p === 'month_range') {
+      // 月份参数：YYYY-MM → YYYYMM（Tushare 要求的 month 格式）
+      const monthVal = getParam(api.api_name, 'month') || currentMonthStr
+      params['month'] = monthVal.replace('-', '')
     } else {
       const v = getParam(api.api_name, p)
       if (v) params[p] = v
@@ -629,6 +676,7 @@ async function checkHealth(): Promise<void> {
     health.connected = data.connected
     health.tokens.basic.configured = data.tokens?.basic?.configured ?? false
     health.tokens.advanced.configured = data.tokens?.advanced?.configured ?? false
+    health.tokens.premium.configured = data.tokens?.premium?.configured ?? false
     health.tokens.special.configured = data.tokens?.special?.configured ?? false
   } catch {
     health.connected = false
@@ -725,6 +773,25 @@ async function fetchHistory(): Promise<void> {
   try {
     const { data } = await apiClient.get<ImportLog[]>('/data/tushare/import/history', { params: { limit: 20 } })
     historyList.value = data
+
+    // 恢复正在运行的任务到活跃任务列表并启动轮询
+    const runningLogs = data.filter(
+      log => log.status === 'running' && log.celery_task_id
+        && !activeTasks.value.some(t => t.task_id === log.celery_task_id),
+    )
+    for (const log of runningLogs) {
+      const taskId = log.celery_task_id!
+      activeTasks.value.push({
+        task_id: taskId,
+        api_name: log.api_name,
+        status: 'running',
+        total: 0,
+        completed: 0,
+        failed: 0,
+        current_item: '',
+      })
+      startPolling(taskId)
+    }
   } catch {
     historyList.value = []
   } finally {
@@ -879,6 +946,7 @@ onUnmounted(() => {
 }
 .tier-basic { background: #1a3a1a; color: #3fb950; }
 .tier-advanced { background: #1a2a3a; color: #58a6ff; }
+.tier-premium { background: #2a1a3a; color: #bc8cff; }
 .tier-special { background: #3a2a1a; color: #d29922; }
 
 /* ── 参数表单 ── */

@@ -178,13 +178,13 @@ def test_registry_entry_do_update_has_update_columns(entry: ApiEntry) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_has_at_least_70_entries() -> None:
+def test_registry_has_127_entries() -> None:
     """
-    验证注册表至少包含 70 个接口条目（当前已注册 74 个）。
+    验证注册表包含 127 个接口条目（全部股票数据 102 个 + 指数专题 20 个 + VIP 变体 5 个）。
     """
     count = len(TUSHARE_API_REGISTRY)
-    assert count >= 70, (
-        f"注册表应至少包含 70 个接口，实际只有 {count} 个"
+    assert count == 127, (
+        f"注册表应包含 127 个接口，实际有 {count} 个"
     )
 
 
@@ -222,6 +222,7 @@ def test_resolve_token_tier_specific_preferred(
     tier_setting_map = {
         TokenTier.BASIC: "tushare_token_basic",
         TokenTier.ADVANCED: "tushare_token_advanced",
+        TokenTier.PREMIUM: "tushare_token_premium",
         TokenTier.SPECIAL: "tushare_token_special",
     }
     setting_name = tier_setting_map[tier]
@@ -230,6 +231,7 @@ def test_resolve_token_tier_specific_preferred(
         # 设置对应级别 Token
         setattr(mock_settings, "tushare_token_basic", "")
         setattr(mock_settings, "tushare_token_advanced", "")
+        setattr(mock_settings, "tushare_token_premium", "")
         setattr(mock_settings, "tushare_token_special", "")
         setattr(mock_settings, setting_name, tier_token)
         mock_settings.tushare_api_token = fallback_token

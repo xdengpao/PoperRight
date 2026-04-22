@@ -202,6 +202,7 @@ const menuGroups: Record<string, NavItem[]> = {
           children: [
             { path: '/data/online', label: '数据总览', icon: '📊' },
             { path: '/data/online/tushare', label: 'tushare', icon: '📡' },
+            { path: '/data/online/tushare-preview', label: 'tushare预览', icon: '🔍' },
           ],
         },
         { path: '/data/local', label: '本地数据', icon: '📁' },

@@ -2,7 +2,7 @@
 TushareImportService 单元测试
 
 覆盖：
-- _resolve_token: 三级 Token 路由、回退、空 Token 报错
+- _resolve_token: 四级 Token 路由、回退、空 Token 报错
 - _validate_params: 必填参数缺失、日期格式校验、代码格式校验、合法参数通过
 - start_import: 成功分发 Celery 任务、未知接口报错、并发保护
 - stop_import: 设置停止信号、更新进度、撤销 Celery 任务
@@ -70,13 +70,14 @@ def svc() -> TushareImportService:
 
 
 class TestResolveToken:
-    """_resolve_token 三级 Token 路由测试。"""
+    """_resolve_token 四级 Token 路由测试。"""
 
     def test_basic_tier_returns_basic_token(self, svc: TushareImportService) -> None:
         """basic 级别 Token 已配置时直接返回。"""
         with patch("app.services.data_engine.tushare_import_service.settings") as m:
             m.tushare_token_basic = "tok_basic"
             m.tushare_token_advanced = ""
+            m.tushare_token_premium = ""
             m.tushare_token_special = ""
             m.tushare_api_token = "tok_default"
             assert svc._resolve_token(TokenTier.BASIC) == "tok_basic"
@@ -86,15 +87,27 @@ class TestResolveToken:
         with patch("app.services.data_engine.tushare_import_service.settings") as m:
             m.tushare_token_basic = ""
             m.tushare_token_advanced = "tok_adv"
+            m.tushare_token_premium = ""
             m.tushare_token_special = ""
             m.tushare_api_token = ""
             assert svc._resolve_token(TokenTier.ADVANCED) == "tok_adv"
+
+    def test_premium_tier_returns_premium_token(self, svc: TushareImportService) -> None:
+        """premium 级别 Token 已配置时直接返回。"""
+        with patch("app.services.data_engine.tushare_import_service.settings") as m:
+            m.tushare_token_basic = ""
+            m.tushare_token_advanced = ""
+            m.tushare_token_premium = "tok_prem"
+            m.tushare_token_special = ""
+            m.tushare_api_token = ""
+            assert svc._resolve_token(TokenTier.PREMIUM) == "tok_prem"
 
     def test_special_tier_returns_special_token(self, svc: TushareImportService) -> None:
         """special 级别 Token 已配置时直接返回。"""
         with patch("app.services.data_engine.tushare_import_service.settings") as m:
             m.tushare_token_basic = ""
             m.tushare_token_advanced = ""
+            m.tushare_token_premium = ""
             m.tushare_token_special = "tok_sp"
             m.tushare_api_token = ""
             assert svc._resolve_token(TokenTier.SPECIAL) == "tok_sp"
@@ -104,10 +117,12 @@ class TestResolveToken:
         with patch("app.services.data_engine.tushare_import_service.settings") as m:
             m.tushare_token_basic = ""
             m.tushare_token_advanced = ""
+            m.tushare_token_premium = ""
             m.tushare_token_special = ""
             m.tushare_api_token = "tok_fallback"
             assert svc._resolve_token(TokenTier.BASIC) == "tok_fallback"
             assert svc._resolve_token(TokenTier.ADVANCED) == "tok_fallback"
+            assert svc._resolve_token(TokenTier.PREMIUM) == "tok_fallback"
             assert svc._resolve_token(TokenTier.SPECIAL) == "tok_fallback"
 
     def test_raises_when_all_empty(self, svc: TushareImportService) -> None:
@@ -115,6 +130,7 @@ class TestResolveToken:
         with patch("app.services.data_engine.tushare_import_service.settings") as m:
             m.tushare_token_basic = ""
             m.tushare_token_advanced = ""
+            m.tushare_token_premium = ""
             m.tushare_token_special = ""
             m.tushare_api_token = ""
             with pytest.raises(ValueError, match="Token 未配置"):
@@ -224,6 +240,7 @@ class TestStartImport:
         ):
             mock_settings.tushare_token_basic = "tok"
             mock_settings.tushare_token_advanced = ""
+            mock_settings.tushare_token_premium = ""
             mock_settings.tushare_token_special = ""
             mock_settings.tushare_api_token = ""
 
@@ -253,6 +270,7 @@ class TestStartImport:
         ):
             mock_settings.tushare_token_basic = "tok"
             mock_settings.tushare_token_advanced = ""
+            mock_settings.tushare_token_premium = ""
             mock_settings.tushare_token_special = ""
             mock_settings.tushare_api_token = ""
 
@@ -443,6 +461,7 @@ class TestCheckHealth:
         ):
             mock_settings.tushare_token_basic = "tok_b"
             mock_settings.tushare_token_advanced = "tok_a"
+            mock_settings.tushare_token_premium = ""
             mock_settings.tushare_token_special = ""
             mock_settings.tushare_api_token = ""
 
@@ -451,6 +470,7 @@ class TestCheckHealth:
             assert result["connected"] is True
             assert result["tokens"]["basic"]["configured"] is True
             assert result["tokens"]["advanced"]["configured"] is True
+            assert result["tokens"]["premium"]["configured"] is False
             assert result["tokens"]["special"]["configured"] is False
 
     async def test_disconnected_state(self, svc: TushareImportService) -> None:
@@ -458,6 +478,7 @@ class TestCheckHealth:
         with patch("app.services.data_engine.tushare_import_service.settings") as mock_settings:
             mock_settings.tushare_token_basic = ""
             mock_settings.tushare_token_advanced = ""
+            mock_settings.tushare_token_premium = ""
             mock_settings.tushare_token_special = ""
             mock_settings.tushare_api_token = ""
 
@@ -466,6 +487,7 @@ class TestCheckHealth:
             assert result["connected"] is False
             assert result["tokens"]["basic"]["configured"] is False
             assert result["tokens"]["advanced"]["configured"] is False
+            assert result["tokens"]["premium"]["configured"] is False
             assert result["tokens"]["special"]["configured"] is False
 
     async def test_health_check_exception_returns_disconnected(self, svc: TushareImportService) -> None:
@@ -482,6 +504,7 @@ class TestCheckHealth:
         ):
             mock_settings.tushare_token_basic = "tok"
             mock_settings.tushare_token_advanced = ""
+            mock_settings.tushare_token_premium = ""
             mock_settings.tushare_token_special = ""
             mock_settings.tushare_api_token = ""
 

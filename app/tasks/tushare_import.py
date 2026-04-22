@@ -170,18 +170,30 @@ async def _process_import(
         # 判断是否需要分批处理：
         # 1. 注册表明确标记 batch_by_code=True
         # 2. 接口支持 stock_code 参数但用户未传 ts_code → 自动按全市场分批
+        # 3. 接口支持 index_code 参数但用户未传 ts_code → 自动按全部指数分批
         use_batch = entry.batch_by_code
+        use_index_batch = False
         if not use_batch and not params.get("ts_code"):
             from app.services.data_engine.tushare_registry import ParamType
             has_stock_param = (
                 ParamType.STOCK_CODE in entry.required_params
                 or ParamType.STOCK_CODE in entry.optional_params
             )
+            has_index_param = (
+                ParamType.INDEX_CODE in entry.required_params
+                or ParamType.INDEX_CODE in entry.optional_params
+            )
             if has_stock_param:
                 use_batch = True
+            elif has_index_param:
+                use_index_batch = True
 
         if use_batch:
             result = await _process_batched(
+                entry, adapter, params, task_id, log_id, rate_delay,
+            )
+        elif use_index_batch:
+            result = await _process_batched_index(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
         else:
@@ -236,6 +248,13 @@ async def _process_single(
     # 支持 extra_config 中的 tushare_api_name（实际 Tushare 接口名）和 default_params（默认参数）
     actual_api_name = entry.extra_config.get("tushare_api_name", entry.api_name)
     call_params = {**entry.extra_config.get("default_params", {}), **params}
+
+    # 某些 Tushare 接口只接受 trade_date 而非 start_date/end_date（如 top_list、top_inst）
+    # 将 start_date 转为 trade_date
+    if entry.extra_config.get("use_trade_date_loop"):
+        if "start_date" in call_params and "trade_date" not in call_params:
+            call_params["trade_date"] = call_params.pop("start_date")
+        call_params.pop("end_date", None)
 
     data = await _call_api_with_retry(adapter, actual_api_name, call_params, entry)
     rows = TushareAdapter._rows_from_data(data)
@@ -308,6 +327,12 @@ async def _process_batched(
                 rows = TushareAdapter._rows_from_data(data)
 
                 if rows:
+                    # 支持 extra_config.inject_fields：向每行注入固定字段值
+                    inject_fields = entry.extra_config.get("inject_fields")
+                    if inject_fields:
+                        for row in rows:
+                            row.update(inject_fields)
+
                     mapped_rows = _apply_field_mappings(rows, entry)
                     converted_rows = _convert_codes(mapped_rows, entry)
 
@@ -531,6 +556,86 @@ async def _get_stock_list() -> list[str]:
     return ts_codes
 
 
+async def _get_index_list() -> list[str]:
+    """从 index_info 表获取全部指数的 ts_code 列表。"""
+    from sqlalchemy import select
+
+    from app.core.database import AsyncSessionPG
+    from app.models.tushare_import import IndexInfo
+
+    async with AsyncSessionPG() as session:
+        stmt = select(IndexInfo.ts_code).order_by(IndexInfo.ts_code)
+        result = await session.execute(stmt)
+        return list(result.scalars().all())
+
+
+async def _process_batched_index(
+    entry: ApiEntry,
+    adapter: TushareAdapter,
+    params: dict,
+    task_id: str,
+    log_id: int,
+    rate_delay: float,
+) -> dict:
+    """按指数代码列表分批调用 API（用于 index_weekly/index_monthly 等）。"""
+    index_codes = await _get_index_list()
+    if not index_codes:
+        return {"status": "completed", "record_count": 0}
+
+    total = len(index_codes)
+    completed = 0
+    total_records = 0
+
+    await _update_progress(task_id, status="running", total=total, completed=0)
+
+    for ts_code in index_codes:
+        if await _check_stop_signal(task_id):
+            return {"status": "stopped", "record_count": total_records}
+
+        # 根据接口要求选择参数名：index_weight 用 index_code，其他用 ts_code
+        code_param_name = "index_code" if entry.api_name == "index_weight" else "ts_code"
+        call_params = {**params, code_param_name: ts_code}
+        # 仅在 use_trade_date_loop 模式下移除 start_date/end_date
+        if entry.extra_config.get("use_trade_date_loop"):
+            call_params.pop("start_date", None)
+            call_params.pop("end_date", None)
+
+        try:
+            data = await _call_api_with_retry(adapter, entry.api_name, call_params, entry)
+            rows = TushareAdapter._rows_from_data(data)
+
+            if rows:
+                inject_fields = entry.extra_config.get("inject_fields")
+                if inject_fields:
+                    for row in rows:
+                        row.update(inject_fields)
+
+                mapped_rows = _apply_field_mappings(rows, entry)
+                converted_rows = _convert_codes(mapped_rows, entry)
+
+                try:
+                    if entry.storage_engine == StorageEngine.TS:
+                        await _write_to_timescaledb(converted_rows, entry)
+                    else:
+                        await _write_to_postgresql(converted_rows, entry)
+                    total_records += len(converted_rows)
+                except Exception as db_exc:
+                    logger.error("DB 写入失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, db_exc)
+
+        except TushareAPIError as api_exc:
+            if api_exc.code and api_exc.code == -2001:
+                raise
+            logger.error("API 调用失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, api_exc)
+        except Exception as exc:
+            logger.error("处理失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, exc)
+
+        completed += 1
+        await _update_progress(task_id, status="running", total=total, completed=completed, current_item=ts_code)
+        time.sleep(rate_delay)
+
+    return {"status": "completed", "record_count": total_records}
+
+
 # ---------------------------------------------------------------------------
 # Redis 进度更新
 # ---------------------------------------------------------------------------
@@ -632,7 +737,7 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
     from datetime import datetime as datetime_type
     from decimal import Decimal, InvalidOperation
 
-    from sqlalchemy import Boolean, Date, DateTime, Numeric
+    from sqlalchemy import Boolean, Date, DateTime, Numeric, String
     from sqlalchemy import text
 
     from app.core.database import AsyncSessionPG, PGBase
@@ -647,6 +752,7 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
     date_columns: set[str] = set()
     bool_columns: set[str] = set()
     numeric_columns: set[str] = set()
+    string_columns: set[str] = set()
     table_obj = PGBase.metadata.tables.get(entry.target_table)
     if table_obj is not None:
         table_columns = {col.name for col in table_obj.columns}
@@ -657,6 +763,8 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
                 bool_columns.add(col.name)
             elif isinstance(col.type, Numeric):
                 numeric_columns.add(col.name)
+            elif isinstance(col.type, String):
+                string_columns.add(col.name)
     else:
         logger.warning(
             "目标表 %s 未在 ORM metadata 中找到，跳过列过滤和类型转换",
@@ -665,6 +773,26 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 
     # 收集所有列名（取第一行的键），过滤掉目标表中不存在的列
     raw_columns = list(rows[0].keys())
+
+    # JSONB 打包：将非固定列的字段打包成 JSON 存入指定 JSONB 列
+    jsonb_pack_col = entry.extra_config.get("jsonb_pack_column")
+    jsonb_fixed_cols = set(entry.extra_config.get("jsonb_fixed_columns", []))
+    if jsonb_pack_col:
+        import json as _json
+        packed_rows = []
+        for row in rows:
+            new_row = {}
+            json_data = {}
+            for k, v in row.items():
+                if k in jsonb_fixed_cols:
+                    new_row[k] = v
+                else:
+                    json_data[k] = v
+            new_row[jsonb_pack_col] = _json.dumps(json_data, ensure_ascii=False) if json_data else "{}"
+            packed_rows.append(new_row)
+        rows = packed_rows
+        raw_columns = list(rows[0].keys()) if rows else raw_columns
+
     if table_columns is not None:
         columns = [c for c in raw_columns if c in table_columns]
     else:
@@ -680,6 +808,7 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
         - Date 列：YYYYMMDD / YYYY-MM-DD 字符串 → date 对象
         - Boolean 列：int (0/1) → bool
         - Numeric 列：str → Decimal
+        - String 列：int/float → str（Tushare 有时返回数字类型给字符串列）
         """
         result = {}
         for k, v in row.items():
@@ -708,24 +837,27 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
                     v = Decimal(v) if v else None
                 except (InvalidOperation, ValueError):
                     v = None
+            # String 列：int/float → str
+            elif k in string_columns and not isinstance(v, str):
+                v = str(v)
             result[k] = v
         return result
 
     filtered_rows = [_coerce_row(row) for row in rows]
 
-    # 构建 INSERT 语句
-    col_list = ", ".join(columns)
+    # 构建 INSERT 语句（列名加双引号避免 SQL 保留字冲突，如 limit）
+    col_list = ", ".join(f'"{col}"' for col in columns)
     val_placeholders = ", ".join(f":{col}" for col in columns)
 
     if entry.conflict_columns and entry.conflict_action == "do_nothing":
-        conflict_cols = ", ".join(entry.conflict_columns)
+        conflict_cols = ", ".join(f'"{c}"' for c in entry.conflict_columns)
         sql = (
             f"INSERT INTO {entry.target_table} ({col_list}) "
             f"VALUES ({val_placeholders}) "
             f"ON CONFLICT ({conflict_cols}) DO NOTHING"
         )
     elif entry.conflict_columns and entry.conflict_action == "do_update":
-        conflict_cols = ", ".join(entry.conflict_columns)
+        conflict_cols = ", ".join(f'"{c}"' for c in entry.conflict_columns)
         # 更新 update_columns 中指定的列，如果未指定则更新所有非冲突列
         update_cols = entry.update_columns or [
             c for c in columns if c not in entry.conflict_columns
@@ -737,9 +869,9 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
             columns_set = set(columns)
             for col in update_cols:
                 if col == "updated_at":
-                    set_parts.append("updated_at = NOW()")
+                    set_parts.append('"updated_at" = NOW()')
                 elif col in columns_set:
-                    set_parts.append(f"{col} = EXCLUDED.{col}")
+                    set_parts.append(f'"{col}" = EXCLUDED."{col}"')
             set_clause = ", ".join(set_parts) if set_parts else ""
             if set_clause:
                 sql = (
@@ -784,13 +916,13 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 # ---------------------------------------------------------------------------
 
 async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
-    """写入 TimescaleDB kline 超表。
+    """写入 TimescaleDB 超表（kline 或 sector_kline）。
 
-    将 Tushare 行情数据映射到 kline 表列：
-    time, symbol, freq, open, high, low, close, volume, amount, adj_type
+    根据 entry.target_table 决定写入目标：
+    - kline：股票/指数行情数据
+    - sector_kline：板块行情数据（ths_daily/dc_daily/sw_daily/ci_daily/tdx_daily）
 
-    使用 ON CONFLICT (time, symbol, freq, adj_type) DO NOTHING 去重。
-    事务保证单批原子性。
+    使用 ON CONFLICT DO NOTHING 去重。事务保证单批原子性。
     """
     if not rows:
         return
@@ -799,13 +931,26 @@ async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
 
     from app.core.database import AsyncSessionTS
 
-    # 从 entry.extra_config 获取 freq 配置
+    # 从 entry.extra_config 获取 freq 和 data_source 配置
     freq = entry.extra_config.get("freq", "1d")
+    data_source = entry.extra_config.get("data_source", "")
+
+    # 根据 target_table 选择写入目标
+    if entry.target_table == "sector_kline":
+        await _write_to_sector_kline(rows, entry, freq, data_source)
+    else:
+        await _write_to_kline(rows, entry, freq)
+
+
+async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
+    """写入 kline 超表（股票/指数行情）。"""
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionTS
 
     sql = text("""
-        INSERT INTO kline (time, symbol, freq, open, high, low, close, volume, amount, adj_type)
+        INSERT INTO kline ("time", "symbol", "freq", "open", "high", "low", "close", "volume", "amount", "adj_type")
         VALUES (:time, :symbol, :freq, :open, :high, :low, :close, :volume, :amount, :adj_type)
-        ON CONFLICT (time, symbol, freq, adj_type) DO NOTHING
+        ON CONFLICT ("time", "symbol", "freq", "adj_type") DO NOTHING
     """)
 
     async with AsyncSessionTS() as session:
@@ -844,6 +989,53 @@ async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
                     "volume": row.get("vol") or row.get("volume") or 0,
                     "amount": row.get("amount"),
                     "adj_type": 0,
+                })
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
+async def _write_to_sector_kline(
+    rows: list[dict], entry: ApiEntry, freq: str, data_source: str,
+) -> None:
+    """写入 sector_kline 超表（板块行情）。"""
+    from sqlalchemy import text
+    from app.core.database import AsyncSessionTS
+
+    sql = text("""
+        INSERT INTO sector_kline ("time", "sector_code", "data_source", "freq", "open", "high", "low", "close", "volume", "amount")
+        VALUES (:time, :sector_code, :data_source, :freq, :open, :high, :low, :close, :volume, :amount)
+        ON CONFLICT ("time", "sector_code", "data_source", "freq") DO NOTHING
+    """)
+
+    async with AsyncSessionTS() as session:
+        try:
+            for row in rows:
+                trade_date_str = row.get("trade_date", "")
+                if trade_date_str and len(str(trade_date_str)) == 8:
+                    try:
+                        ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
+                    except ValueError:
+                        continue
+                else:
+                    continue
+
+                sector_code = row.get("ts_code", "")
+                if not sector_code:
+                    continue
+
+                await session.execute(sql, {
+                    "time": ts,
+                    "sector_code": str(sector_code),
+                    "data_source": data_source,
+                    "freq": freq,
+                    "open": row.get("open"),
+                    "high": row.get("high"),
+                    "low": row.get("low"),
+                    "close": row.get("close"),
+                    "volume": row.get("vol") or row.get("volume") or 0,
+                    "amount": row.get("amount"),
                 })
             await session.commit()
         except Exception:

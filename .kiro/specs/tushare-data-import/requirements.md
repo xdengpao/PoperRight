@@ -2,7 +2,7 @@
 
 ## 简介
 
-在数据管理模块的"在线数据"菜单下新增"tushare"子菜单，提供 Tushare 平台股票数据和指数专题数据的在线导入功能。用户可按数据分类选择导入内容、设置日期范围和参数，通过 Celery 异步任务执行导入，并实时查看导入进度。
+在数据管理模块的"在线数据"菜单下新增"tushare"子菜单，提供 Tushare 平台股票数据和指数专题数据的在线导入功能。用户可按数据分类选择导入内容、设置日期范围和参数，通过 Celery 异步任务执行导入，并实时查看导入进度。指数专题覆盖 20 个接口，包含指数基本信息、指数行情（低频/中频）、指数成分和权重、申万行业（分类/成分/日线/实时）、中信行业（成分/日线）、大盘指数每日指标、指数技术面因子（专业版）、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数。
 
 ## 术语表
 
@@ -11,7 +11,7 @@
 - **Import_Task**：Celery 异步导入任务，执行实际的 API 调用和数据写入
 - **TushareImportView**：前端 Tushare 数据导入页面组件
 - **Stock_Data**：Tushare 股票数据大类，包含基础数据、行情数据、财务数据、参考数据、特色数据、两融及转融通、资金流向数据、打板专题数据等子分类
-- **Index_Data**：Tushare 指数专题数据大类，包含指数基本信息、指数行情（日线/周线/月线/分钟）、指数成分和权重、申万行业、中信行业、大盘指数每日指标、指数技术面因子、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数等子分类
+- **Index_Data**：Tushare 指数专题数据大类，包含指数基本信息、指数行情（低频：日线/周线/月线）、指数行情（中频：实时日线/实时分钟/历史分钟）、指数成分和权重、申万行业数据（分类/成分/日线行情/实时行情）、中信行业数据（成分/日线行情）、大盘指数每日指标、指数技术面因子（专业版）、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数等子分类
 - **ts_code**：Tushare 股票/指数代码格式，如 600000.SH（上海）、000001.SZ（深圳）、000001.BJ（北京）
 - **symbol**：系统内部使用的纯 6 位数字股票代码格式，如 600000、000001
 - **API_Registry**：Tushare API 接口注册表，定义每个接口的名称、参数、字段映射和目标存储表
@@ -28,7 +28,7 @@
 - **DataSource_Enum**：板块数据来源枚举（`app/models/sector.py`），现有值 DC（东方财富）、TI（申万行业）、TDX（通达信），需新增 CI（中信行业）和 THS（同花顺概念/行业板块）
 - **Token_Tier**：Tushare API Token 权限级别，分为 basic（2000 积分及以下）、advanced（2000-6000 积分，包含6000积分）、premium（6000 积分以上）、special（需单独开通权限）四级，系统根据接口权限级别自动选择对应 Token
 - **Low_Freq_Data**：低频行情数据，包含日K（daily/index_daily）、周K（weekly/index_weekly）、月K（monthly/index_monthly），与中频数据分开导入
-- **Mid_Freq_Data**：中频行情数据，包含分钟级行情（stk_mins/index_min/index_1min_realtime）和实时行情（rt_k/rt_min/rt_min_daily），数据量较大，与低频数据分开导入
+- **Mid_Freq_Data**：中频行情数据，包含分钟级行情（stk_mins/idx_mins/rt_idx_min_daily）和实时行情（rt_k/rt_min/rt_min_daily/rt_idx_k/rt_idx_min/rt_sw_k），数据量较大，与低频数据分开导入 【调整：指数中频接口名更新为 idx_mins/rt_idx_k/rt_idx_min/rt_idx_min_daily，新增 rt_sw_k】
 
 ## 需求
 
@@ -53,7 +53,7 @@
 1. THE TushareImportView SHALL 在页面顶部显示 Tushare 连接状态指示器
 2. THE TushareImportView SHALL 显示"股票数据"和"指数专题"两个独立的数据分类卡片区域
 3. THE TushareImportView SHALL 在"股票数据"分类下显示以下子分类：基础数据、行情数据（低频：日K/周K/月K）、行情数据（中频：分钟级/实时）、财务数据、参考数据、特色数据、两融及转融通、资金流向数据、打板专题数据 【调整：子分类列表更新，行情数据中频分组增加"实时"标注】
-4. THE TushareImportView SHALL 在"指数专题"分类下显示以下子分类：指数基本信息、指数行情数据（低频：日线/周线/月线）、指数行情数据（中频：实时分钟/历史分钟）、指数成分和权重、申万行业数据、中信行业数据、大盘指数每日指标、指数技术面因子、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数
+4. THE TushareImportView SHALL 在"指数专题"分类下显示以下子分类：指数基本信息、指数行情数据（低频：日线/周线/月线）、指数行情数据（中频：实时日线/实时分钟/历史分钟）、指数成分和权重、申万行业数据（分类/成分/日线行情/实时行情）、中信行业数据（成分/日线行情）、大盘指数每日指标、指数技术面因子（专业版）、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数 【调整：中频新增实时日线；申万行业新增成分和实时行情；中信行业新增成分；指数技术面因子标注专业版；接口名称按文档更新】
 5. WHEN 用户展开某个子分类，THE TushareImportView SHALL 显示该子分类下所有可导入的 Tushare API 接口列表
 6. THE TushareImportView SHALL 为每个 API 接口显示接口名称（如 stock_basic）和中文说明（如"股票基础列表"）
 7. THE TushareImportView SHALL 在页面底部显示导入历史记录区域
@@ -256,6 +256,7 @@
 3. WHEN index_basic 数据获取成功，THE Import_Task SHALL 将指数信息写入 index_info 表（PostgreSQL），包含 ts_code、name、market、publisher、category、list_date 字段
 4. THE Import_Task SHALL 使用 ON CONFLICT (ts_code) 策略更新已有记录
 5. IF Tushare API 返回错误码，THEN THE Import_Task SHALL 记录错误详情并将任务状态标记为失败
+6. THE API_Registry SHALL 将 index_basic 标注为 basic 权限级别
 
 ### 需求 12：指数低频行情数据导入（日线/周线/月线）
 
@@ -263,24 +264,30 @@
 
 #### 验收标准
 
-1. THE TushareImportView SHALL 在"指数行情数据"子分类下将接口分为"低频行情（日线/周线/月线）"和"中频行情（分钟级）"两个独立分组
+1. THE TushareImportView SHALL 在"指数行情数据"子分类下将接口分为"低频行情（日线/周线/月线）"和"中频行情（实时日线/实时分钟/历史分钟）"两个独立分组 【调整：中频分组新增实时日线】
 2. WHEN 用户选择指数低频行情接口并设置日期范围和指数代码，THE TushareImportView SHALL 提供起止日期选择器和指数代码输入框
 3. WHEN 导入 index_daily/index_weekly/index_monthly 数据时，THE Import_Task SHALL 将指数行情写入 TimescaleDB 的 kline 超表，symbol 字段存储指数 ts_code（如 000001.SH），freq 字段分别对应 "1d"/"1w"/"1M"
 4. THE Import_Task SHALL 使用 ON CONFLICT (time, symbol, freq, adj_type) 策略去重
 5. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔
+6. THE API_Registry SHALL 将 index_daily 标注为 advanced 权限级别（2000积分），index_weekly 和 index_monthly 标注为 basic 权限级别（600积分） 【调整：根据文档积分要求更新权限级别，index_daily 需2000积分，index_weekly/index_monthly 需600积分】
+7. THE TushareImportView SHALL 在 index_daily 接口说明中注明"深证成指（399001.SZ）仅包含500只成分股，如需深市全部A股成交数据请使用深证A指（399107.SZ）" 【新增：根据文档注意事项】
 
-### 需求 12a：指数中频行情数据导入（分钟级）
+### 需求 12a：指数中频行情数据导入（实时日线/实时分钟/历史分钟）
 
-**用户故事：** 作为量化交易员，我希望按日期范围导入 Tushare 指数分钟级行情数据（index_1min_realtime、index_min），中频与低频分开导入，以便独立控制分钟级指数数据的导入。
+**用户故事：** 作为量化交易员，我希望按日期范围导入 Tushare 指数实时和分钟级行情数据（rt_idx_k、rt_idx_min、rt_idx_min_daily、idx_mins），中频与低频分开导入，以便独立控制实时和分钟级指数数据的导入。
 
 #### 验收标准
 
-1. WHEN 用户选择指数中频行情接口并设置日期范围和指数代码，THE TushareImportView SHALL 提供起止日期选择器、指数代码输入框和频率选择器（1min/5min/15min/30min/60min）
-2. WHEN 导入 index_1min_realtime 数据时，THE Import_Task SHALL 将指数实时分钟行情写入 kline 超表，freq 字段设为 "1m"
-3. WHEN 导入 index_min 数据时，THE Import_Task SHALL 将指数历史分钟行情写入 kline 超表，freq 字段根据用户选择的频率设置（"1m"/"5m"/"15m"/"30m"/"60m"）
-4. THE Import_Task SHALL 使用 ON CONFLICT (time, symbol, freq, adj_type) 策略去重
-5. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔
-6. THE TushareImportView SHALL 在中频行情分组中提示用户"分钟级数据量较大，建议按单只指数或短日期范围分批导入"
+1. WHEN 用户选择指数中频行情接口并设置日期范围和指数代码，THE TushareImportView SHALL 提供起止日期选择器、指数代码输入框和频率选择器（1min/5min/15min/30min/60min，仅 idx_mins 需要）
+2. WHEN 导入 rt_idx_k（指数实时日线）数据时，THE Import_Task SHALL 将指数实时日线行情写入 kline 超表，freq 字段设为 "1d"，标记为实时数据，支持按代码或代码通配符一次性提取全部交易所指数 【新增：替代原概念，文档接口名为 rt_idx_k】
+3. WHEN 导入 rt_idx_min（指数实时分钟）数据时，THE Import_Task SHALL 将指数实时分钟行情写入 kline 超表，freq 字段根据频率设置，单次最大1000行，支持逗号分隔多个代码同时提取 【调整：替代原 index_1min_realtime，文档接口名为 rt_idx_min】
+4. WHEN 导入 rt_idx_min_daily（指数实时分钟日累计）数据时，THE Import_Task SHALL 将指数实时分钟日累计行情写入 kline 超表，仅支持单个指数提取 【新增：文档中注明的日累计接口】
+5. WHEN 导入 idx_mins（指数历史分钟）数据时，THE Import_Task SHALL 将指数历史分钟行情写入 kline 超表，freq 字段根据用户选择的频率设置（"1m"/"5m"/"15m"/"30m"/"60m"），单次最大8000行，可提供超过10年历史分钟数据 【调整：替代原 index_min，文档接口名为 idx_mins】
+6. THE Import_Task SHALL 使用 ON CONFLICT (time, symbol, freq, adj_type) 策略去重
+7. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔
+8. THE TushareImportView SHALL 在中频行情分组中提示用户"分钟级数据量较大，建议按单只指数或短日期范围分批导入"
+9. THE API_Registry SHALL 将 rt_idx_k、rt_idx_min、rt_idx_min_daily、idx_mins 均标注为 special 权限级别（需单独开通） 【调整：根据文档权限说明更新】
+10. 【移除】原 index_1min_realtime 接口（被 rt_idx_min 替代）、原 index_min 接口（被 idx_mins 替代）
 
 ### 需求 13：指数成分和权重导入
 
@@ -288,31 +295,37 @@
 
 #### 验收标准
 
-1. WHEN 用户选择 index_weight 接口并指定指数代码和日期，THE TushareImportView SHALL 提供指数代码输入框和日期选择器
+1. WHEN 用户选择 index_weight 接口并指定指数代码和日期，THE TushareImportView SHALL 提供指数代码输入框和日期选择器，建议输入当月第一天和最后一天的日期 【调整：根据文档建议补充日期输入提示】
 2. WHEN 导入 index_weight 数据时，THE Import_Task SHALL 将成分权重数据写入 index_weight 表（PostgreSQL），包含 index_code、con_code、trade_date、weight 字段
 3. THE Import_Task SHALL 使用 ON CONFLICT (index_code, con_code, trade_date) 策略去重
-4. IF 指定日期无成分数据，THEN THE Import_Task SHALL 记录警告日志并返回空结果
+4. IF 指定日期无成分数据，THEN THE Import_Task SHALL 记录警告日志
+5. THE API_Registry SHALL 将 index_weight 标注为 advanced 权限级别（2000积分） 【调整：根据文档积分要求更新】并返回空结果
 
 ### 需求 14：申万行业数据导入
 
-**用户故事：** 作为量化交易员，我希望导入 Tushare 申万行业分类和行情数据（index_classify、sw_daily），以便进行行业分析。
+**用户故事：** 作为量化交易员，我希望导入 Tushare 申万行业分类、成分和行情数据（index_classify、index_member_all、sw_daily、rt_sw_k），以便进行全面的行业分析。
 
 #### 验收标准
 
-1. WHEN 用户选择 index_classify 接口，THE Import_Service SHALL 调用 Tushare_Adapter 获取申万行业分类数据
+1. WHEN 用户选择 index_classify 接口，THE Import_Service SHALL 调用 Tushare_Adapter 获取申万行业分类数据，支持2014年版本（28个一级/104个二级/227个三级）和2021年版本（31个一级/134个二级/346个三级） 【调整：补充版本说明】
 2. WHEN index_classify 数据获取成功，THE Import_Task SHALL 将行业分类写入 sector_info 表，sector_type 设为 "INDUSTRY"，data_source 设为 "TI"
-3. WHEN 用户选择 sw_daily 接口并设置日期范围，THE Import_Task SHALL 将申万行业指数日行情写入 sector_kline 表，data_source 设为 "TI"
-4. THE Import_Task SHALL 使用 ON CONFLICT 策略去重
+3. WHEN 用户选择 index_member_all 接口并指定分类代码或股票代码，THE Import_Task SHALL 将申万行业成分（按三级分类）数据写入 sector_constituent 表（PostgreSQL），data_source 设为 "TI"，包含 sector_code、symbol、stock_name、level（分类级别）字段，单次最大2000行 【新增：申万行业成分分级接口】
+4. WHEN 用户选择 sw_daily 接口并设置日期范围，THE Import_Task SHALL 将申万行业指数日行情（默认申万2021版）写入 sector_kline 表，data_source 设为 "TI"，单次最大4000行 【调整：补充版本和限量说明】
+5. WHEN 用户选择 rt_sw_k 接口，THE Import_Task SHALL 将申万行业指数最新截面数据写入 sector_kline 表，data_source 设为 "TI"，标记为实时数据 【新增：申万实时行情接口】
+6. THE Import_Task SHALL 使用 ON CONFLICT 策略去重
+7. THE API_Registry SHALL 将 index_classify 标注为 advanced 权限级别（2000积分），index_member_all 标注为 advanced 权限级别（2000积分），sw_daily 标注为 advanced 权限级别（5000积分），rt_sw_k 标注为 special 权限级别（需单独开通） 【调整：根据文档积分要求更新权限级别】
 
 ### 需求 15：中信行业数据导入
 
-**用户故事：** 作为量化交易员，我希望导入 Tushare 中信行业成分和行情数据（ci_daily），以便进行多维度行业对比。
+**用户故事：** 作为量化交易员，我希望导入 Tushare 中信行业成分和行情数据（ci_index_member、ci_daily），以便进行多维度行业对比。
 
 #### 验收标准
 
-1. WHEN 用户选择中信行业接口并设置日期范围，THE TushareImportView SHALL 提供起止日期选择器
-2. WHEN 导入中信行业行情数据时，THE Import_Task SHALL 将数据写入 sector_kline 表，data_source 设为 "CI"
-3. THE Import_Task SHALL 使用 ON CONFLICT 策略去重
+1. WHEN 用户选择 ci_index_member 接口并指定分类代码或股票代码，THE Import_Task SHALL 将中信行业成分（按三级分类）数据写入 sector_constituent 表（PostgreSQL），data_source 设为 "CI"，包含 sector_code、symbol、stock_name、level（分类级别）字段，单次最大5000行 【新增：中信行业成分接口】
+2. WHEN 用户选择 ci_daily 接口并设置日期范围，THE TushareImportView SHALL 提供起止日期选择器
+3. WHEN 导入中信行业行情数据时，THE Import_Task SHALL 将数据写入 sector_kline 表，data_source 设为 "CI"，单次最大4000条，可循环提取
+4. THE Import_Task SHALL 使用 ON CONFLICT 策略去重
+5. THE API_Registry SHALL 将 ci_index_member 和 ci_daily 均标注为 advanced 权限级别（5000积分） 【调整：根据文档积分要求更新权限级别】
 
 ### 需求 16：大盘指数每日指标导入
 
@@ -323,16 +336,20 @@
 1. WHEN 用户选择 index_dailybasic 接口并设置日期范围，THE TushareImportView SHALL 提供起止日期选择器
 2. WHEN 导入 index_dailybasic 数据时，THE Import_Task SHALL 将指数每日指标写入 index_dailybasic 表（PostgreSQL），包含 ts_code、trade_date、pe、pb、turnover_rate、total_mv 字段
 3. THE Import_Task SHALL 使用 ON CONFLICT (ts_code, trade_date) 策略去重
+4. THE TushareImportView SHALL 在 index_dailybasic 接口说明中注明"目前只提供上证综指、深证成指、上证50、中证500、中小板指、创业板指的每日指标数据，数据从2004年1月开始" 【新增：根据文档数据范围说明】
+5. THE API_Registry SHALL 将 index_dailybasic 标注为 basic 权限级别（400积分） 【调整：根据文档积分要求更新】
 
 ### 需求 17：指数技术面因子导入
 
-**用户故事：** 作为量化交易员，我希望导入 Tushare 指数技术面因子数据（index_tech，专业版接口），以便获取指数技术分析指标。
+**用户故事：** 作为量化交易员，我希望导入 Tushare 指数技术面因子数据（idx_factor_pro，专业版接口），以便获取指数技术分析指标，覆盖大盘指数、申万行业指数和中信指数。
 
 #### 验收标准
 
-1. WHEN 用户选择 index_tech 接口并设置日期范围和指数代码，THE TushareImportView SHALL 提供起止日期选择器和指数代码输入框
-2. WHEN 导入 index_tech 数据时，THE Import_Task SHALL 将指数技术面因子数据写入 index_tech 表（PostgreSQL），包含 ts_code、trade_date、close、macd_dif、macd_dea、macd、kdj_k、kdj_d、kdj_j、rsi_6、rsi_12、boll_upper、boll_mid、boll_lower 字段，使用 ON CONFLICT (ts_code, trade_date) 策略去重
-3. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔
+1. WHEN 用户选择 idx_factor_pro 接口并设置日期范围和指数代码，THE TushareImportView SHALL 提供起止日期选择器和指数代码输入框
+2. WHEN 导入 idx_factor_pro 数据时，THE Import_Task SHALL 将指数技术面因子数据写入 index_tech 表（PostgreSQL），包含 ts_code、trade_date、close、macd_dif、macd_dea、macd、kdj_k、kdj_d、kdj_j、rsi_6、rsi_12、boll_upper、boll_mid、boll_lower 字段（输出参数_bfq表示不复权），使用 ON CONFLICT (ts_code, trade_date) 策略去重 【调整：接口名从 index_tech 更新为 idx_factor_pro，补充不复权说明】
+3. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔，单次最大8000行
+4. THE API_Registry SHALL 将 idx_factor_pro 标注为 advanced 权限级别（5000积分，8000积分以上频次更高） 【调整：根据文档积分要求从 special 更新为 advanced】
+5. 【移除】原 index_tech 接口名（被 idx_factor_pro 替代）
 
 ### 需求 18：沪深市场每日交易统计导入
 
@@ -340,9 +357,10 @@
 
 #### 验收标准
 
-1. WHEN 用户选择 daily_info 接口并设置日期范围，THE Import_Task SHALL 将沪深市场每日交易统计数据写入 market_daily_info 表（PostgreSQL），包含 trade_date、exchange、ts_code、ts_name、com_count、total_share、float_share、total_mv、float_mv、amount、vol、trans_count 字段，使用 ON CONFLICT (trade_date, exchange, ts_code) 策略去重
-2. WHEN 用户选择 sz_daily_info 接口并设置日期范围，THE Import_Task SHALL 将深圳市场每日交易情况数据写入 sz_daily_info 表（PostgreSQL），包含 trade_date、ts_code、count、amount、vol、total_share、total_mv、float_share、float_mv 字段，使用 ON CONFLICT (trade_date, ts_code) 策略去重
+1. WHEN 用户选择 daily_info 接口并设置日期范围，THE Import_Task SHALL 将沪深市场每日交易统计数据写入 market_daily_info 表（PostgreSQL），包含 trade_date、exchange、ts_code、ts_name、com_count、total_share、float_share、total_mv、float_mv、amount、vol、trans_count 字段，使用 ON CONFLICT (trade_date, exchange, ts_code) 策略去重，单次最大4000行
+2. WHEN 用户选择 sz_daily_info 接口并设置日期范围，THE Import_Task SHALL 将深圳市场每日交易情况数据写入 sz_daily_info 表（PostgreSQL），包含 trade_date、ts_code、count、amount、vol、total_share、total_mv、float_share、float_mv 字段，使用 ON CONFLICT (trade_date, ts_code) 策略去重，单次最大2000行
 3. THE Import_Task SHALL 遵循 settings.rate_limit_kline（0.18 秒）频率限制
+4. THE API_Registry SHALL 将 daily_info 标注为 basic 权限级别（600积分），sz_daily_info 标注为 advanced 权限级别（2000积分） 【调整：根据文档积分要求更新权限级别】
 
 ### 需求 19：国际主要指数导入
 
@@ -351,8 +369,9 @@
 #### 验收标准
 
 1. WHEN 用户选择 index_global 接口并设置日期范围，THE TushareImportView SHALL 提供起止日期选择器和可选的指数代码输入框
-2. WHEN 导入 index_global 数据时，THE Import_Task SHALL 将国际指数行情数据写入 index_global 表（PostgreSQL），包含 ts_code、trade_date、open、close、high、low、pre_close、change、pct_chg、vol、amount 字段，使用 ON CONFLICT (ts_code, trade_date) 策略去重
+2. WHEN 导入 index_global 数据时，THE Import_Task SHALL 将国际指数行情数据写入 index_global 表（PostgreSQL），包含 ts_code、trade_date、open、close、high、low、pre_close、change、pct_chg、vol、amount 字段，使用 ON CONFLICT (ts_code, trade_date) 策略去重，单次最大4000行
 3. THE Import_Task SHALL 按 settings.rate_limit_kline（0.18 秒）频率限制控制 API 调用间隔
+4. THE API_Registry SHALL 将 index_global 标注为 advanced 权限级别（6000积分） 【调整：根据文档积分要求从 basic 更新为 advanced，6000积分属于 advanced 范围（2000-6000含6000）】
 
 ### 需求 20：导入任务进度追踪
 
@@ -395,7 +414,7 @@
 #### 验收标准
 
 1. THE Settings SHALL 新增四个 Token 配置项：`tushare_token_basic`（2000 积分及以下权限接口）、`tushare_token_advanced`（2000-6000 积分权限接口，包含6000积分）、`tushare_token_premium`（6000 积分以上权限接口）、`tushare_token_special`（需单独开通权限的接口），原有 `tushare_api_token` 作为默认 fallback 【调整：从三级扩展为四级，新增 premium 级别以匹配文档中的积分分布】
-2. THE API_Registry SHALL 为每个 Tushare 接口标注权限级别（basic/advanced/premium/special），对应所需的积分等级：basic（120-2000积分，如 stock_basic、trade_cal、daily、margin 等）、advanced（2000-6000积分含6000，如 stock_st、limit_list_d、moneyflow_dc、cyq_perf、stk_factor_pro、ths_index、dc_index、tdx_index、stk_nineturn、broker_recommend 等）、premium（6000积分以上，如 limit_list_ths、limit_step、limit_cpt_list、report_rc、ccass_hold_detail、dc_hot、hm_detail 等）、special（需单独开通，如 stk_premarket、rt_k、rt_min、stk_auction、stk_auction_o、stk_auction_c 等） 【调整：根据文档积分信息更新权限级别标注】
+2. THE API_Registry SHALL 为每个 Tushare 接口标注权限级别（basic/advanced/premium/special），对应所需的积分等级：basic（120-2000积分，如 stock_basic、trade_cal、daily、margin、index_basic、index_dailybasic、daily_info、index_weekly、index_monthly 等）、advanced（2000-6000积分含6000，如 stock_st、limit_list_d、moneyflow_dc、cyq_perf、stk_factor_pro、ths_index、dc_index、tdx_index、stk_nineturn、broker_recommend、index_daily、index_weight、index_classify、index_member_all、sw_daily、ci_index_member、ci_daily、idx_factor_pro、sz_daily_info、index_global 等）、premium（6000积分以上，如 limit_list_ths、limit_step、limit_cpt_list、report_rc、ccass_hold_detail、dc_hot、hm_detail 等）、special（需单独开通，如 stk_premarket、rt_k、rt_min、stk_auction、stk_auction_o、stk_auction_c、rt_idx_k、rt_idx_min、rt_idx_min_daily、idx_mins、rt_sw_k 等） 【调整：根据指数专题文档积分信息更新权限级别标注，index_global 从 basic 调整为 advanced（6000积分属于 advanced 范围），index_daily/index_weight/index_classify 调整为 advanced，新增 index_member_all/ci_index_member/idx_factor_pro/rt_idx_k/rt_idx_min/rt_idx_min_daily/idx_mins/rt_sw_k 的权限标注】
 3. WHEN Import_Service 调用 Tushare API 时，THE Import_Service SHALL 根据接口的权限级别自动选择对应的 Token：basic 级别使用 `tushare_token_basic`，advanced 级别使用 `tushare_token_advanced`，premium 级别使用 `tushare_token_premium`，special 级别使用 `tushare_token_special`
 4. IF 对应级别的 Token 未配置（为空），THEN THE Import_Service SHALL 回退使用 `tushare_api_token` 作为默认 Token
 5. THE TushareImportView SHALL 在页面顶部的连接状态区域显示四个 Token 的配置状态（已配置/未配置），帮助用户了解哪些权限级别可用
@@ -448,7 +467,7 @@
 14. THE System SHALL 创建 top_holders 表（PostgreSQL/PGBase），包含 ts_code、ann_date、end_date、holder_name、hold_amount、hold_ratio、holder_type 字段，使用 (ts_code, end_date, holder_name, holder_type) 复合唯一约束
 15. THE System SHALL 创建 limit_list 表（PostgreSQL/PGBase），包含 ts_code、trade_date、industry、close、pct_chg、amount、limit_amount、float_mv、total_mv、turnover_ratio、fd_amount、first_time、last_time、open_times、up_stat、limit_times、limit 字段，使用 (ts_code, trade_date, limit) 复合唯一约束
 16. THE System SHALL 创建 index_global 表（PostgreSQL/PGBase），包含 ts_code、trade_date、open、close、high、low、pre_close、change、pct_chg、vol、amount 字段，使用 (ts_code, trade_date) 复合唯一约束
-17. THE System SHALL 创建 index_tech 表（PostgreSQL/PGBase），包含 ts_code、trade_date、close、macd_dif、macd_dea、macd、kdj_k、kdj_d、kdj_j、rsi_6、rsi_12、boll_upper、boll_mid、boll_lower 字段，使用 (ts_code, trade_date) 复合唯一约束
+17. THE System SHALL 创建 index_tech 表（PostgreSQL/PGBase），包含 ts_code、trade_date、close、macd_dif、macd_dea、macd、kdj_k、kdj_d、kdj_j、rsi_6、rsi_12、boll_upper、boll_mid、boll_lower 字段，使用 (ts_code, trade_date) 复合唯一约束 【说明：表名保持 index_tech 不变，数据来源接口从 index_tech 更新为 idx_factor_pro】
 18. THE System SHALL 创建 stock_company 表（PostgreSQL/PGBase），包含 ts_code（主键）、chairman、manager、secretary、reg_capital、setup_date、province、city、website 字段
 19. THE System SHALL 创建 stock_namechange 表（PostgreSQL/PGBase），包含 ts_code、name、start_date、end_date、change_reason 字段
 20. THE System SHALL 创建 stock_hsgt 表（PostgreSQL/PGBase），包含 ts_code、hs_type、in_date、out_date、is_new 字段 【调整：替代原 hs_constituent 表】
@@ -479,7 +498,7 @@
 45. THE System SHALL 创建 kpl_list 表（PostgreSQL/PGBase），包含 trade_date、ts_code、name、close、pct_chg、tag 字段
 46. THE System SHALL 创建 moneyflow_mkt_dc 表（PostgreSQL/PGBase），包含 trade_date、close、change、pct_change、net_mf_amount、net_mf_amount_rate、buy_elg_amount、sell_elg_amount、buy_lg_amount、sell_lg_amount、buy_md_amount、sell_md_amount、buy_sm_amount、sell_sm_amount 字段，使用 (trade_date) 唯一约束
 47. THE System SHALL 在现有 DataSource 枚举（`app/models/sector.py`）中新增 `CI = "CI"`（中信行业）和 `THS = "THS"`（同花顺概念/行业板块）两个枚举值，原有 `TI = "TI"` 保留用于申万行业数据
-48. THE System SHALL 将 ths_index/dc_index/tdx_index 板块数据复用现有 sector_info 表（通过 data_source="THS"/"DC"/"TDX" 区分），将 ths_member/dc_member/tdx_member 成分股数据复用现有 sector_constituent 表（通过 data_source="THS"/"DC"/"TDX" 区分），将 ths_daily/dc_daily/tdx_daily 板块行情数据复用现有 sector_kline 表，不新建独立表 【调整：新增 TDX 数据源复用】
+48. THE System SHALL 将 ths_index/dc_index/tdx_index 板块数据复用现有 sector_info 表（通过 data_source="THS"/"DC"/"TDX" 区分），将 ths_member/dc_member/tdx_member/index_member_all/ci_index_member 成分股数据复用现有 sector_constituent 表（通过 data_source="THS"/"DC"/"TDX"/"TI"/"CI" 区分），将 ths_daily/dc_daily/tdx_daily/sw_daily/rt_sw_k/ci_daily 板块行情数据复用现有 sector_kline 表，不新建独立表 【调整：新增 index_member_all（申万行业成分）、ci_index_member（中信行业成分）复用 sector_constituent 表，rt_sw_k（申万实时行情）复用 sector_kline 表】
 49. THE System SHALL 创建 st_warning 表（PostgreSQL/PGBase），包含 ts_code、trade_date、name、close、pct_chg、vol、amount 字段，使用 (ts_code, trade_date) 复合唯一约束 【新增】
 50. THE System SHALL 创建 bse_mapping 表（PostgreSQL/PGBase），包含 old_code、new_code、name、list_date 字段 【新增】
 51. THE System SHALL 创建 hsgt_top10 表（PostgreSQL/PGBase），包含 trade_date、ts_code、name、close、change、rank、market_type、amount、net_amount、buy、sell 字段，使用 (trade_date, ts_code, market_type) 复合唯一约束 【新增】
@@ -517,6 +536,7 @@
 83. THE System SHALL 创建 dc_concept_cons 表（PostgreSQL/PGBase），包含 concept_code、ts_code、name 字段 【新增】
 84. THE System SHALL 通过 Alembic 迁移脚本创建上述所有新表
 85. 【移除】原 daily_share 表（被 stk_premarket 替代）、原 margin_target 表（被 margin_secs 替代）、原 slb_sec 表（文档中未出现）、原 hs_constituent 表（被 stock_hsgt 替代）、原 stk_account 表（文档中未出现）、原 ths_limit 表（被 limit_list_ths 替代）
+86. 【说明】指数专题接口名称变更：index_tech → idx_factor_pro（表名 index_tech 保持不变）、index_1min_realtime → rt_idx_min、index_min → idx_mins；新增接口 rt_idx_k、rt_idx_min_daily、index_member_all、ci_index_member、rt_sw_k 均复用现有表结构（kline/sector_constituent/sector_kline），无需新建表 【新增】
 
 ### 需求 26：ts_code 与 symbol 格式转换
 

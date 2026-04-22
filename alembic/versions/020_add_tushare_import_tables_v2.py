@@ -73,10 +73,11 @@ _NEW_TABLES = [
 
 def upgrade() -> None:
     # ==================================================================
-    # 0. 扩展 DataSource 枚举（新增 CI、THS）
+    # 0. DataSource 枚举扩展说明
     # ==================================================================
-    op.execute("ALTER TYPE datasource ADD VALUE IF NOT EXISTS 'CI'")
-    op.execute("ALTER TYPE datasource ADD VALUE IF NOT EXISTS 'THS'")
+    # DataSource 在 ORM 中定义为 Python str Enum（app/models/sector.py），
+    # 数据库中 data_source 列类型为 VARCHAR(10)，不是 PostgreSQL 原生枚举类型。
+    # 因此无需 ALTER TYPE 语句，新增的 CI/THS 值可直接写入 VARCHAR 列。
 
     # ==================================================================
     # 0.1 扩展 tushare_import_log.celery_task_id 长度
@@ -729,5 +730,5 @@ def downgrade() -> None:
         existing_type=sa.String(100),
     )
 
-    # 注意：PostgreSQL 不支持 ALTER TYPE ... REMOVE VALUE，
-    # 因此 DataSource 枚举的 CI/THS 值无法在 downgrade 中移除。
+    # 注意：DataSource 枚举在数据库中为 VARCHAR(10) 列，
+    # CI/THS 值无需特殊处理即可在 downgrade 中忽略。

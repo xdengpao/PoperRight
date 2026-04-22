@@ -2,7 +2,7 @@
 
 ## 一、接口覆盖总览
 
-基于用户提供的 8 个 Tushare 数据文档，当前需求已覆盖全部股票数据接口（102个）和指数专题接口（15个），合计 117 个接口。
+基于用户提供的 8 个 Tushare 数据文档及指数专题文档，当前需求已覆盖全部股票数据接口（102个）和指数专题接口（20个），合计 122 个接口。
 
 ### 1.1 股票数据接口分布
 
@@ -18,20 +18,23 @@
 | 资金流向数据 | 8 | 文档3 | 需求 9 |
 | 打板专题数据 | 24 | 文档2 | 需求 10 |
 
-### 1.2 指数专题接口分布（保持不变）
+### 1.2 指数专题接口分布
 
 | 子分类 | 接口数 | 对应需求 |
 |--------|-------|---------|
 | 指数基本信息 | 1 | 需求 11 |
-| 指数行情低频 | 3 | 需求 12 |
-| 指数行情中频 | 2 | 需求 12a |
+| 指数行情低频（日线/周线/月线） | 3 | 需求 12 |
+| 指数行情中频（实时日线/实时分钟/历史分钟） | 4 | 需求 12a |
 | 指数成分和权重 | 1 | 需求 13 |
-| 申万行业数据 | 2 | 需求 14 |
-| 中信行业数据 | 1 | 需求 15 |
+| 申万行业数据（分类/成分/日线/实时） | 4 | 需求 14 |
+| 中信行业数据（成分/日线） | 2 | 需求 15 |
 | 大盘指数每日指标 | 1 | 需求 16 |
-| 指数技术面因子 | 1 | 需求 17 |
+| 指数技术面因子（专业版） | 1 | 需求 17 |
 | 沪深市场每日交易统计 | 2 | 需求 18 |
+| 深圳市场每日交易情况 | — | 需求 18 |
 | 国际主要指数 | 1 | 需求 19 |
+
+> 指数专题合计 20 个接口（较旧版 15 个新增 5 个：rt_idx_k、rt_idx_min、rt_idx_min_daily、index_member_all、ci_index_member、rt_sw_k；替换 2 个：index_1min_realtime→rt_idx_min、index_min→idx_mins、index_tech→idx_factor_pro）
 
 ---
 
@@ -196,7 +199,7 @@
 | 100 | `dc_concept_cons` | 东方财富题材成分 | 静态数据 | 按题材代码+日期拉取 | dc_concept_cons (PG) | advanced |
 
 
-### 2.3 指数专题数据导入清单（保持不变）
+### 2.3 指数专题数据导入清单
 
 #### 2.3.1 指数基础信息
 
@@ -204,39 +207,44 @@
 |------|--------|---------|---------|---------|---------|---------|
 | 101 | `index_basic` | 指数基本信息 | 静态元数据 | 按市场(SSE/SZSE/CSI)拉取 | index_info (PG) | basic |
 
-#### 2.3.2 指数低频行情
+#### 2.3.2 指数低频行情（日线/周线/月线）
 
 | 序号 | 接口名 | 中文说明 | 数据类型 | 导入方法 | 存储目标 | 权限级别 |
 |------|--------|---------|---------|---------|---------|---------|
-| 102 | `index_daily` | 指数日线行情 | 时序OHLCV | 按日期+指数代码拉取 | kline (TS) freq="1d" | basic |
-| 103 | `index_weekly` | 指数周线行情 | 时序OHLCV | 按日期+指数代码拉取 | kline (TS) freq="1w" | basic |
-| 104 | `index_monthly` | 指数月线行情 | 时序OHLCV | 按日期+指数代码拉取 | kline (TS) freq="1M" | basic |
+| 102 | `index_daily` | 指数日线行情 | 时序OHLCV | 按日期+指数代码拉取，单次最大8000行 | kline (TS) freq="1d" | advanced（2000积分） |
+| 103 | `index_weekly` | 指数周线行情 | 时序OHLCV | 按日期+指数代码拉取，单次最大1000行 | kline (TS) freq="1w" | basic（600积分） |
+| 104 | `index_monthly` | 指数月线行情 | 时序OHLCV | 按日期+指数代码拉取，单次最大1000行 | kline (TS) freq="1M" | basic（600积分） |
 
-#### 2.3.3 指数中频行情
+#### 2.3.3 指数中频行情（实时日线/实时分钟/历史分钟）
 
 | 序号 | 接口名 | 中文说明 | 数据类型 | 导入方法 | 存储目标 | 权限级别 |
 |------|--------|---------|---------|---------|---------|---------|
-| 105 | `index_min` | 指数历史分钟行情 | 时序OHLCV | 按代码+日期+频率拉取 | kline (TS) freq="1m/5m/15m/30m/60m" | basic |
-| 106 | `index_1min_realtime` | 指数实时分钟行情 | 时序OHLCV | 按代码拉取 | kline (TS) freq="1m" | basic |
+| 105 | `rt_idx_k` | 指数实时日线 | 时序OHLCV | 按代码或通配符拉取全部交易所指数 | kline (TS) freq="1d" | special |
+| 106 | `rt_idx_min` | 指数实时分钟 | 时序OHLCV | 按代码拉取，单次最大1000行，支持逗号分隔多代码 | kline (TS) | special |
+| 107 | `rt_idx_min_daily` | 指数实时分钟日累计 | 时序OHLCV | 按单个指数代码拉取当日累计 | kline (TS) | special |
+| 108 | `idx_mins` | 指数历史分钟 | 时序OHLCV | 按代码+日期+频率拉取，单次最大8000行，超10年历史 | kline (TS) freq="1m/5m/15m/30m/60m" | special |
 
 #### 2.3.4 指数成分与行业
 
 | 序号 | 接口名 | 中文说明 | 数据类型 | 导入方法 | 存储目标 | 权限级别 |
 |------|--------|---------|---------|---------|---------|---------|
-| 107 | `index_weight` | 指数成分和权重 | 快照数据 | 按指数代码+日期拉取 | index_weight (PG) | basic |
-| 108 | `index_classify` | 申万行业分类 | 静态元数据 | 全量拉取 | sector_info (PG) data_source="TI" | basic |
-| 109 | `sw_daily` | 申万行业指数日行情 | 时序OHLCV | 按日期拉取 | sector_kline (TS) data_source="TI" | basic |
-| 110 | `ci_daily` | 中信行业指数日行情 | 时序OHLCV | 按日期拉取 | sector_kline (TS) data_source="CI" | basic |
+| 109 | `index_weight` | 指数成分和权重 | 快照数据 | 按指数代码+日期拉取（建议输入当月首末日） | index_weight (PG) | advanced（2000积分） |
+| 110 | `index_classify` | 申万行业分类 | 静态元数据 | 全量拉取（2014版/2021版） | sector_info (PG) data_source="TI" | advanced（2000积分） |
+| 111 | `index_member_all` | 申万行业成分（分级） | 静态元数据 | 按分类代码或股票代码拉取，单次最大2000行 | sector_constituent (PG) data_source="TI" | advanced（2000积分） |
+| 112 | `sw_daily` | 申万行业指数日行情 | 时序OHLCV | 按日期拉取（默认2021版），单次最大4000行 | sector_kline (TS) data_source="TI" | advanced（5000积分） |
+| 113 | `rt_sw_k` | 申万实时行情 | 时序OHLCV | 拉取最新截面数据 | sector_kline (TS) data_source="TI" | special |
+| 114 | `ci_index_member` | 中信行业成分 | 静态元数据 | 按分类代码或股票代码拉取，单次最大5000行 | sector_constituent (PG) data_source="CI" | advanced（5000积分） |
+| 115 | `ci_daily` | 中信行业指数日行情 | 时序OHLCV | 按日期拉取，单次最大4000条 | sector_kline (TS) data_source="CI" | advanced（5000积分） |
 
 #### 2.3.5 指数指标与统计
 
 | 序号 | 接口名 | 中文说明 | 数据类型 | 导入方法 | 存储目标 | 权限级别 |
 |------|--------|---------|---------|---------|---------|---------|
-| 111 | `index_dailybasic` | 大盘指数每日指标 | 时序指标 | 按日期拉取 | index_dailybasic (PG) | basic |
-| 112 | `index_tech` | 指数技术面因子(专业版) | 时序指标 | 按代码+日期拉取 | index_tech (PG) | special |
-| 113 | `daily_info` | 沪深市场每日交易统计 | 统计数据 | 按日期拉取 | market_daily_info (PG) | basic |
-| 114 | `sz_daily_info` | 深圳市场每日交易情况 | 统计数据 | 按日期拉取 | sz_daily_info (PG) | basic |
-| 115 | `index_global` | 国际主要指数 | 时序OHLCV | 按日期拉取 | index_global (PG) | basic |
+| 116 | `index_dailybasic` | 大盘指数每日指标 | 时序指标 | 按日期拉取（仅6大指数，2004年起） | index_dailybasic (PG) | basic（400积分） |
+| 117 | `idx_factor_pro` | 指数技术面因子(专业版) | 时序指标 | 按代码+日期拉取，单次最大8000行 | index_tech (PG) | advanced（5000积分） |
+| 118 | `daily_info` | 沪深市场每日交易统计 | 统计数据 | 按日期拉取，单次最大4000行 | market_daily_info (PG) | basic（600积分） |
+| 119 | `sz_daily_info` | 深圳市场每日交易情况 | 统计数据 | 按日期拉取，单次最大2000行 | sz_daily_info (PG) | advanced（2000积分） |
+| 120 | `index_global` | 国际主要指数 | 时序OHLCV | 按日期拉取，单次最大4000行 | index_global (PG) | advanced（6000积分） |
 
 ---
 
@@ -277,10 +285,10 @@
 
 | 级别 | 配置项 | 积分范围 | 典型接口 |
 |------|--------|---------|---------|
-| **basic** | `TUSHARE_TOKEN_BASIC` | ≤2000 积分 | stock_basic, daily, weekly, monthly, adj_factor, daily_basic, income, balancesheet, cashflow, dividend, moneyflow, moneyflow_hsgt, margin, top10_holders, pledge_stat, block_trade, top_list, index_basic, index_daily 等 |
-| **advanced** | `TUSHARE_TOKEN_ADVANCED` | 2000-6000 积分（含6000） | stock_st, stock_hsgt, bak_basic, ggt_monthly, bak_daily, limit_list_d, top_inst, hm_list, ths_index, ths_daily, ths_member, dc_index, dc_member, dc_daily, tdx_index, tdx_member, tdx_daily, ths_hot, kpl_list, dc_concept, stk_shock, stk_high_shock, stk_alert, cyq_perf, cyq_chips, stk_factor_pro, ccass_hold, stk_nineturn, stk_ah_comparison, stk_surv, broker_recommend, moneyflow_ths, moneyflow_dc, moneyflow_cnt_ths, moneyflow_ind_ths, moneyflow_ind_dc, moneyflow_mkt_dc, VIP批量接口 等 |
+| **basic** | `TUSHARE_TOKEN_BASIC` | ≤2000 积分 | stock_basic, daily, weekly, monthly, adj_factor, daily_basic, income, balancesheet, cashflow, dividend, moneyflow, moneyflow_hsgt, margin, top10_holders, pledge_stat, block_trade, top_list, index_basic, index_weekly, index_monthly, index_dailybasic, daily_info 等 |
+| **advanced** | `TUSHARE_TOKEN_ADVANCED` | 2000-6000 积分（含6000） | stock_st, stock_hsgt, bak_basic, ggt_monthly, bak_daily, limit_list_d, top_inst, hm_list, ths_index, ths_daily, ths_member, dc_index, dc_member, dc_daily, tdx_index, tdx_member, tdx_daily, ths_hot, kpl_list, dc_concept, stk_shock, stk_high_shock, stk_alert, cyq_perf, cyq_chips, stk_factor_pro, ccass_hold, stk_nineturn, stk_ah_comparison, stk_surv, broker_recommend, moneyflow_ths, moneyflow_dc, moneyflow_cnt_ths, moneyflow_ind_ths, moneyflow_ind_dc, moneyflow_mkt_dc, VIP批量接口, index_daily, index_weight, index_classify, index_member_all, sw_daily, ci_index_member, ci_daily, idx_factor_pro, sz_daily_info, index_global 等 |
 | **premium** | `TUSHARE_TOKEN_PREMIUM` | >6000 积分 | limit_list_ths, limit_step, limit_cpt_list, report_rc, ccass_hold_detail, dc_hot, hm_detail 等 |
-| **special** | `TUSHARE_TOKEN_SPECIAL` | 需单独开通 | stk_premarket, stk_mins, rt_k, rt_min, rt_min_daily, stk_auction, stk_auction_o, stk_auction_c, index_tech 等 |
+| **special** | `TUSHARE_TOKEN_SPECIAL` | 需单独开通 | stk_premarket, stk_mins, rt_k, rt_min, rt_min_daily, stk_auction, stk_auction_o, stk_auction_c, rt_idx_k, rt_idx_min, rt_idx_min_daily, idx_mins, rt_sw_k 等 |
 
 > 原有 `TUSHARE_API_TOKEN` 作为默认 fallback，当对应级别 Token 未配置时自动回退使用。
 
@@ -314,6 +322,7 @@
 | 特色数据 | report_rc, cyq_perf, cyq_chips, ccass_hold, ccass_hold_detail, hk_hold, stk_auction_o, stk_auction_c, stk_nineturn, stk_ah_comparison, stk_surv, broker_recommend |
 | 资金流向 | moneyflow_ths, moneyflow_dc, moneyflow_cnt_ths |
 | 打板专题 | limit_list_ths, limit_cpt_list, ths_daily, dc_daily, stk_auction, tdx_index, tdx_member, tdx_daily, kpl_concept_cons, dc_concept, dc_concept_cons |
+| 指数专题 | rt_idx_k（指数实时日线）, rt_idx_min_daily（指数实时分钟日累计）, index_member_all（申万行业成分分级）, ci_index_member（中信行业成分）, rt_sw_k（申万实时行情） |
 
 ### 4.2 替换接口
 
@@ -324,6 +333,9 @@
 | margin_target | margin_secs | 融资融券标的（盘前），新增 trade_date |
 | ths_limit | limit_list_ths | 同花顺涨跌停榜单 |
 | stk_factor | stk_factor_pro | 仅保留专业版 |
+| index_1min_realtime | rt_idx_min | 指数实时分钟，文档接口名更新 |
+| index_min | idx_mins | 指数历史分钟，文档接口名更新 |
+| index_tech | idx_factor_pro | 指数技术面因子专业版，文档接口名更新 |
 
 ### 4.3 移除接口
 
@@ -340,3 +352,27 @@
 | namechange, stock_company, stk_managers, stk_rewards | 参考数据 | 基础数据 |
 | top10_holders, top10_floatholders, stk_holdernumber, stk_holdertrade, block_trade | 特色数据 | 参考数据 |
 | stk_limit | 特色数据/打板专题 | 行情数据（低频） |
+
+### 4.5 指数专题权限级别调整
+
+| 接口 | 旧权限级别 | 新权限级别 | 依据 |
+|------|-----------|-----------|------|
+| index_daily | basic | advanced | 文档：2000积分可调取 |
+| index_weekly | basic | basic | 文档：600积分可调取 |
+| index_monthly | basic | basic | 文档：600积分可调取 |
+| index_weight | basic | advanced | 文档：2000积分可调取 |
+| index_classify | basic | advanced | 文档：2000积分可调取 |
+| sw_daily | basic | advanced | 文档：5000积分可调取 |
+| ci_daily | basic | advanced | 文档：5000积分可调取 |
+| index_dailybasic | basic | basic | 文档：400积分可调取 |
+| idx_factor_pro（原 index_tech） | special | advanced | 文档：5000积分可调取 |
+| daily_info | basic | basic | 文档：600积分可调取 |
+| sz_daily_info | basic | advanced | 文档：2000积分可调取 |
+| index_global | basic | advanced | 文档：6000积分可调取（属于 advanced 范围） |
+| rt_idx_k（新增） | — | special | 文档：需单独开权限 |
+| rt_idx_min（替代 index_1min_realtime） | basic | special | 文档：需单独开权限 |
+| rt_idx_min_daily（新增） | — | special | 文档：需单独开权限 |
+| idx_mins（替代 index_min） | basic | special | 文档：需单独开权限 |
+| index_member_all（新增） | — | advanced | 文档：2000积分可调取 |
+| ci_index_member（新增） | — | advanced | 文档：5000积分可调取 |
+| rt_sw_k（新增） | — | special | 文档：需单独开权限 |

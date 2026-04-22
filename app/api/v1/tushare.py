@@ -80,6 +80,7 @@ class ApiRegistryItem(BaseModel):
     required_params: list[str]
     optional_params: list[str]
     token_available: bool
+    vip_variant: str | None = None
 
 
 class TushareImportLogItem(BaseModel):
@@ -90,6 +91,7 @@ class TushareImportLogItem(BaseModel):
     status: str
     record_count: int
     error_message: str | None
+    celery_task_id: str | None
     started_at: str | None
     finished_at: str | None
 
@@ -119,6 +121,7 @@ async def get_api_registry() -> list[ApiRegistryItem]:
     token_available_map = {
         TokenTier.BASIC: bool(settings.tushare_token_basic or settings.tushare_api_token),
         TokenTier.ADVANCED: bool(settings.tushare_token_advanced or settings.tushare_api_token),
+        TokenTier.PREMIUM: bool(settings.tushare_token_premium or settings.tushare_api_token),
         TokenTier.SPECIAL: bool(settings.tushare_token_special or settings.tushare_api_token),
     }
 
@@ -133,6 +136,7 @@ async def get_api_registry() -> list[ApiRegistryItem]:
             required_params=[p.value for p in entry.required_params],
             optional_params=[p.value for p in entry.optional_params],
             token_available=token_available_map.get(entry.token_tier, False),
+            vip_variant=entry.vip_variant,
         ))
 
     return items

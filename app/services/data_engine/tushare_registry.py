@@ -3,7 +3,7 @@ Tushare API 接口注册表
 
 以声明式方式定义每个 Tushare 接口的元数据，包括：
 - 接口名称、中文说明、所属分类
-- Token 权限级别（basic/advanced/special）
+- Token 权限级别（basic/advanced/premium/special）
 - 目标存储表、存储引擎（PG/TS）
 - 代码格式转换规则
 - ON CONFLICT 去重策略
@@ -22,11 +22,12 @@ from enum import Enum
 
 
 class TokenTier(str, Enum):
-    """Token 权限级别"""
+    """Token 权限级别（四级）"""
 
-    BASIC = "basic"
-    ADVANCED = "advanced"
-    SPECIAL = "special"
+    BASIC = "basic"         # 2000 积分及以下
+    ADVANCED = "advanced"   # 2000-6000 积分（包含6000积分）
+    PREMIUM = "premium"     # 6000 积分以上
+    SPECIAL = "special"     # 需单独开通权限
 
 
 class CodeFormat(str, Enum):
@@ -55,6 +56,8 @@ class ParamType(str, Enum):
     FREQ = "freq"
     HS_TYPE = "hs_type"
     SECTOR_CODE = "sector_code"
+    MONTH_RANGE = "month_range"
+    CONCEPT_CODE = "concept_code"
 
 
 class RateLimitGroup(str, Enum):
@@ -95,6 +98,7 @@ class ApiEntry:
     rate_limit_group: RateLimitGroup = RateLimitGroup.KLINE
     batch_by_code: bool = False  # 是否需要按代码分批
     extra_config: dict = field(default_factory=dict)  # 额外配置（如 freq 映射）
+    vip_variant: str | None = None  # VIP 批量接口变体名（如 "income_vip"）
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +128,14 @@ def get_entries_by_category(category: str) -> list[ApiEntry]:
     return [e for e in TUSHARE_API_REGISTRY.values() if e.category == category]
 
 
+def get_entries_by_subcategory(subcategory: str) -> list[ApiEntry]:
+    """按子分类获取接口列表"""
+    return [e for e in TUSHARE_API_REGISTRY.values() if e.subcategory == subcategory]
+
+
 # ===========================================================================
-# 股票数据 — 基础数据
+# 股票数据 — 基础数据（13个接口）
+# 需求：3.1-3.16
 # ===========================================================================
 
 register(ApiEntry(
@@ -144,6 +154,21 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="stk_premarket",
+    label="每日股本盘前",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.SPECIAL,
+    target_table="stk_premarket",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
     api_name="trade_cal",
     label="交易日历",
     category="stock_data",
@@ -153,6 +178,123 @@ register(ApiEntry(
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
     conflict_columns=["exchange", "cal_date"],
+    conflict_action="do_nothing",
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stock_st",
+    label="ST股票列表",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stock_st",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "st_date"],
+    conflict_action="do_nothing",
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="st",
+    label="ST风险警示板",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="st_warning",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stock_hsgt",
+    label="沪深港通股票列表",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stock_hsgt",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.HS_TYPE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="namechange",
+    label="股票曾用名",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.BASIC,
+    target_table="stock_namechange",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "start_date"],
+    conflict_action="do_nothing",
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stock_company",
+    label="上市公司基本信息",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.BASIC,
+    target_table="stock_company",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code"],
+    conflict_action="do_update",
+    update_columns=["chairman", "manager", "secretary", "reg_capital", "province", "city", "website"],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_managers",
+    label="上市公司管理层",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.BASIC,
+    target_table="stk_managers",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "name", "begin_date"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_rewards",
+    label="管理层薪酬",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.BASIC,
+    target_table="stk_rewards",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "ann_date", "name"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="bse_mapping",
+    label="北交所新旧代码对照",
+    category="stock_data",
+    subcategory="基础数据",
+    token_tier=TokenTier.BASIC,
+    target_table="bse_mapping",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
@@ -172,62 +314,11 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
-    api_name="stock_st",
-    label="ST股票列表",
-    category="stock_data",
-    subcategory="基础数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stock_st",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "st_date"],
-    conflict_action="do_nothing",
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"tushare_api_name": "namechange"},
-))
-
-register(ApiEntry(
-    api_name="stk_delist",
-    label="退市股票列表",
-    category="stock_data",
-    subcategory="基础数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stock_info",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.STOCK_SYMBOL,
-    conflict_columns=["symbol"],
-    conflict_action="do_update",
-    update_columns=["name", "market", "is_delisted", "updated_at"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={
-        "tushare_api_name": "stock_basic",
-        "default_params": {"list_status": "D"},
-        "inject_fields": {"is_delisted": True},
-    },
-))
-
-register(ApiEntry(
-    api_name="daily_share",
-    label="每日股本（盘前）",
-    category="stock_data",
-    subcategory="基础数据",
-    token_tier=TokenTier.BASIC,
-    target_table="daily_share",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "trade_date"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"tushare_api_name": "daily_basic"},
-))
-
-register(ApiEntry(
     api_name="bak_basic",
     label="备用基础信息",
     category="stock_data",
     subcategory="基础数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="stock_info",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.STOCK_SYMBOL,
@@ -239,7 +330,8 @@ register(ApiEntry(
 
 
 # ===========================================================================
-# 股票数据 — 行情数据（低频：日K/周K/月K）
+# 股票数据 — 行情数据低频（13个接口）
+# 需求：4.1-4.15
 # ===========================================================================
 
 register(ApiEntry(
@@ -297,6 +389,23 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="stk_weekly_monthly",
+    label="周/月行情每日更新",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.BASIC,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE, ParamType.FREQ],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    batch_by_code=True,
+))
+
+register(ApiEntry(
     api_name="adj_factor",
     label="复权因子",
     category="stock_data",
@@ -305,7 +414,7 @@ register(ApiEntry(
     target_table="adjustment_factor",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.STOCK_SYMBOL,
-    conflict_columns=["symbol", "trade_date"],
+    conflict_columns=[],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
@@ -315,7 +424,7 @@ register(ApiEntry(
 
 register(ApiEntry(
     api_name="daily_basic",
-    label="每日基本指标",
+    label="每日指标",
     category="stock_data",
     subcategory="行情数据（低频：日K/周K/月K）",
     token_tier=TokenTier.BASIC,
@@ -325,6 +434,22 @@ register(ApiEntry(
     conflict_columns=["symbol"],
     conflict_action="do_update",
     update_columns=["turnover_rate", "pe_ttm", "pb", "total_mv", "float_mv", "updated_at"],
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_limit",
+    label="每日涨跌停价格",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.BASIC,
+    target_table="stk_limit",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
@@ -345,16 +470,94 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
+register(ApiEntry(
+    api_name="hsgt_top10",
+    label="沪深股通十大成交股",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.BASIC,
+    target_table="hsgt_top10",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "ts_code", "market_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="ggt_top10",
+    label="港股通十大成交股",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.BASIC,
+    target_table="ggt_top10",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "ts_code", "market_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="ggt_daily",
+    label="港股通每日成交统计",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.BASIC,
+    target_table="ggt_daily",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="ggt_monthly",
+    label="港股通每月成交统计",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="ggt_monthly",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["month"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.MONTH_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="bak_daily",
+    label="备用行情",
+    category="stock_data",
+    subcategory="行情数据（低频：日K/周K/月K）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+))
+
+
 # ===========================================================================
-# 股票数据 — 行情数据（中频：分钟级）
+# 股票数据 — 行情数据中频（4个接口）
+# 需求：4a.1-4a.9
 # ===========================================================================
 
 register(ApiEntry(
     api_name="stk_mins",
     label="历史分钟行情",
     category="stock_data",
-    subcategory="行情数据（中频：分钟级）",
-    token_tier=TokenTier.ADVANCED,
+    subcategory="行情数据（中频：分钟级/实时）",
+    token_tier=TokenTier.SPECIAL,
     target_table="kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.STOCK_SYMBOL,
@@ -365,9 +568,59 @@ register(ApiEntry(
     batch_by_code=True,
 ))
 
+register(ApiEntry(
+    api_name="rt_k",
+    label="实时日线",
+    category="stock_data",
+    subcategory="行情数据（中频：分钟级/实时）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"freq": "1d"},
+))
+
+register(ApiEntry(
+    api_name="rt_min",
+    label="实时分钟",
+    category="stock_data",
+    subcategory="行情数据（中频：分钟级/实时）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE, ParamType.FREQ],
+    rate_limit_group=RateLimitGroup.KLINE,
+))
+
+register(ApiEntry(
+    api_name="rt_min_daily",
+    label="实时分钟日累计",
+    category="stock_data",
+    subcategory="行情数据（中频：分钟级/实时）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+))
+
 
 # ===========================================================================
-# 股票数据 — 财务数据
+# 股票数据 — 财务数据（9个接口 + VIP 变体）
+# 需求：5.1-5.11
 # ===========================================================================
 
 register(ApiEntry(
@@ -384,7 +637,8 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"report_type": "income"},
+    extra_config={"inject_fields": {"report_type": "income"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+    vip_variant="income_vip",
 ))
 
 register(ApiEntry(
@@ -401,7 +655,8 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"report_type": "balance"},
+    extra_config={"inject_fields": {"report_type": "balance"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+    vip_variant="balancesheet_vip",
 ))
 
 register(ApiEntry(
@@ -418,12 +673,13 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"report_type": "cashflow"},
+    extra_config={"inject_fields": {"report_type": "cashflow"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+    vip_variant="cashflow_vip",
 ))
 
 register(ApiEntry(
     api_name="fina_indicator",
-    label="财务指标数据",
+    label="财务指标",
     category="stock_data",
     subcategory="财务数据",
     token_tier=TokenTier.BASIC,
@@ -436,11 +692,12 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    vip_variant="fina_indicator_vip",
 ))
 
 register(ApiEntry(
     api_name="dividend",
-    label="分红送股数据",
+    label="分红送股",
     category="stock_data",
     subcategory="财务数据",
     token_tier=TokenTier.BASIC,
@@ -467,6 +724,7 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    vip_variant="forecast_vip",
 ))
 
 register(ApiEntry(
@@ -483,96 +741,212 @@ register(ApiEntry(
     required_params=[ParamType.REPORT_PERIOD],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    vip_variant="express_vip",
 ))
 
-# ===========================================================================
-# 股票数据 — 参考数据
-# ===========================================================================
-
 register(ApiEntry(
-    api_name="stock_company",
-    label="上市公司基本信息",
+    api_name="fina_mainbz",
+    label="主营业务构成",
     category="stock_data",
-    subcategory="参考数据",
+    subcategory="财务数据",
     token_tier=TokenTier.BASIC,
-    target_table="stock_company",
+    target_table="fina_mainbz",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code"],
+    conflict_columns=["ts_code", "end_date", "bz_item"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    vip_variant="fina_mainbz_vip",
+))
+
+register(ApiEntry(
+    api_name="disclosure_date",
+    label="财报披露日期表",
+    category="stock_data",
+    subcategory="财务数据",
+    token_tier=TokenTier.BASIC,
+    target_table="disclosure_date",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "end_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+# --- VIP 批量接口变体（使用 advanced 权限级别 Token） ---
+
+register(ApiEntry(
+    api_name="income_vip",
+    label="利润表（VIP批量）",
+    category="stock_data",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="financial_statement",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "end_date", "report_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"report_type": "income"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+))
+
+register(ApiEntry(
+    api_name="balancesheet_vip",
+    label="资产负债表（VIP批量）",
+    category="stock_data",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="financial_statement",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "end_date", "report_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"report_type": "balance"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+))
+
+register(ApiEntry(
+    api_name="cashflow_vip",
+    label="现金流量表（VIP批量）",
+    category="stock_data",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="financial_statement",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "end_date", "report_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"report_type": "cashflow"}, "jsonb_pack_column": "data_json", "jsonb_fixed_columns": ["ts_code", "ann_date", "end_date", "report_type"]},
+))
+
+register(ApiEntry(
+    api_name="fina_indicator_vip",
+    label="财务指标（VIP批量）",
+    category="stock_data",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stock_info",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.STOCK_SYMBOL,
+    conflict_columns=["symbol"],
     conflict_action="do_update",
-    update_columns=["chairman", "manager", "secretary", "reg_capital", "province", "city", "website"],
+    update_columns=["pe_ttm", "pb", "roe", "updated_at"],
+    required_params=[ParamType.REPORT_PERIOD],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 register(ApiEntry(
-    api_name="namechange",
-    label="股票曾用名",
+    api_name="forecast_vip",
+    label="业绩预告（VIP批量）",
     category="stock_data",
-    subcategory="参考数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stock_namechange",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="forecast",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "start_date"],
+    conflict_columns=["ts_code", "end_date"],
     conflict_action="do_nothing",
+    required_params=[ParamType.REPORT_PERIOD],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 register(ApiEntry(
-    api_name="hs_const",
-    label="沪深股通成份股",
+    api_name="express_vip",
+    label="业绩快报（VIP批量）",
     category="stock_data",
-    subcategory="参考数据",
-    token_tier=TokenTier.BASIC,
-    target_table="hs_constituent",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="express",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "hs_type"],
+    conflict_columns=["ts_code", "end_date"],
     conflict_action="do_nothing",
-    required_params=[ParamType.HS_TYPE],
+    required_params=[ParamType.REPORT_PERIOD],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 register(ApiEntry(
-    api_name="stk_rewards",
-    label="管理层薪酬和持股",
+    api_name="fina_mainbz_vip",
+    label="主营业务构成（VIP批量）",
     category="stock_data",
-    subcategory="参考数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stk_rewards",
+    subcategory="财务数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="fina_mainbz",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "ann_date", "name"],
+    conflict_columns=["ts_code", "end_date", "bz_item"],
     conflict_action="do_nothing",
-    optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
-    api_name="stk_managers",
-    label="上市公司管理层",
-    category="stock_data",
-    subcategory="参考数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stk_managers",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "name", "begin_date"],
-    conflict_action="do_nothing",
-    optional_params=[ParamType.STOCK_CODE],
+    required_params=[ParamType.REPORT_PERIOD],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 
 # ===========================================================================
-# 股票数据 — 特色数据
+# 股票数据 — 参考数据（12个接口）
+# 需求：6.1-6.13
 # ===========================================================================
+
+register(ApiEntry(
+    api_name="stk_shock",
+    label="个股异常波动",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_shock",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "shock_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_high_shock",
+    label="个股严重异常波动",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_high_shock",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "shock_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_alert",
+    label="交易所重点提示证券",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_alert",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
 
 register(ApiEntry(
     api_name="top10_holders",
     label="前十大股东",
     category="stock_data",
-    subcategory="特色数据",
+    subcategory="参考数据",
     token_tier=TokenTier.BASIC,
     target_table="top_holders",
     storage_engine=StorageEngine.PG,
@@ -588,7 +962,7 @@ register(ApiEntry(
     api_name="top10_floatholders",
     label="前十大流通股东",
     category="stock_data",
-    subcategory="特色数据",
+    subcategory="参考数据",
     token_tier=TokenTier.BASIC,
     target_table="top_holders",
     storage_engine=StorageEngine.PG,
@@ -601,10 +975,85 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="pledge_stat",
+    label="股权质押统计",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.BASIC,
+    target_table="pledge_stat",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "end_date"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="pledge_detail",
+    label="股权质押明细",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.BASIC,
+    target_table="pledge_detail",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="repurchase",
+    label="股票回购",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.BASIC,
+    target_table="repurchase",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="share_float",
+    label="限售股解禁",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.BASIC,
+    target_table="share_float",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="block_trade",
+    label="大宗交易",
+    category="stock_data",
+    subcategory="参考数据",
+    token_tier=TokenTier.BASIC,
+    target_table="block_trade",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "buyer", "seller"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.DATE_RANGE, ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
     api_name="stk_holdernumber",
     label="股东人数",
     category="stock_data",
-    subcategory="特色数据",
+    subcategory="参考数据",
     token_tier=TokenTier.BASIC,
     target_table="stk_holdernumber",
     storage_engine=StorageEngine.PG,
@@ -619,7 +1068,7 @@ register(ApiEntry(
     api_name="stk_holdertrade",
     label="股东增减持",
     category="stock_data",
-    subcategory="特色数据",
+    subcategory="参考数据",
     token_tier=TokenTier.BASIC,
     target_table="stk_holdertrade",
     storage_engine=StorageEngine.PG,
@@ -630,43 +1079,34 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
+
+# ===========================================================================
+# 股票数据 — 特色数据（13个接口）
+# 需求：7.1-7.15
+# ===========================================================================
+
 register(ApiEntry(
-    api_name="block_trade",
-    label="大宗交易",
+    api_name="report_rc",
+    label="券商盈利预测",
     category="stock_data",
     subcategory="特色数据",
-    token_tier=TokenTier.BASIC,
-    target_table="block_trade",
+    token_tier=TokenTier.PREMIUM,
+    target_table="report_rc",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "trade_date", "buyer", "seller"],
+    conflict_columns=[],
     conflict_action="do_nothing",
-    optional_params=[ParamType.DATE_RANGE, ParamType.STOCK_CODE],
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 register(ApiEntry(
-    api_name="stk_account",
-    label="股票开户数据",
+    api_name="cyq_perf",
+    label="每日筹码及胜率",
     category="stock_data",
     subcategory="特色数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stk_account",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["date"],
-    conflict_action="do_nothing",
-    optional_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
-    api_name="stk_limit",
-    label="每日涨跌停价格",
-    category="stock_data",
-    subcategory="特色数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stk_limit",
+    token_tier=TokenTier.ADVANCED,
+    target_table="cyq_perf",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
     conflict_columns=["ts_code", "trade_date"],
@@ -677,45 +1117,190 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
-    api_name="stk_factor",
-    label="股票技术面因子",
+    api_name="cyq_chips",
+    label="每日筹码分布",
     category="stock_data",
     subcategory="特色数据",
-    token_tier=TokenTier.BASIC,
-    target_table="stk_factor",
+    token_tier=TokenTier.ADVANCED,
+    target_table="cyq_chips",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "trade_date"],
+    conflict_columns=[],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.KLINE,
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
 register(ApiEntry(
     api_name="stk_factor_pro",
-    label="股票技术面因子（专业版）",
+    label="股票技术面因子专业版",
     category="stock_data",
     subcategory="特色数据",
-    token_tier=TokenTier.SPECIAL,
+    token_tier=TokenTier.ADVANCED,
     target_table="stk_factor",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
     conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_update",
-    update_columns=["close", "macd_dif", "macd_dea", "macd", "kdj_k", "kdj_d", "kdj_j", "rsi_6", "rsi_12", "rsi_24", "boll_upper", "boll_mid", "boll_lower", "cci"],
+    update_columns=["close", "macd_dif", "macd_dea", "macd", "kdj_k", "kdj_d", "kdj_j",
+                     "rsi_6", "rsi_12", "rsi_24", "boll_upper", "boll_mid", "boll_lower", "cci"],
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
 ))
 
+register(ApiEntry(
+    api_name="ccass_hold",
+    label="中央结算系统持股统计",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="ccass_hold",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="ccass_hold_detail",
+    label="中央结算系统持股明细",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.PREMIUM,
+    target_table="ccass_hold_detail",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="hk_hold",
+    label="沪深股通持股明细",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.BASIC,
+    target_table="hk_hold",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "exchange"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_auction_o",
+    label="股票开盘集合竞价",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.SPECIAL,
+    target_table="stk_auction_o",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_auction_c",
+    label="股票收盘集合竞价",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.SPECIAL,
+    target_table="stk_auction_c",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_nineturn",
+    label="神奇九转指标",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_nineturn",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "turn_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_ah_comparison",
+    label="AH股比价",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_ah_comparison",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="stk_surv",
+    label="机构调研数据",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="stk_surv",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="broker_recommend",
+    label="券商每月金股",
+    category="stock_data",
+    subcategory="特色数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="broker_recommend",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.MONTH_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+
 # ===========================================================================
-# 股票数据 — 两融及转融通
+# 股票数据 — 两融及转融通（4个接口）
+# 需求：8.1-8.6
 # ===========================================================================
 
 register(ApiEntry(
     api_name="margin",
-    label="融资融券交易汇总",
+    label="融资融券汇总",
     category="stock_data",
     subcategory="两融及转融通",
     token_tier=TokenTier.BASIC,
@@ -745,15 +1330,15 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
-    api_name="margin_target",
-    label="融资融券标的（盘前）",
+    api_name="margin_secs",
+    label="融资融券标的盘前",
     category="stock_data",
     subcategory="两融及转融通",
     token_tier=TokenTier.BASIC,
-    target_table="margin_target",
+    target_table="margin_secs",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "mg_type"],
+    conflict_columns=[],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
 ))
@@ -773,24 +1358,10 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
 ))
 
-register(ApiEntry(
-    api_name="slb_sec",
-    label="转融券交易汇总",
-    category="stock_data",
-    subcategory="两融及转融通",
-    token_tier=TokenTier.BASIC,
-    target_table="slb_sec",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
-))
-
 
 # ===========================================================================
-# 股票数据 — 资金流向数据
+# 股票数据 — 资金流向数据（8个接口）
+# 需求：9.1-9.10
 # ===========================================================================
 
 register(ApiEntry(
@@ -799,7 +1370,7 @@ register(ApiEntry(
     category="stock_data",
     subcategory="资金流向数据",
     token_tier=TokenTier.BASIC,
-    target_table="tushare_money_flow",
+    target_table="tushare_moneyflow",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
     conflict_columns=["ts_code", "trade_date"],
@@ -811,8 +1382,106 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="moneyflow_ths",
+    label="个股资金流向THS",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_ths",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    batch_by_code=True,
+))
+
+register(ApiEntry(
+    api_name="moneyflow_dc",
+    label="个股资金流向DC",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_dc",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    batch_by_code=True,
+))
+
+register(ApiEntry(
+    api_name="moneyflow_cnt_ths",
+    label="板块资金流向THS",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_cnt_ths",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+))
+
+register(ApiEntry(
+    api_name="moneyflow_ind_ths",
+    label="行业资金流向THS",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_ind",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "industry_name", "data_source"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    extra_config={"inject_fields": {"data_source": "THS"}},
+    field_mappings=[FieldMapping(source="name", target="industry_name")],
+))
+
+register(ApiEntry(
+    api_name="moneyflow_ind_dc",
+    label="板块资金流向DC",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_ind",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "industry_name", "data_source"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    extra_config={"inject_fields": {"data_source": "DC"}},
+    field_mappings=[FieldMapping(source="name", target="industry_name")],
+))
+
+register(ApiEntry(
+    api_name="moneyflow_mkt_dc",
+    label="大盘资金流向DC",
+    category="stock_data",
+    subcategory="资金流向数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="moneyflow_mkt_dc",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+))
+
+register(ApiEntry(
     api_name="moneyflow_hsgt",
-    label="沪深港通资金流向",
+    label="沪港通资金流向",
     category="stock_data",
     subcategory="资金流向数据",
     token_tier=TokenTier.BASIC,
@@ -825,56 +1494,58 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
 ))
 
-register(ApiEntry(
-    api_name="moneyflow_ind_dc",
-    label="行业资金流向（东财）",
-    category="stock_data",
-    subcategory="资金流向数据",
-    token_tier=TokenTier.BASIC,
-    target_table="moneyflow_ind",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "industry_name", "data_source"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
-    extra_config={"data_source": "DC"},
-))
-
-register(ApiEntry(
-    api_name="moneyflow_ind_ths",
-    label="行业资金流向（同花顺）",
-    category="stock_data",
-    subcategory="资金流向数据",
-    token_tier=TokenTier.BASIC,
-    target_table="moneyflow_ind",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "industry_name", "data_source"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
-    extra_config={"data_source": "THS"},
-))
-
-register(ApiEntry(
-    api_name="moneyflow_mkt_dc",
-    label="大盘资金流向（东财）",
-    category="stock_data",
-    subcategory="资金流向数据",
-    token_tier=TokenTier.BASIC,
-    target_table="moneyflow_mkt_dc",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
-))
 
 # ===========================================================================
-# 股票数据 — 打板专题数据
+# 股票数据 — 打板专题数据（24个接口）
+# 需求：10.1-10.25
 # ===========================================================================
+
+register(ApiEntry(
+    api_name="top_list",
+    label="龙虎榜每日统计单",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.BASIC,
+    target_table="top_list",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "ts_code", "reason"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"use_trade_date_loop": True},
+))
+
+register(ApiEntry(
+    api_name="top_inst",
+    label="龙虎榜机构交易单",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="top_inst",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "ts_code", "exalter"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"use_trade_date_loop": True},
+))
+
+register(ApiEntry(
+    api_name="limit_list_ths",
+    label="同花顺涨跌停榜单",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.PREMIUM,
+    target_table="limit_list_ths",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date", "limit"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
 
 register(ApiEntry(
     api_name="limit_list_d",
@@ -896,7 +1567,7 @@ register(ApiEntry(
     label="涨停股票连板天梯",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.PREMIUM,
     target_table="limit_step",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -907,8 +1578,154 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="limit_cpt_list",
+    label="涨停最强板块统计",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.PREMIUM,
+    target_table="limit_cpt_list",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="ths_index",
+    label="同花顺行业概念板块",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_info",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["sector_code", "data_source"],
+    conflict_action="do_update",
+    update_columns=["name", "sector_type"],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"data_source": "THS"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="type", target="sector_type"),
+    ],
+))
+
+register(ApiEntry(
+    api_name="ths_daily",
+    label="同花顺行业概念指数行情",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.SECTOR_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"data_source": "THS"},
+))
+
+register(ApiEntry(
+    api_name="ths_member",
+    label="同花顺行业概念成分",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"data_source": "THS", "trade_date": "19000101"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="con_code", target="symbol"),
+        FieldMapping(source="con_name", target="stock_name"),
+    ],
+))
+
+register(ApiEntry(
+    api_name="dc_index",
+    label="东方财富概念板块",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_info",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["sector_code", "data_source"],
+    conflict_action="do_update",
+    update_columns=["name", "sector_type"],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"data_source": "DC"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="type", target="sector_type"),
+    ],
+))
+
+register(ApiEntry(
+    api_name="dc_member",
+    label="东方财富概念成分",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"data_source": "DC"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="con_code", target="symbol"),
+        FieldMapping(source="name", target="stock_name"),
+    ],
+))
+
+register(ApiEntry(
+    api_name="dc_daily",
+    label="东方财富概念板块行情",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.SECTOR_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"data_source": "DC"},
+))
+
+register(ApiEntry(
+    api_name="stk_auction",
+    label="开盘竞价成交当日",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.SPECIAL,
+    target_table="stk_auction",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["ts_code", "trade_date"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
     api_name="hm_list",
-    label="游资名录",
+    label="市场游资名录",
     category="stock_data",
     subcategory="打板专题数据",
     token_tier=TokenTier.ADVANCED,
@@ -922,10 +1739,10 @@ register(ApiEntry(
 
 register(ApiEntry(
     api_name="hm_detail",
-    label="游资每日明细",
+    label="游资交易每日明细",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.ADVANCED,
+    token_tier=TokenTier.PREMIUM,
     target_table="hm_detail",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -936,71 +1753,11 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
-    api_name="top_list",
-    label="龙虎榜每日明细",
-    category="stock_data",
-    subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="top_list",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "ts_code", "reason"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
-    api_name="top_inst",
-    label="龙虎榜机构交易明细",
-    category="stock_data",
-    subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="top_inst",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "ts_code", "exalter"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
-    api_name="ths_limit",
-    label="同花顺涨跌停榜单",
-    category="stock_data",
-    subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="ths_limit",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "trade_date", "limit"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
-    api_name="dc_hot",
-    label="东方财富App热榜",
-    category="stock_data",
-    subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="dc_hot",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "ts_code"],
-    conflict_action="do_nothing",
-    required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-))
-
-register(ApiEntry(
     api_name="ths_hot",
-    label="同花顺App热榜",
+    label="同花顺热榜",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="ths_hot",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -1011,67 +1768,76 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
-    api_name="ths_index",
-    label="同花顺行业概念板块",
+    api_name="dc_hot",
+    label="东方财富热榜",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.PREMIUM,
+    target_table="dc_hot",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "ts_code"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="tdx_index",
+    label="通达信板块信息",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
     target_table="sector_info",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
-    update_columns=["sector_name", "sector_type"],
+    update_columns=["name", "sector_type"],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "THS"},
+    extra_config={"inject_fields": {"data_source": "TDX"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="type", target="sector_type"),
+    ],
 ))
 
 register(ApiEntry(
-    api_name="ths_member",
-    label="同花顺行业概念成分",
+    api_name="tdx_member",
+    label="通达信板块成分",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
+    conflict_columns=[],
     conflict_action="do_nothing",
-    required_params=[ParamType.SECTOR_CODE],
+    optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "THS"},
+    extra_config={"inject_fields": {"data_source": "TDX"}},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="con_code", target="symbol"),
+        FieldMapping(source="con_name", target="stock_name"),
+    ],
 ))
 
 register(ApiEntry(
-    api_name="dc_index",
-    label="东方财富概念板块",
+    api_name="tdx_daily",
+    label="通达信板块行情",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="sector_info",
-    storage_engine=StorageEngine.PG,
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_kline",
+    storage_engine=StorageEngine.TS,
     code_format=CodeFormat.NONE,
-    conflict_columns=["sector_code", "data_source"],
-    conflict_action="do_update",
-    update_columns=["sector_name", "sector_type"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "DC"},
-))
-
-register(ApiEntry(
-    api_name="dc_member",
-    label="东方财富概念成分",
-    category="stock_data",
-    subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
-    target_table="sector_constituent",
-    storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
-    conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
+    conflict_columns=[],
     conflict_action="do_nothing",
-    required_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "DC"},
+    required_params=[ParamType.DATE_RANGE],
+    optional_params=[ParamType.SECTOR_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"data_source": "TDX"},
 ))
 
 register(ApiEntry(
@@ -1079,7 +1845,7 @@ register(ApiEntry(
     label="开盘啦榜单数据",
     category="stock_data",
     subcategory="打板专题数据",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="kpl_list",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -1089,9 +1855,60 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
 
+register(ApiEntry(
+    api_name="kpl_concept_cons",
+    label="开盘啦题材成分",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="kpl_concept_cons",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.CONCEPT_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    field_mappings=[
+        FieldMapping(source="ts_code", target="concept_code"),
+        FieldMapping(source="con_code", target="ts_code"),
+        FieldMapping(source="con_name", target="name"),
+    ],
+))
+
+register(ApiEntry(
+    api_name="dc_concept",
+    label="东方财富题材库",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="dc_concept",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+))
+
+register(ApiEntry(
+    api_name="dc_concept_cons",
+    label="东方财富题材成分",
+    category="stock_data",
+    subcategory="打板专题数据",
+    token_tier=TokenTier.ADVANCED,
+    target_table="dc_concept_cons",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.CONCEPT_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    field_mappings=[FieldMapping(source="theme_code", target="concept_code")],
+))
+
 
 # ===========================================================================
-# 指数专题 — 指数基本信息
+# 指数专题 — 指数基本信息（1个接口）
+# 需求：11.3
 # ===========================================================================
 
 register(ApiEntry(
@@ -1111,7 +1928,8 @@ register(ApiEntry(
 ))
 
 # ===========================================================================
-# 指数专题 — 指数行情数据（低频：日线/周线/月线）
+# 指数专题 — 指数行情低频（3个接口）
+# 需求：12.1-12.7
 # ===========================================================================
 
 register(ApiEntry(
@@ -1119,7 +1937,7 @@ register(ApiEntry(
     label="指数日线行情",
     category="index_data",
     subcategory="指数行情数据（低频：日线/周线/月线）",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.INDEX_CODE,
@@ -1129,7 +1947,7 @@ register(ApiEntry(
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_code=True,
-    extra_config={"freq": "1d"},
+    extra_config={"freq": "1d", "max_rows": 8000},
 ))
 
 register(ApiEntry(
@@ -1146,7 +1964,7 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
-    extra_config={"freq": "1w"},
+    extra_config={"freq": "1w", "max_rows": 1000, "use_trade_date_loop": True},
 ))
 
 register(ApiEntry(
@@ -1163,19 +1981,20 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
-    extra_config={"freq": "1M"},
+    extra_config={"freq": "1M", "max_rows": 1000, "use_trade_date_loop": True},
 ))
 
 # ===========================================================================
-# 指数专题 — 指数行情数据（中频：分钟级）
+# 指数专题 — 指数行情中频（4个接口）
+# 需求：12a.1-12a.10
 # ===========================================================================
 
 register(ApiEntry(
-    api_name="index_1min_realtime",
-    label="指数实时分钟行情",
+    api_name="rt_idx_k",
+    label="指数实时日线",
     category="index_data",
-    subcategory="指数行情数据（中频：分钟级）",
-    token_tier=TokenTier.ADVANCED,
+    subcategory="指数行情数据（中频：实时日线/实时分钟/历史分钟）",
+    token_tier=TokenTier.SPECIAL,
     target_table="kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.INDEX_CODE,
@@ -1183,15 +2002,46 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
-    extra_config={"freq": "1m"},
+    extra_config={"freq": "1d"},
 ))
 
 register(ApiEntry(
-    api_name="index_min",
+    api_name="rt_idx_min",
+    label="指数实时分钟",
+    category="index_data",
+    subcategory="指数行情数据（中频：实时日线/实时分钟/历史分钟）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.INDEX_CODE,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.INDEX_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 1000},
+))
+
+register(ApiEntry(
+    api_name="rt_idx_min_daily",
+    label="指数实时分钟日累计",
+    category="index_data",
+    subcategory="指数行情数据（中频：实时日线/实时分钟/历史分钟）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.INDEX_CODE,
+    conflict_columns=["time", "symbol", "freq", "adj_type"],
+    conflict_action="do_nothing",
+    required_params=[ParamType.INDEX_CODE],
+    rate_limit_group=RateLimitGroup.KLINE,
+))
+
+register(ApiEntry(
+    api_name="idx_mins",
     label="指数历史分钟行情",
     category="index_data",
-    subcategory="指数行情数据（中频：分钟级）",
-    token_tier=TokenTier.ADVANCED,
+    subcategory="指数行情数据（中频：实时日线/实时分钟/历史分钟）",
+    token_tier=TokenTier.SPECIAL,
     target_table="kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.INDEX_CODE,
@@ -1199,18 +2049,20 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE, ParamType.INDEX_CODE, ParamType.FREQ],
     rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 8000},
 ))
 
 # ===========================================================================
-# 指数专题 — 指数成分和权重
+# 指数专题 — 指数成分和权重（1个接口）
+# 需求：13.1-13.5
 # ===========================================================================
 
 register(ApiEntry(
     api_name="index_weight",
-    label="指数成分和权重",
+    label="指数成分权重",
     category="index_data",
     subcategory="指数成分和权重",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="index_weight",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.INDEX_CODE,
@@ -1221,15 +2073,16 @@ register(ApiEntry(
 ))
 
 # ===========================================================================
-# 指数专题 — 申万行业数据
+# 指数专题 — 申万行业数据（4个接口）
+# 需求：14.1-14.7
 # ===========================================================================
 
 register(ApiEntry(
     api_name="index_classify",
     label="申万行业分类",
     category="index_data",
-    subcategory="申万行业数据",
-    token_tier=TokenTier.BASIC,
+    subcategory="申万行业数据（分类/成分/日线行情/实时行情）",
+    token_tier=TokenTier.ADVANCED,
     target_table="sector_info",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -1241,31 +2094,79 @@ register(ApiEntry(
 ))
 
 register(ApiEntry(
+    api_name="index_member_all",
+    label="申万行业成分（分级）",
+    category="index_data",
+    subcategory="申万行业数据（分类/成分/日线行情/实时行情）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"data_source": "TI", "max_rows": 2000},
+))
+
+register(ApiEntry(
     api_name="sw_daily",
     label="申万行业指数日行情",
     category="index_data",
-    subcategory="申万行业数据",
-    token_tier=TokenTier.BASIC,
+    subcategory="申万行业数据（分类/成分/日线行情/实时行情）",
+    token_tier=TokenTier.ADVANCED,
     target_table="sector_kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.NONE,
     conflict_columns=[],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
+    rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"data_source": "TI", "max_rows": 4000},
+))
+
+register(ApiEntry(
+    api_name="rt_sw_k",
+    label="申万实时行情",
+    category="index_data",
+    subcategory="申万行业数据（分类/成分/日线行情/实时行情）",
+    token_tier=TokenTier.SPECIAL,
+    target_table="sector_kline",
+    storage_engine=StorageEngine.TS,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.KLINE,
     extra_config={"data_source": "TI"},
 ))
 
 # ===========================================================================
-# 指数专题 — 中信行业数据
+# 指数专题 — 中信行业数据（2个接口）
+# 需求：15.1-15.5
 # ===========================================================================
+
+register(ApiEntry(
+    api_name="ci_index_member",
+    label="中信行业成分",
+    category="index_data",
+    subcategory="中信行业数据（成分/日线行情）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=[],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"data_source": "CI", "max_rows": 5000},
+))
 
 register(ApiEntry(
     api_name="ci_daily",
     label="中信行业指数日行情",
     category="index_data",
-    subcategory="中信行业数据",
-    token_tier=TokenTier.BASIC,
+    subcategory="中信行业数据（成分/日线行情）",
+    token_tier=TokenTier.ADVANCED,
     target_table="sector_kline",
     storage_engine=StorageEngine.TS,
     code_format=CodeFormat.NONE,
@@ -1273,11 +2174,12 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
-    extra_config={"data_source": "CI"},
+    extra_config={"data_source": "CI", "max_rows": 4000},
 ))
 
 # ===========================================================================
-# 指数专题 — 大盘指数每日指标
+# 指数专题 — 大盘指数每日指标（1个接口）
+# 需求：16.1-16.5
 # ===========================================================================
 
 register(ApiEntry(
@@ -1285,7 +2187,7 @@ register(ApiEntry(
     label="大盘指数每日指标",
     category="index_data",
     subcategory="大盘指数每日指标",
-    token_tier=TokenTier.ADVANCED,
+    token_tier=TokenTier.BASIC,
     target_table="index_dailybasic",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.INDEX_CODE,
@@ -1297,15 +2199,16 @@ register(ApiEntry(
 ))
 
 # ===========================================================================
-# 指数专题 — 指数技术面因子
+# 指数专题 — 指数技术面因子（1个接口）
+# 需求：17.1-17.5
 # ===========================================================================
 
 register(ApiEntry(
-    api_name="index_tech",
-    label="指数技术面因子",
+    api_name="idx_factor_pro",
+    label="指数技术面因子（专业版）",
     category="index_data",
-    subcategory="指数技术面因子",
-    token_tier=TokenTier.SPECIAL,
+    subcategory="指数技术面因子（专业版）",
+    token_tier=TokenTier.ADVANCED,
     target_table="index_tech",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.INDEX_CODE,
@@ -1314,10 +2217,12 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 8000},
 ))
 
 # ===========================================================================
-# 指数专题 — 沪深市场每日交易统计
+# 指数专题 — 沪深市场每日交易统计（2个接口）
+# 需求：18.1-18.4
 # ===========================================================================
 
 register(ApiEntry(
@@ -1333,18 +2238,15 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 4000},
 ))
-
-# ===========================================================================
-# 指数专题 — 深圳市场每日交易情况
-# ===========================================================================
 
 register(ApiEntry(
     api_name="sz_daily_info",
     label="深圳市场每日交易情况",
     category="index_data",
     subcategory="深圳市场每日交易情况",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="sz_daily_info",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
@@ -1352,10 +2254,12 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 2000},
 ))
 
 # ===========================================================================
-# 指数专题 — 国际主要指数
+# 指数专题 — 国际主要指数（1个接口）
+# 需求：19.1-19.4
 # ===========================================================================
 
 register(ApiEntry(
@@ -1363,7 +2267,7 @@ register(ApiEntry(
     label="国际主要指数",
     category="index_data",
     subcategory="国际主要指数",
-    token_tier=TokenTier.BASIC,
+    token_tier=TokenTier.ADVANCED,
     target_table="index_global",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.INDEX_CODE,
@@ -1372,4 +2276,5 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
+    extra_config={"max_rows": 4000},
 ))

@@ -55,7 +55,7 @@ class SectorInfo(PGBase):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     sector_code: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    sector_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    sector_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
     data_source: Mapped[str] = mapped_column(String(10), nullable=False)
     list_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     constituent_count: Mapped[int | None] = mapped_column(nullable=True)

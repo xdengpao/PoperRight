@@ -2,7 +2,7 @@
 
 ## Overview
 
-本实现计划将 Tushare 数据在线导入功能分解为可增量执行的编码任务。采用自底向上的构建顺序：先扩展配置和枚举 → 创建数据模型（85张表） → 数据库迁移 → 核心服务层（Registry 85+ 接口 → Import Service 四级Token → Import Task） → REST API → 前端组件（四级Token状态） → 路由/菜单集成。每个任务构建在前一个任务之上，确保无孤立代码。
+本实现计划将 Tushare 数据在线导入功能分解为可增量执行的编码任务。采用自底向上的构建顺序：先扩展配置和枚举 → 创建数据模型（85张表） → 数据库迁移 → 核心服务层（Registry 120+ 接口 → Import Service 四级Token → Import Task） → REST API → 前端组件（四级Token状态） → 路由/菜单集成。每个任务构建在前一个任务之上，确保无孤立代码。
 
 ## Tasks
 
@@ -134,86 +134,88 @@
       - `SzDailyInfo`：深圳市场每日交易情况表（trade_date, ts_code, count, amount, vol, total_share, total_mv, float_share, float_mv，唯一约束 trade_date+ts_code）
     - _Requirements: 25.4, 25.5, 25.6, 25.17, 25.16, 25.31, 25.32, 11.3, 13.2, 16.2, 17.2, 18.1, 18.2, 19.2_
 
-- [ ] 3. 数据库迁移
-  - [ ] 3.1 创建 Alembic 迁移脚本
+- [x] 3. 数据库迁移
+  - [x] 3.1 创建 Alembic 迁移脚本
     - 运行 `alembic revision --autogenerate -m "add tushare import tables v2"` 生成迁移脚本
     - 在迁移脚本中添加 DataSource 枚举扩展的 `ALTER TYPE` 语句（新增 CI、THS 值）
     - 运行 `alembic upgrade head` 验证迁移成功
     - _Requirements: 25.84_
 
-- [ ] 4. Checkpoint - 确保数据模型和迁移正确
+- [x] 4. Checkpoint - 确保数据模型和迁移正确
   - 确保所有模型定义无语法错误，Alembic 迁移脚本可正常执行。如有问题请向用户确认。
 
-- [ ] 5. API_Registry 接口注册表
-  - [ ] 5.1 创建注册表核心框架
+- [x] 5. API_Registry 接口注册表
+  - [x] 5.1 创建注册表核心框架
     - 新建 `app/services/data_engine/tushare_registry.py`
     - 实现 `TokenTier`（含 BASIC/ADVANCED/PREMIUM/SPECIAL 四级）、`CodeFormat`、`StorageEngine`、`ParamType`（含 DATE_RANGE/STOCK_CODE/INDEX_CODE/MARKET/REPORT_PERIOD/FREQ/HS_TYPE/SECTOR_CODE/MONTH_RANGE/CONCEPT_CODE）、`RateLimitGroup` 枚举
     - 实现 `FieldMapping`、`ApiEntry`（含 vip_variant 字段）数据类
     - 实现 `TUSHARE_API_REGISTRY` 全局字典和 `register()`、`get_entry()`、`get_all_entries()`、`get_entries_by_category()`、`get_entries_by_subcategory()` 函数
     - _Requirements: 22a.2, 26.4_
 
-  - [ ] 5.2 注册基础数据接口（13个）
+  - [x] 5.2 注册基础数据接口（13个）
     - 在 `tushare_registry.py` 中注册以下接口的 ApiEntry：
       - stock_basic、stk_premarket、trade_cal、stock_st、st、stock_hsgt、namechange、stock_company、stk_managers、stk_rewards、bse_mapping、new_share、bak_basic
     - 每个 ApiEntry 包含完整的 api_name、label、category、subcategory、token_tier、target_table、storage_engine、code_format、conflict_columns、conflict_action、field_mappings、required_params、optional_params、rate_limit_group、batch_by_code 配置
     - _Requirements: 3.1-3.16_
 
-  - [ ] 5.3 注册行情数据低频接口（13个）
+  - [x] 5.3 注册行情数据低频接口（13个）
     - 注册以下接口：daily、weekly、monthly、stk_weekly_monthly、adj_factor、daily_basic、stk_limit、suspend_d、hsgt_top10、ggt_top10、ggt_daily、ggt_monthly、bak_daily
     - _Requirements: 4.1-4.15_
 
-  - [ ] 5.4 注册行情数据中频接口（4个）
+  - [x] 5.4 注册行情数据中频接口（4个）
     - 注册以下接口：stk_mins、rt_k、rt_min、rt_min_daily
     - _Requirements: 4a.1-4a.9_
 
-  - [ ] 5.5 注册财务数据接口（9个 + VIP 变体）
+  - [x] 5.5 注册财务数据接口（9个 + VIP 变体）
     - 注册以下接口：income、balancesheet、cashflow、fina_indicator、dividend、forecast、express、fina_mainbz、disclosure_date
     - 为 income/balancesheet/cashflow/forecast/express/fina_indicator/fina_mainbz 标注 vip_variant 字段（如 income_vip），VIP 接口使用 advanced 权限级别
     - _Requirements: 5.1-5.11_
 
-  - [ ] 5.6 注册参考数据接口（12个）
+  - [x] 5.6 注册参考数据接口（12个）
     - 注册以下接口：stk_shock、stk_high_shock、stk_alert、top10_holders、top10_floatholders、pledge_stat、pledge_detail、repurchase、share_float、block_trade、stk_holdernumber、stk_holdertrade
     - _Requirements: 6.1-6.13_
 
-  - [ ] 5.7 注册特色数据接口（13个）
+  - [x] 5.7 注册特色数据接口（13个）
     - 注册以下接口：report_rc、cyq_perf、cyq_chips、stk_factor_pro、ccass_hold、ccass_hold_detail、hk_hold、stk_auction_o、stk_auction_c、stk_nineturn、stk_ah_comparison、stk_surv、broker_recommend
     - 标注权限级别：stk_factor_pro=advanced、stk_auction_o/stk_auction_c=special、report_rc=premium、ccass_hold_detail=premium
     - _Requirements: 7.1-7.15_
 
-  - [ ] 5.8 注册两融及转融通接口（4个）
+  - [x] 5.8 注册两融及转融通接口（4个）
     - 注册以下接口：margin、margin_detail、margin_secs、slb_len
     - _Requirements: 8.1-8.6_
 
-  - [ ] 5.9 注册资金流向数据接口（8个）
+  - [x] 5.9 注册资金流向数据接口（8个）
     - 注册以下接口：moneyflow、moneyflow_ths、moneyflow_dc、moneyflow_cnt_ths、moneyflow_ind_ths、moneyflow_ind_dc、moneyflow_mkt_dc、moneyflow_hsgt
     - _Requirements: 9.1-9.10_
 
-  - [ ] 5.10 注册打板专题数据接口（24个）
+  - [x] 5.10 注册打板专题数据接口（24个）
     - 注册以下接口：top_list、top_inst、limit_list_ths、limit_list_d、limit_step、limit_cpt_list、ths_index、ths_daily、ths_member、dc_index、dc_member、dc_daily、stk_auction、hm_list、hm_detail、ths_hot、dc_hot、tdx_index、tdx_member、tdx_daily、kpl_list、kpl_concept_cons、dc_concept、dc_concept_cons
     - 板块类接口（ths_index/dc_index/tdx_index）target_table 设为 sector_info，成分类（ths_member/dc_member/tdx_member）设为 sector_constituent，行情类（ths_daily/dc_daily/tdx_daily）设为 sector_kline
     - _Requirements: 10.1-10.25_
 
-  - [ ] 5.11 注册指数专题类接口（15个）
+  - [x] 5.11 注册指数专题类接口（20个）
     - 注册以下接口：
-      - 指数基本信息：index_basic
-      - 指数低频行情：index_daily、index_weekly、index_monthly
-      - 指数中频行情：index_1min_realtime、index_min
-      - 指数成分和权重：index_weight
-      - 申万行业：index_classify、sw_daily
-      - 中信行业：ci_daily
-      - 大盘指数每日指标：index_dailybasic
-      - 指数技术面因子：index_tech
-      - 沪深市场每日交易统计：daily_info、sz_daily_info
-      - 国际主要指数：index_global
-    - _Requirements: 11.1-11.5, 12.1-12.5, 12a.1-12a.6, 13.1-13.4, 14.1-14.4, 15.1-15.3, 16.1-16.3, 17.1-17.3, 18.1-18.3, 19.1-19.3_
+      - 指数基本信息：index_basic（basic）
+      - 指数低频行情：index_daily（advanced，2000积分）、index_weekly（basic，600积分）、index_monthly（basic，600积分）
+      - 指数中频行情：rt_idx_k（special，指数实时日线）、rt_idx_min（special，指数实时分钟）、rt_idx_min_daily（special，指数实时分钟日累计）、idx_mins（special，指数历史分钟）
+      - 指数成分和权重：index_weight（advanced，2000积分）
+      - 申万行业：index_classify（advanced，2000积分）、index_member_all（advanced，2000积分，申万行业成分分级）、sw_daily（advanced，5000积分）、rt_sw_k（special，申万实时行情）
+      - 中信行业：ci_index_member（advanced，5000积分，中信行业成分）、ci_daily（advanced，5000积分）
+      - 大盘指数每日指标：index_dailybasic（basic，400积分）
+      - 指数技术面因子：idx_factor_pro（advanced，5000积分，表名 index_tech）
+      - 沪深市场每日交易统计：daily_info（basic，600积分）、sz_daily_info（advanced，2000积分）
+      - 国际主要指数：index_global（advanced，6000积分）
+    - 指数中频行情接口（rt_idx_k/rt_idx_min/rt_idx_min_daily/idx_mins）和申万实时行情（rt_sw_k）均复用 kline/sector_kline 超表
+    - 申万行业成分（index_member_all）和中信行业成分（ci_index_member）复用 sector_constituent 表，通过 data_source="TI"/"CI" 区分
+    - _Requirements: 11.1-11.6, 12.1-12.7, 12a.1-12a.10, 13.1-13.5, 14.1-14.7, 15.1-15.5, 16.1-16.5, 17.1-17.5, 18.1-18.4, 19.1-19.4_
 
-  - [ ] 5.12 编写 API_Registry 属性测试
+  - [x] 5.12 编写 API_Registry 属性测试
     - **Property 5: API_Registry 条目完整性**
-    - 在 `tests/properties/test_tushare_import_properties.py` 中编写属性测试，验证所有注册的 ApiEntry（85+ 个）的 token_tier 为 {BASIC, ADVANCED, PREMIUM, SPECIAL} 之一，code_format 为 {STOCK_SYMBOL, INDEX_CODE, NONE} 之一，storage_engine 为 {PG, TS} 之一，且 target_table 不为空
+    - 在 `tests/properties/test_tushare_import_properties.py` 中编写属性测试，验证所有注册的 ApiEntry（120+ 个）的 token_tier 为 {BASIC, ADVANCED, PREMIUM, SPECIAL} 之一，code_format 为 {STOCK_SYMBOL, INDEX_CODE, NONE} 之一，storage_engine 为 {PG, TS} 之一，且 target_table 不为空
     - **Validates: Requirements 22a.2, 26.4**
 
-- [ ] 6. Import_Service 导入编排服务
-  - [ ] 6.1 创建 TushareImportService 核心框架
+- [x] 6. Import_Service 导入编排服务
+  - [x] 6.1 创建 TushareImportService 核心框架
     - 新建 `app/services/data_engine/tushare_import_service.py`
     - 实现 `TushareImportService` 类，包含以下方法：
       - `_resolve_token(tier: TokenTier) -> str`：根据权限级别选择 Token（四级路由），优先对应级别 Token（basic→tushare_token_basic, advanced→tushare_token_advanced, premium→tushare_token_premium, special→tushare_token_special），未配置则回退到 `tushare_api_token`，两者均空则抛出错误
@@ -221,7 +223,7 @@
       - `check_health() -> dict`：检查 Tushare 连通性（调用 TushareAdapter.health_check）和四级 Token 配置状态（basic/advanced/premium/special 各自是否已配置）
     - _Requirements: 22.1, 22a.3, 22a.4, 23.4_
 
-  - [ ] 6.2 实现导入任务启动和控制
+  - [x] 6.2 实现导入任务启动和控制
     - 在 `TushareImportService` 中实现：
       - `start_import(api_name, params) -> dict`：从 Registry 获取元数据 → 参数校验 → Token 路由（四级） → 在 tushare_import_log 创建记录 → 初始化 Redis 进度（键 `tushare:import:{task_id}`） → 分发 Celery 任务 → 返回 task_id
       - `stop_import(task_id) -> dict`：在 Redis 设置停止信号 `tushare:import:stop:{task_id}` → 更新进度状态 → 撤销 Celery 任务
@@ -230,17 +232,17 @@
     - 实现并发保护：同一 api_name 同时只允许一个导入任务运行
     - _Requirements: 20.1, 20.4, 21.2, 21.3, 24.3, 24.4, 24.5, 24.6_
 
-  - [ ] 6.3 编写 Token 路由属性测试
+  - [x] 6.3 编写 Token 路由属性测试
     - **Property 4: 四级 Token 路由与回退**
     - 在 `tests/properties/test_tushare_import_properties.py` 中编写属性测试，验证 `_resolve_token` 在各种 Token 配置组合下的行为：(a) 对应级别 Token 已配置时返回该 Token；(b) 对应级别 Token 为空但默认 Token 已配置时返回默认 Token；(c) 两者均为空时抛出错误。覆盖 BASIC/ADVANCED/PREMIUM/SPECIAL 四个级别
     - **Validates: Requirements 22a.3, 22a.4**
 
-  - [ ] 6.4 编写 Import_Service 单元测试
+  - [x] 6.4 编写 Import_Service 单元测试
     - 在 `tests/services/test_tushare_import_service.py` 中编写单元测试，覆盖参数校验、四级 Token 路由、任务分发、并发保护、进度查询、历史记录查询
     - _Requirements: 20.1, 21.2, 22.1, 22a.3, 23.4, 24.5_
 
-- [ ] 7. Import_Task 异步导入任务
-  - [ ] 7.1 创建 Celery 导入任务核心框架
+- [x] 7. Import_Task 异步导入任务
+  - [x] 7.1 创建 Celery 导入任务核心框架
     - 新建 `app/tasks/tushare_import.py`
     - 实现 `run_import` Celery 任务（注册到 `data_sync` 队列），接收 api_name、params、token、log_id、task_id 参数
     - 实现核心处理逻辑 `_process_import`：
@@ -253,7 +255,7 @@
       - 更新 Redis 进度
     - _Requirements: 3.2, 4.4, 4.5, 12.3, 26.1, 26.2_
 
-  - [ ] 7.2 实现批处理和频率限制
+  - [x] 7.2 实现批处理和频率限制
     - 在 `_process_import` 中实现：
       - 按 BATCH_SIZE=50 分批处理（当 batch_by_code=True 时按代码分批）
       - 每批处理前检查 Redis 停止信号 `tushare:import:stop:{task_id}`
@@ -263,13 +265,13 @@
     - 实现错误处理：HTTP 错误记录日志标记 failed、网络超时重试（最多 3 次）、Token 无效不重试、频率限制等待 60s 重试、数据库写入失败回滚当前批次继续下一批
     - _Requirements: 4.15, 20.2, 21.3, 3.16_
 
-  - [ ] 7.3 实现 PostgreSQL 和 TimescaleDB 写入函数
+  - [x] 7.3 实现 PostgreSQL 和 TimescaleDB 写入函数
     - 实现 `_write_to_postgresql(rows, entry)`：根据 ApiEntry 的 conflict_columns 和 conflict_action 构建 INSERT ... ON CONFLICT SQL，使用 AsyncSessionPG 写入
     - 实现 `_write_to_timescaledb(rows, entry)`：构建 INSERT ... ON CONFLICT (time, symbol, freq, adj_type) DO NOTHING SQL，使用 AsyncSessionTS 写入 kline 超表
     - 两个函数均使用事务保证单批原子性
     - _Requirements: 4.4, 4.5, 5.3, 9.2, 12.3_
 
-  - [ ] 7.4 编写代码转换和批处理属性测试
+  - [x] 7.4 编写代码转换和批处理属性测试
     - **Property 1: ts_code 到 symbol 的转换正确性**
     - **Property 2: 纯数字代码到 ts_code 的补全正确性（Round-Trip）**
     - **Property 3: 指数代码保持不变**
@@ -277,22 +279,22 @@
     - 在 `tests/properties/test_tushare_import_properties.py` 中编写以上 4 个属性测试
     - **Validates: Requirements 3.2, 26.1, 26.2, 26.3, 4.15**
 
-  - [ ] 7.5 编写进度和终态属性测试
+  - [x] 7.5 编写进度和终态属性测试
     - **Property 7: 导入进度单调递增**
     - **Property 8: 导入任务终态**
     - 在 `tests/properties/test_tushare_import_properties.py` 中编写以上 2 个属性测试
     - **Validates: Requirements 20.2, 3.16, 20.4, 21.3**
 
-  - [ ] 7.6 编写 Import_Task 单元测试
+  - [x] 7.6 编写 Import_Task 单元测试
     - 在 `tests/tasks/test_tushare_import_task.py` 中编写单元测试，覆盖字段映射、代码转换、批处理逻辑、停止信号检测、错误处理
     - Mock TushareAdapter._call_api 返回 fixture 数据
     - _Requirements: 3.2, 4.4, 4.15, 21.3_
 
-- [ ] 8. Checkpoint - 确保后端核心服务层正确
-  - 确保 API_Registry（85+ 接口）、Import_Service（四级Token）、Import_Task 所有测试通过。如有问题请向用户确认。
+- [x] 8. Checkpoint - 确保后端核心服务层正确
+  - 确保 API_Registry（120+ 接口）、Import_Service（四级Token）、Import_Task 所有测试通过。如有问题请向用户确认。
 
-- [ ] 9. REST API 端点
-  - [ ] 9.1 创建 Tushare API 路由模块
+- [x] 9. REST API 端点
+  - [x] 9.1 创建 Tushare API 路由模块
     - 新建 `app/api/v1/tushare.py`，创建 `router = APIRouter(prefix="/data/tushare", tags=["tushare"])`
     - 定义 Pydantic 请求/响应模型：`TushareImportRequest`、`TushareImportResponse`、`TushareImportStatusResponse`、`TushareImportStopResponse`、`TushareHealthResponse`（含四级 Token 状态：basic/advanced/premium/special）、`ApiRegistryItem`（含 token_tier、token_available、vip_variant 字段）、`TushareImportLogItem`
     - 实现 6 个端点：
@@ -304,34 +306,34 @@
       - `GET /import/history`：调用 Import_Service.get_import_history()
     - _Requirements: 22.1, 22.2, 22.3, 22.4, 20.3, 21.1, 24.5_
 
-  - [ ] 9.2 注册路由到 API v1
+  - [x] 9.2 注册路由到 API v1
     - 在 `app/api/v1/__init__.py` 中导入并注册 tushare router
     - _Requirements: 22.1_
 
-  - [ ] 9.3 编写 REST API 端点测试
-    - 在 `tests/api/test_tushare_api.py` 中编写端点测试，覆盖健康检查（四级Token状态）、注册表查询（85+接口）、导入启动/状态/停止/历史
+  - [x] 9.3 编写 REST API 端点测试
+    - 在 `tests/api/test_tushare_api.py` 中编写端点测试，覆盖健康检查（四级Token状态）、注册表查询（120+接口）、导入启动/状态/停止/历史
     - Mock Import_Service 方法
     - _Requirements: 22.1, 20.3, 21.1, 24.5_
 
-- [ ] 10. 前端 TushareImportView 组件
-  - [ ] 10.1 创建 TushareImportView 基础布局
+- [x] 10. 前端 TushareImportView 组件
+  - [x] 10.1 创建 TushareImportView 基础布局
     - 新建 `frontend/src/views/TushareImportView.vue`
     - 实现页面顶部 Tushare 连接状态指示器（绿色"已连接"/红色"未连接"）和四级 Token 配置状态显示（基础✅/高级✅/专业✅/特殊❌）
     - 实现"重新检测"按钮，调用 `GET /api/v1/data/tushare/health`
     - 页面加载时自动检查连通性
     - _Requirements: 2.1, 22.1, 22.2, 22.3, 22.4, 22a.5_
 
-  - [ ] 10.2 实现数据分类卡片和接口列表
+  - [x] 10.2 实现数据分类卡片和接口列表
     - 页面加载时调用 `GET /api/v1/data/tushare/registry` 获取接口列表
     - 按 category（stock_data/index_data）分为"股票数据"和"指数专题"两个卡片区域
     - 在每个卡片内按 subcategory 分组显示可折叠的子分类
     - "股票数据"下显示：基础数据（13个）、行情数据低频（13个）、行情数据中频（4个）、财务数据（9个+VIP）、参考数据（12个）、特色数据（13个）、两融及转融通（4个）、资金流向数据（8个）、打板专题数据（24个）
-    - "指数专题"下显示：指数基本信息、指数行情低频、指数行情中频、指数成分和权重、申万行业数据、中信行业数据、大盘指数每日指标、指数技术面因子、沪深市场每日交易统计、深圳市场每日交易情况、国际主要指数
+    - "指数专题"下显示：指数基本信息（1个）、指数行情低频（日线/周线/月线，3个）、指数行情中频（实时日线/实时分钟/历史分钟，4个）、指数成分和权重（1个）、申万行业数据（分类/成分/日线/实时，4个）、中信行业数据（成分/日线，2个）、大盘指数每日指标（1个）、指数技术面因子专业版（1个）、沪深市场每日交易统计（2个）、深圳市场每日交易情况、国际主要指数（1个）
     - 展开子分类后显示该分类下所有 API 接口，每个接口显示 api_name、label（中文说明）和 token_tier 权限标签（基础/高级/专业/特殊）
     - 若对应 Token 未配置（token_available=false），禁用该接口的导入按钮并提示"需配置对应权限 Token"
     - _Requirements: 2.2, 2.3, 2.4, 2.5, 2.6, 22a.5, 22a.6_
 
-  - [ ] 10.3 实现动态参数表单
+  - [x] 10.3 实现动态参数表单
     - 根据每个 ApiEntry 的 required_params 和 optional_params 动态渲染参数输入控件：
       - DATE_RANGE → 起止日期选择器（默认结束日期为当天）
       - STOCK_CODE → 股票代码输入框（支持逗号分隔，留空表示全市场）
@@ -347,7 +349,7 @@
     - 中频行情分组中显示提示"分钟级数据量较大，建议按单只股票或短日期范围分批导入"
     - _Requirements: 23.1, 23.2, 23.3, 23.4, 4a.1, 4a.9, 12a.1, 12a.6_
 
-  - [ ] 10.4 实现导入控制和进度追踪
+  - [x] 10.4 实现导入控制和进度追踪
     - 点击"开始导入"时调用 `POST /api/v1/data/tushare/import`，获取 task_id
     - 在"活跃任务"区域显示正在运行的导入任务，包含进度条、百分比、已完成/失败数量、当前处理项
     - 每 3 秒轮询 `GET /api/v1/data/tushare/import/status/{task_id}` 更新进度
@@ -355,13 +357,13 @@
     - 任务完成/失败/停止后停止轮询并显示最终状态标签
     - _Requirements: 20.3, 20.5, 21.1, 21.2, 21.4_
 
-  - [ ] 10.5 实现导入历史记录
+  - [x] 10.5 实现导入历史记录
     - 页面加载时调用 `GET /api/v1/data/tushare/import/history` 获取最近 20 条导入记录
     - 在页面底部"导入历史"区域显示记录列表，每条记录包含：接口名称、导入时间、数据量、状态（成功✅/失败❌/已停止⏹）、耗时
     - 导入任务完成后自动刷新历史记录列表
     - _Requirements: 2.7, 24.1, 24.2, 24.5_
 
-  - [ ] 10.6 编写前端属性测试
+  - [x] 10.6 编写前端属性测试
     - 在 `frontend/src/views/__tests__/TushareImportView.property.test.ts` 中编写以下属性测试：
       - **Property 9: 动态表单参数渲染** — 验证参数表单根据 required_params/optional_params 正确渲染对应 UI 控件（含 MONTH_RANGE、CONCEPT_CODE 新增类型）
       - **Property 10: 必填参数校验** — 验证必填参数未填写时导入按钮禁用
@@ -370,12 +372,12 @@
       - **Property 13: 导入历史记录字段完整性** — 验证历史记录行包含所有必要字段
     - **Validates: Requirements 23.1-23.4, 22a.6, 2.5, 2.6, 24.2**
 
-  - [ ] 10.7 编写前端单元测试
-    - 在 `frontend/src/views/__tests__/TushareImportView.test.ts` 中编写单元测试，覆盖组件渲染、连接状态检查（四级Token）、接口列表展示（85+接口）、参数表单交互、导入启动/停止、进度更新、历史记录显示
+  - [x] 10.7 编写前端单元测试
+    - 在 `frontend/src/views/__tests__/TushareImportView.test.ts` 中编写单元测试，覆盖组件渲染、连接状态检查（四级Token）、接口列表展示（120+接口）、参数表单交互、导入启动/停止、进度更新、历史记录显示
     - _Requirements: 2.1-2.7, 20.3, 21.1, 22.1-22.4, 23.1-23.4, 24.1-24.2_
 
-- [ ] 11. 路由和菜单集成
-  - [ ] 11.1 添加前端路由
+- [x] 11. 路由和菜单集成
+  - [x] 11.1 添加前端路由
     - 在 `frontend/src/router/index.ts` 的 MainLayout children 中新增路由：
       ```
       path: 'data/online/tushare', name: 'DataOnlineTushare',
@@ -384,7 +386,7 @@
       ```
     - _Requirements: 1.2_
 
-  - [ ] 11.2 修改侧边栏菜单结构
+  - [x] 11.2 修改侧边栏菜单结构
     - 在 `frontend/src/layouts/MainLayout.vue` 中将"在线数据"菜单项改为可展开的父菜单：
       - 父菜单：`{ path: '/data/online', label: '在线数据', icon: '🌐', children: [...] }`
       - 子菜单 1：`{ path: '/data/online', label: '数据总览', icon: '📊' }`
@@ -394,22 +396,22 @@
     - 确保 expandedMenus 默认展开 `/data/online` 父菜单
     - _Requirements: 1.1, 1.3, 1.4, 1.5_
 
-- [ ] 12. Checkpoint - 确保前后端集成正确
+- [x] 12. Checkpoint - 确保前后端集成正确
   - 确保所有测试通过，前端页面可正常渲染，API 端点可正常响应。如有问题请向用户确认。
 
-- [ ] 13. 集成测试
-  - [ ] 13.1 编写完整导入流程集成测试
+- [x] 13. 集成测试
+  - [x] 13.1 编写完整导入流程集成测试
     - 在 `tests/integration/test_tushare_import_flow.py` 中编写集成测试：
       - Mock Tushare API 返回 fixture 数据
       - 验证完整流程：POST /import → Celery 任务执行 → 数据写入 DB → 进度更新 → 状态变为 completed → import_log 记录正确
     - _Requirements: 3.1-3.2, 4.3-4.5, 20.1-20.4, 24.3-24.6_
 
-  - [ ] 13.2 编写停止信号集成测试
+  - [x] 13.2 编写停止信号集成测试
     - 在 `tests/integration/test_tushare_import_stop.py` 中编写集成测试：
       - 验证停止信号传播：POST /import/stop → Redis 停止信号 → 任务检测信号 → 状态变为 stopped → import_log 更新
     - _Requirements: 21.2, 21.3, 21.4_
 
-- [ ] 14. Final checkpoint - 确保所有测试通过
+- [x] 14. Final checkpoint - 确保所有测试通过
   - 确保所有测试通过，包括属性测试、单元测试和集成测试。如有问题请向用户确认。
 
 ## Notes
@@ -419,10 +421,10 @@
 - Checkpoint 确保增量验证
 - 属性测试验证设计文档中的 13 个正确性属性（Property 1-13）
 - 单元测试验证具体示例和边界情况
-- 实现顺序确保无孤立代码：配置 → 模型（85张表） → 迁移 → 注册表（85+接口） → 服务（四级Token） → 任务 → API → 前端 → 路由
+- 实现顺序确保无孤立代码：配置 → 模型（85张表） → 迁移 → 注册表（120+接口） → 服务（四级Token） → 任务 → API → 前端 → 路由
 - 所有新 Python 文件应包含中文 docstring 和模块级注释
 - ORM 模型使用 SQLAlchemy 2.0 `Mapped[]` + `mapped_column()` 声明式风格，继承 `PGBase`
 - Celery 任务是调用 services 的薄包装器，遵循 `app/tasks/` 中的现有模式
 - 四级 Token 路由：basic（≤2000积分）→ advanced（2000-6000含6000）→ premium（>6000）→ special（单独开通）
-- 板块数据复用现有 sector_info/sector_constituent/sector_kline 表，通过 data_source 枚举（THS/DC/CI/TDX）区分来源
+- 板块数据复用现有 sector_info/sector_constituent/sector_kline 表，通过 data_source 枚举（THS/DC/CI/TDX/TI）区分来源，其中 index_member_all 使用 TI、ci_index_member 使用 CI
 - VIP 批量接口（如 income_vip）通过 ApiEntry.vip_variant 字段关联，使用 advanced 权限级别 Token

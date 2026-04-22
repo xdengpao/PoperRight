@@ -91,9 +91,9 @@ Tushare 数据导入相关 ORM 模型（PostgreSQL）
 25.46, 25.49-25.83
 """
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Float, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, Float, Integer, String, UniqueConstraint
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
@@ -139,7 +139,7 @@ class TradeCalendar(PGBase):
     __tablename__ = "trade_calendar"
 
     exchange: Mapped[str] = mapped_column(String(10), primary_key=True)
-    cal_date: Mapped[str] = mapped_column(String(8), primary_key=True)
+    cal_date: Mapped[date] = mapped_column(Date, primary_key=True)
     is_open: Mapped[bool] = mapped_column(Boolean, nullable=False)
 
     def __repr__(self) -> str:
@@ -1557,7 +1557,7 @@ class MoneyflowCntThs(PGBase):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
-    ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    ts_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     buy_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
     sell_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -1936,7 +1936,7 @@ class ThsHot(PGBase):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
-    ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    ts_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pct_chg: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -1958,7 +1958,7 @@ class DcHot(PGBase):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
-    ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
+    ts_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pct_chg: Mapped[float | None] = mapped_column(Float, nullable=True)

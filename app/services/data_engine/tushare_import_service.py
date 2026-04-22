@@ -1,7 +1,8 @@
 """
 Tushare 数据导入编排服务
 
-负责参数校验、三级 Token 路由、Celery 任务分发、进度管理和导入历史查询。
+负责参数校验、四级 Token 路由（basic/advanced/premium/special）、
+Celery 任务分发、进度管理和导入历史查询。
 设计模式参考现有 BackfillService，通过 API_Registry 注册表驱动导入流程。
 
 对应需求：20.1, 20.4, 21.2, 21.3, 22.1, 22a.3, 22a.4, 23.4, 24.3-24.6
@@ -55,7 +56,7 @@ class TushareImportService:
         两者均为空时抛出 ValueError。
 
         Args:
-            tier: Token 权限级别（basic/advanced/special）
+            tier: Token 权限级别（basic/advanced/premium/special）
 
         Returns:
             选中的 API Token 字符串
@@ -66,6 +67,7 @@ class TushareImportService:
         tier_token_map = {
             TokenTier.BASIC: settings.tushare_token_basic,
             TokenTier.ADVANCED: settings.tushare_token_advanced,
+            TokenTier.PREMIUM: settings.tushare_token_premium,
             TokenTier.SPECIAL: settings.tushare_token_special,
         }
 
@@ -102,11 +104,9 @@ class TushareImportService:
                 if not params.get("start_date") and not params.get("trade_date"):
                     raise ValueError("必填参数缺失：需要提供 start_date 或 trade_date")
             elif param_type == ParamType.STOCK_CODE:
-                if not params.get("ts_code"):
-                    raise ValueError("必填参数缺失：需要提供 ts_code（股票代码）")
+                pass  # 留空表示全市场，无需校验
             elif param_type == ParamType.INDEX_CODE:
-                if not params.get("ts_code"):
-                    raise ValueError("必填参数缺失：需要提供 ts_code（指数代码）")
+                pass  # 留空表示全部指数，无需校验
             elif param_type == ParamType.MARKET:
                 if not params.get("market"):
                     raise ValueError("必填参数缺失：需要提供 market（市场）")
@@ -116,6 +116,9 @@ class TushareImportService:
             elif param_type == ParamType.FREQ:
                 if not params.get("freq"):
                     raise ValueError("必填参数缺失：需要提供 freq（频率）")
+            elif param_type == ParamType.MONTH_RANGE:
+                if not params.get("month"):
+                    raise ValueError("必填参数缺失：需要提供 month（月份，格式 YYYYMM）")
             elif param_type == ParamType.SECTOR_CODE:
                 if not params.get("ts_code") and not params.get("sector_code"):
                     raise ValueError("必填参数缺失：需要提供板块代码")
@@ -161,7 +164,7 @@ class TushareImportService:
     # ------------------------------------------------------------------
 
     async def check_health(self) -> dict:
-        """检查 Tushare 连通性和三级 Token 配置状态。
+        """检查 Tushare 连通性和四级 Token 配置状态。
 
         Returns:
             {
@@ -169,6 +172,7 @@ class TushareImportService:
                 "tokens": {
                     "basic": {"configured": bool},
                     "advanced": {"configured": bool},
+                    "premium": {"configured": bool},
                     "special": {"configured": bool},
                 }
             }
@@ -180,6 +184,7 @@ class TushareImportService:
         for t in (
             settings.tushare_token_basic,
             settings.tushare_token_advanced,
+            settings.tushare_token_premium,
             settings.tushare_token_special,
             settings.tushare_api_token,
         ):
@@ -200,6 +205,7 @@ class TushareImportService:
             "tokens": {
                 "basic": {"configured": bool(settings.tushare_token_basic)},
                 "advanced": {"configured": bool(settings.tushare_token_advanced)},
+                "premium": {"configured": bool(settings.tushare_token_premium)},
                 "special": {"configured": bool(settings.tushare_token_special)},
             },
         }
@@ -489,6 +495,7 @@ class TushareImportService:
                 "status": log.status,
                 "record_count": log.record_count,
                 "error_message": log.error_message,
+                "celery_task_id": log.celery_task_id,
                 "started_at": (
                     log.started_at.isoformat() if log.started_at else None
                 ),
