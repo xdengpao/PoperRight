@@ -73,7 +73,7 @@ celery_app.conf.update(
 )
 
 # Celery Beat 定时任务调度计划
-celery_app.conf.beat_schedule = {
+_beat_schedule = {
     # 盘后选股：每个交易日 15:30 自动执行（需求 7.4）
     "eod-screening-1530": {
         "task": "app.tasks.screening.run_eod_screening",
@@ -102,13 +102,6 @@ celery_app.conf.beat_schedule = {
         "options": {"queue": "data_sync"},
     },
 
-    # 盘中实时行情同步：交易时段每 10 秒执行（需求 7.5）
-    "realtime-market-sync": {
-        "task": "app.tasks.data_sync.sync_realtime_market",
-        "schedule": 10.0,  # 每 10 秒
-        "options": {"queue": "data_sync"},
-    },
-
     # 每日增量 K 线同步：每个交易日 16:00 执行（需求 25.13）
     "daily-kline-sync-1600": {
         "task": "app.tasks.data_sync.sync_daily_kline",
@@ -123,3 +116,14 @@ celery_app.conf.beat_schedule = {
         "options": {"queue": "data_sync"},
     },
 }
+
+# 盘中实时行情同步：交易时段每 10 秒执行（需求 7.5）
+# 通过 REALTIME_SYNC_ENABLED 配置启停，避免开发环境空跑
+if settings.realtime_sync_enabled:
+    _beat_schedule["realtime-market-sync"] = {
+        "task": "app.tasks.data_sync.sync_realtime_market",
+        "schedule": 10.0,
+        "options": {"queue": "data_sync"},
+    }
+
+celery_app.conf.beat_schedule = _beat_schedule

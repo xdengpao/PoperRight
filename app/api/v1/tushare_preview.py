@@ -20,11 +20,13 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from app.services.data_engine.tushare_preview_service import (
     ChartDataResponse,
     CompletenessReport,
+    DeleteDataResponse,
     ImportLogItem,
     IntegrityRequest,
     PreviewDataResponse,
@@ -167,3 +169,32 @@ async def query_import_logs(
     except (OperationalError, DBAPIError) as exc:
         logger.error("数据库连接异常: %s", exc)
         raise HTTPException(status_code=503, detail="数据库连接不可用") from exc
+
+
+class DeleteDataRequest(BaseModel):
+    """数据删除请求"""
+    data_time_start: str | None = None
+    data_time_end: str | None = None
+
+
+@router.post("/{api_name}/delete-data")
+async def delete_data(
+    api_name: str,
+    body: DeleteDataRequest,
+) -> DeleteDataResponse:
+    """删除指定时间范围内的数据
+
+    根据数据时间字段删除指定范围内的记录。至少需要指定起始或结束日期之一。
+    """
+    svc = TusharePreviewService()
+    try:
+        return await svc.delete_data(
+            api_name,
+            data_time_start=body.data_time_start,
+            data_time_end=body.data_time_end,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (OperationalError, DBAPIError) as exc:
+        logger.error("数据删除失败: %s", exc)
+        raise HTTPException(status_code=500, detail="数据删除失败") from exc

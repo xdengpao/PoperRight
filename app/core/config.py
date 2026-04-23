@@ -76,11 +76,27 @@ class Settings(BaseSettings):
     # 本地K线数据目录
     local_kline_data_dir: str = "/Users/poper/AData"
 
+    # 实时行情同步开关（设为 false 可禁用 Celery Beat 每 10 秒的实时行情同步任务）
+    realtime_sync_enabled: bool = False
+
     # API 频率限制（每次调用间隔秒数，留 20% 余量避免触发限制）
     # Tushare: kline 500次/min→0.18s, fundamentals 200次/min→0.40s, moneyflow 300次/min→0.30s
+    # limit_up: 打板专题接口 10次/min→6.0s（留余量 7.0s）
     rate_limit_kline: float = 0.18
     rate_limit_fundamentals: float = 0.40
     rate_limit_money_flow: float = 0.30
+    rate_limit_limit_up: float = 7.0
+
+    # 新增频率分组（按 Tushare 官方频率层级划分，含安全余量）
+    # tier_80: 80次/min→0.75s（留余量 0.90s）
+    # tier_60: 60次/min→1.00s（留余量 1.20s）
+    # tier_20: 20次/min→3.00s（留余量 3.50s）
+    # tier_10: 10次/min→6.00s（留余量 7.00s）
+    rate_limit_tier_80: float = 0.90
+    rate_limit_tier_60: float = 1.20
+    rate_limit_tier_20: float = 3.50
+    rate_limit_tier_10: float = 7.0
+    rate_limit_tier_2: float = 35.0
 
     @field_validator("app_allowed_hosts", mode="before")
     @classmethod

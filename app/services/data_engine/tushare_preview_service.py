@@ -138,6 +138,16 @@ class ChartDataResponse(BaseModel):
     total_available: int  # 可用数据总量
 
 
+class DeleteDataResponse(BaseModel):
+    """数据删除响应"""
+
+    deleted_count: int  # 删除的记录数
+    target_table: str  # 目标表名
+    time_field: str | None  # 使用的时间字段
+    data_time_start: str | None  # 删除范围起始
+    data_time_end: str | None  # 删除范围结束
+
+
 # ---------------------------------------------------------------------------
 # 常量：时间字段映射表
 # ---------------------------------------------------------------------------
@@ -1603,4 +1613,99 @@ class TusharePreviewService:
             chart_type=chart_type,
             columns=columns,
             total_available=total_available,
+        )
+
+    async def delete_data(
+        self,
+        api_name: str,
+        *,
+        data_time_start: str | None = None,
+        data_time_end: str | None = None,
+    ) -> DeleteDataResponse:
+        """删除指定接口在指定数据时间范围内的数据。
+
+        根据 api_name 从注册表获取目标表和时间字段，构建 DELETE SQL。
+        至少需要指定 data_time_start 或 data_time_end 之一，防止误删全表。
+
+        Args:
+            api_name: Tushare 接口名称
+            data_time_start: 数据时间范围起始（如 "2024-01-01" 或 "20240101"）
+            data_time_end: 数据时间范围结束
+
+        Returns:
+            DeleteDataResponse 包含删除记录数和范围信息
+
+        Raises:
+            ValueError: 接口不存在、无时间字段、或未指定时间范围
+        """
+        entry = TUSHARE_API_REGISTRY.get(api_name)
+        if entry is None:
+            raise ValueError(f"未知接口: {api_name}")
+
+        if not data_time_start and not data_time_end:
+            raise ValueError("请至少指定数据时间范围的起始或结束日期")
+
+        # 获取时间字段
+        SessionFactory = self._get_session(entry.storage_engine)
+
+        async with SessionFactory() as session:
+            col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
+            col_result = await session.execute(text(col_sql))
+            table_columns = list(col_result.keys()) if col_result.keys() else []
+
+        time_field = self._get_time_field_pure(entry.target_table, table_columns)
+        if not time_field:
+            raise ValueError(f"接口 {api_name} 的数据表 {entry.target_table} 无时间字段，无法按时间范围删除")
+
+        # 构建 DELETE SQL
+        where_clauses: list[str] = []
+        params: dict[str, Any] = {}
+
+        # 判断时间字段类型：TIMESTAMPTZ（如 kline.time）vs VARCHAR（如 trade_date）
+        is_timestamp_field = time_field in ("time", "started_at", "finished_at", "updated_at")
+
+        if data_time_start:
+            normalized_start = data_time_start.replace("-", "")
+            if is_timestamp_field:
+                from datetime import datetime as dt
+                where_clauses.append(f'"{time_field}" >= :start_time')
+                params["start_time"] = dt(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]))
+            else:
+                where_clauses.append(f'"{time_field}" >= :start_time')
+                params["start_time"] = normalized_start
+
+        if data_time_end:
+            normalized_end = data_time_end.replace("-", "")
+            if is_timestamp_field:
+                from datetime import datetime as dt
+                where_clauses.append(f'"{time_field}" <= :end_time')
+                params["end_time"] = dt(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]), 23, 59, 59)
+            else:
+                where_clauses.append(f'"{time_field}" <= :end_time')
+                params["end_time"] = normalized_end
+
+        where_sql = " AND ".join(where_clauses)
+        delete_sql = f'DELETE FROM {entry.target_table} WHERE {where_sql}'
+
+        async with SessionFactory() as session:
+            try:
+                result = await session.execute(text(delete_sql), params)
+                deleted_count = result.rowcount
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+        logger.info(
+            "删除数据 api=%s table=%s time_field=%s range=%s~%s deleted=%d",
+            api_name, entry.target_table, time_field,
+            data_time_start, data_time_end, deleted_count,
+        )
+
+        return DeleteDataResponse(
+            deleted_count=deleted_count,
+            target_table=entry.target_table,
+            time_field=time_field,
+            data_time_start=data_time_start,
+            data_time_end=data_time_end,
         )

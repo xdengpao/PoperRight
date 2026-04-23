@@ -19,16 +19,21 @@ logger = logging.getLogger(__name__)
 
 
 def _run_async(coro):
-    """在同步 Celery worker 中运行异步协程。"""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """在同步 Celery worker 中运行异步协程。
+
+    始终使用 asyncio.run() 创建全新事件循环，避免 Celery fork 进程中
+    复用旧 loop 导致 'Future attached to a different loop' 错误。
+    运行结束后 dispose 数据库连接池，防止连接泄漏到下一个 loop。
+    """
+    async def _wrapper():
+        try:
+            return await coro
+        finally:
+            from app.core.database import pg_engine, ts_engine
+            await pg_engine.dispose()
+            await ts_engine.dispose()
+
+    return asyncio.run(_wrapper())
 
 
 def _parse_data_sources(

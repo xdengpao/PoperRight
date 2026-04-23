@@ -191,6 +191,14 @@ async def get_last_import_times() -> dict[str, str]:
     return await svc.get_last_import_times()
 
 
+@router.get("/import/running")
+async def get_running_tasks() -> list[TushareImportLogItem]:
+    """获取所有 running 状态的导入任务（前端恢复活跃任务用）"""
+    svc = TushareImportService()
+    records = await svc.get_running_tasks()
+    return [TushareImportLogItem(**record) for record in records]
+
+
 @router.get("/import/history")
 async def get_import_history(
     limit: int = Query(default=20, ge=1, le=100),

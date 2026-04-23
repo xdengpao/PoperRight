@@ -61,11 +61,30 @@ class ParamType(str, Enum):
 
 
 class RateLimitGroup(str, Enum):
-    """频率限制分组"""
+    """频率限制分组
 
-    KLINE = "kline"  # 0.18s
-    FUNDAMENTALS = "fundamentals"  # 0.40s
-    MONEY_FLOW = "money_flow"  # 0.30s
+    原有分组（保留向后兼容）：
+        KLINE / FUNDAMENTALS / MONEY_FLOW / LIMIT_UP
+
+    新增 Tushare 官方频率层级：
+        TIER_80  — 80次/min（~0.90s）
+        TIER_60  — 60次/min（~1.20s）
+        TIER_20  — 20次/min（~3.50s）
+        TIER_10  — 10次/min（~7.00s），语义上替代 LIMIT_UP
+    """
+
+    # --- 原有分组（向后兼容） ---
+    KLINE = "kline"  # 0.18s（500次/min）
+    FUNDAMENTALS = "fundamentals"  # 0.40s（200次/min）
+    MONEY_FLOW = "money_flow"  # 0.30s（300次/min）
+    LIMIT_UP = "limit_up"  # 6.0s（10次/min，打板专题接口，保留向后兼容）
+
+    # --- 新增 Tushare 官方频率层级 ---
+    TIER_80 = "tier_80"  # 0.90s（80次/min）
+    TIER_60 = "tier_60"  # 1.20s（60次/min）
+    TIER_20 = "tier_20"  # 3.50s（20次/min）
+    TIER_10 = "tier_10"  # 7.00s（10次/min）
+    TIER_2 = "tier_2"  # 35.0s（2次/min，券商盈利预测等极低频接口）
 
 
 @dataclass
@@ -331,7 +350,7 @@ register(ApiEntry(
     conflict_columns=["symbol"],
     conflict_action="do_update",
     update_columns=["updated_at"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
 ))
 
 
@@ -442,7 +461,7 @@ register(ApiEntry(
     update_columns=["turnover_rate", "pe_ttm", "pb", "total_mv", "float_mv", "updated_at"],
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
 ))
@@ -460,7 +479,7 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
 ))
@@ -477,7 +496,7 @@ register(ApiEntry(
     conflict_columns=["ts_code", "suspend_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=150,
 ))
@@ -494,7 +513,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code", "market_type"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=150,
 ))
@@ -511,9 +530,10 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code", "market_type"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=150,
+    date_chunk_days=1,
+    extra_config={"use_trade_date_loop": True},
 ))
 
 register(ApiEntry(
@@ -528,7 +548,7 @@ register(ApiEntry(
     conflict_columns=["trade_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=365,
 ))
@@ -545,7 +565,7 @@ register(ApiEntry(
     conflict_columns=["month"],
     conflict_action="do_nothing",
     optional_params=[ParamType.MONTH_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
 ))
 
 register(ApiEntry(
@@ -1022,7 +1042,8 @@ register(ApiEntry(
     optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
-    date_chunk_days=6,
+    date_chunk_days=4,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 500},
 ))
 
 register(ApiEntry(
@@ -1107,7 +1128,8 @@ register(ApiEntry(
     optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
-    date_chunk_days=15,
+    date_chunk_days=10,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 200},
 ))
 
 register(ApiEntry(
@@ -1143,7 +1165,7 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_2,
     batch_by_date=True,
     date_chunk_days=30,
 ))
@@ -1271,9 +1293,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_20,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={"max_rows": 10000, "estimated_daily_rows": 5500},
 ))
 
 register(ApiEntry(
@@ -1289,9 +1312,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_20,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={"max_rows": 10000, "estimated_daily_rows": 5500},
 ))
 
 register(ApiEntry(
@@ -1342,7 +1366,7 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     optional_params=[ParamType.STOCK_CODE, ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_80,
     batch_by_date=True,
     date_chunk_days=60,
 ))
@@ -1398,7 +1422,7 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
 ))
@@ -1453,7 +1477,7 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_code=True,
 ))
 
@@ -1505,7 +1529,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
     batch_by_date=True,
-    date_chunk_days=10,
+    date_chunk_days=7,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 300},
 ))
 
 register(ApiEntry(
@@ -1520,10 +1545,10 @@ register(ApiEntry(
     conflict_columns=["trade_date", "industry_name", "data_source"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    rate_limit_group=RateLimitGroup.TIER_80,
     batch_by_date=True,
-    date_chunk_days=100,
-    extra_config={"inject_fields": {"data_source": "THS"}},
+    date_chunk_days=75,
+    extra_config={"inject_fields": {"data_source": "THS"}, "max_rows": 3000, "estimated_daily_rows": 30},
     field_mappings=[FieldMapping(source="name", target="industry_name")],
 ))
 
@@ -1539,10 +1564,10 @@ register(ApiEntry(
     conflict_columns=["trade_date", "industry_name", "data_source"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.MONEY_FLOW,
+    rate_limit_group=RateLimitGroup.TIER_80,
     batch_by_date=True,
-    date_chunk_days=100,
-    extra_config={"inject_fields": {"data_source": "DC"}},
+    date_chunk_days=75,
+    extra_config={"inject_fields": {"data_source": "DC"}, "max_rows": 3000, "estimated_daily_rows": 30},
     field_mappings=[FieldMapping(source="name", target="industry_name")],
 ))
 
@@ -1598,7 +1623,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code", "reason"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=1,
     extra_config={"use_trade_date_loop": True},
@@ -1616,7 +1641,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code", "exalter"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=1,
     extra_config={"use_trade_date_loop": True},
@@ -1634,9 +1659,10 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date", "limit"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_date=True,
-    date_chunk_days=15,
+    date_chunk_days=10,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 200},
 ))
 
 register(ApiEntry(
@@ -1651,9 +1677,10 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date", "limit"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_80,
     batch_by_date=True,
-    date_chunk_days=15,
+    date_chunk_days=10,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 200},
 ))
 
 register(ApiEntry(
@@ -1668,9 +1695,10 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_10,
     batch_by_date=True,
-    date_chunk_days=100,
+    date_chunk_days=75,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 30},
 ))
 
 register(ApiEntry(
@@ -1685,9 +1713,10 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
-    date_chunk_days=150,
+    date_chunk_days=100,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 20},
 ))
 
 register(ApiEntry(
@@ -1702,7 +1731,7 @@ register(ApiEntry(
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
     update_columns=["name", "sector_type"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     extra_config={"inject_fields": {"data_source": "THS"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1723,10 +1752,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.KLINE,
+    rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_date=True,
-    date_chunk_days=6,
-    extra_config={"data_source": "THS"},
+    date_chunk_days=2,
+    extra_config={"data_source": "THS", "max_rows": 3000, "estimated_daily_rows": 500},
 ))
 
 register(ApiEntry(
@@ -1741,7 +1770,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_60,
     extra_config={"inject_fields": {"data_source": "THS", "trade_date": "19000101"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1762,7 +1791,7 @@ register(ApiEntry(
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
     update_columns=["name", "sector_type"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_60,
     extra_config={"inject_fields": {"data_source": "DC"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1782,7 +1811,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     extra_config={"inject_fields": {"data_source": "DC"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1804,10 +1833,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.KLINE,
+    rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_date=True,
-    date_chunk_days=6,
-    extra_config={"data_source": "DC"},
+    date_chunk_days=2,
+    extra_config={"data_source": "DC", "max_rows": 3000, "estimated_daily_rows": 500},
 ))
 
 register(ApiEntry(
@@ -1822,9 +1851,10 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.TIER_10,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={"max_rows": 10000, "estimated_daily_rows": 5500},
 ))
 
 register(ApiEntry(
@@ -1838,7 +1868,7 @@ register(ApiEntry(
     code_format=CodeFormat.NONE,
     conflict_columns=["hm_name"],
     conflict_action="do_nothing",
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
 ))
 
 register(ApiEntry(
@@ -1853,9 +1883,10 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code", "hm_name"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 50},
 ))
 
 register(ApiEntry(
@@ -1870,7 +1901,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
 ))
@@ -1887,7 +1918,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
 ))
@@ -1904,7 +1935,7 @@ register(ApiEntry(
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
     update_columns=["name", "sector_type"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     extra_config={"inject_fields": {"data_source": "TDX"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1924,7 +1955,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     extra_config={"inject_fields": {"data_source": "TDX"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1946,10 +1977,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.SECTOR_CODE],
-    rate_limit_group=RateLimitGroup.KLINE,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
-    date_chunk_days=6,
-    extra_config={"data_source": "TDX"},
+    date_chunk_days=2,
+    extra_config={"data_source": "TDX", "max_rows": 3000, "estimated_daily_rows": 200},
 ))
 
 register(ApiEntry(
@@ -1964,7 +1995,7 @@ register(ApiEntry(
     conflict_columns=["trade_date", "ts_code"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
 ))
@@ -1981,7 +2012,7 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     optional_params=[ParamType.CONCEPT_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     field_mappings=[
         FieldMapping(source="ts_code", target="concept_code"),
         FieldMapping(source="con_code", target="ts_code"),
@@ -2000,7 +2031,7 @@ register(ApiEntry(
     code_format=CodeFormat.NONE,
     conflict_columns=[],
     conflict_action="do_nothing",
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
 ))
 
 register(ApiEntry(
@@ -2015,7 +2046,7 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     optional_params=[ParamType.CONCEPT_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.LIMIT_UP,
     field_mappings=[FieldMapping(source="theme_code", target="concept_code")],
 ))
 
@@ -2183,7 +2214,7 @@ register(ApiEntry(
     conflict_columns=["index_code", "con_code", "trade_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.INDEX_CODE, ParamType.DATE_RANGE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
 ))
 
 # ===========================================================================
@@ -2203,7 +2234,7 @@ register(ApiEntry(
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
     update_columns=["sector_name", "sector_type"],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     extra_config={"data_source": "TI"},
 ))
 
@@ -2237,8 +2268,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=130,
-    extra_config={"data_source": "TI", "max_rows": 4000},
+    date_chunk_days=100,
+    extra_config={"data_source": "TI", "max_rows": 4000, "estimated_daily_rows": 30},
 ))
 
 register(ApiEntry(
@@ -2291,8 +2322,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=130,
-    extra_config={"data_source": "CI", "max_rows": 4000},
+    date_chunk_days=100,
+    extra_config={"data_source": "CI", "max_rows": 4000, "estimated_daily_rows": 30},
 ))
 
 # ===========================================================================
@@ -2313,9 +2344,10 @@ register(ApiEntry(
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
-    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=60,
+    date_chunk_days=45,
+    extra_config={"max_rows": 3000, "estimated_daily_rows": 50},
 ))
 
 # ===========================================================================
@@ -2338,8 +2370,8 @@ register(ApiEntry(
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=160,
-    extra_config={"max_rows": 8000},
+    date_chunk_days=120,
+    extra_config={"max_rows": 8000, "estimated_daily_rows": 50},
 ))
 
 # ===========================================================================
@@ -2361,8 +2393,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=365,
-    extra_config={"max_rows": 4000},
+    date_chunk_days=300,
+    extra_config={"max_rows": 4000, "estimated_daily_rows": 10},
 ))
 
 register(ApiEntry(
@@ -2403,6 +2435,6 @@ register(ApiEntry(
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=130,
-    extra_config={"max_rows": 4000},
+    date_chunk_days=100,
+    extra_config={"max_rows": 4000, "estimated_daily_rows": 30},
 ))

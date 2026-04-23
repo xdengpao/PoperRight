@@ -508,6 +508,49 @@ class TushareImportService:
             for log in logs
         ]
 
+    async def get_running_tasks(self) -> list[dict]:
+        """获取所有 running 状态的导入任务。
+
+        不受 limit 限制，返回 tushare_import_log 中所有 status='running' 的记录。
+        用于前端页面加载时恢复活跃任务列表。
+
+        Returns:
+            running 状态的导入记录列表
+        """
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionPG
+        from app.models.tushare_import import TushareImportLog
+
+        async with AsyncSessionPG() as session:
+            stmt = (
+                select(TushareImportLog)
+                .where(TushareImportLog.status == "running")
+                .order_by(TushareImportLog.started_at.desc())
+            )
+            result = await session.execute(stmt)
+            logs = result.scalars().all()
+
+        return [
+            {
+                "id": log.id,
+                "api_name": log.api_name,
+                "params_json": log.params_json,
+                "status": log.status,
+                "record_count": log.record_count,
+                "error_message": log.error_message,
+                "celery_task_id": log.celery_task_id,
+                "extra_info": self._parse_extra_info(log.extra_info),
+                "started_at": (
+                    log.started_at.isoformat() if log.started_at else None
+                ),
+                "finished_at": (
+                    log.finished_at.isoformat() if log.finished_at else None
+                ),
+            }
+            for log in logs
+        ]
+
     @staticmethod
     def _parse_extra_info(raw: str | None) -> dict | None:
         """解析 extra_info JSON 字符串为字典。

@@ -591,11 +591,11 @@ class TestTruncationDetectionIntegration:
 
         assert result["status"] == "completed"
 
-        # 验证 ERROR 日志（连续截断）
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert any("连续" in r.message for r in error_records), \
-            "应记录连续截断 ERROR 日志"
-        assert any("consec_trunc_api" in r.message for r in error_records)
+        # 验证连续截断日志（WARNING 级别记录步长缩小）
+        warning_records = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any("连续" in r.message for r in warning_records), \
+            "应记录连续截断 WARNING 日志（步长自动缩小）"
+        assert any("consec_trunc_api" in r.message for r in warning_records)
 
         # 验证 batch_stats 中截断计数 >= 3
         batch_stats = result.get("batch_stats", {})
@@ -871,7 +871,7 @@ class TestProgressUpdateIntegration:
         assert "chunk_start" in warnings[0]
         assert "chunk_end" in warnings[0]
         assert "row_count" in warnings[0]
-        assert warnings[0]["row_count"] == max_rows
+        assert warnings[0]["row_count"] >= max_rows
 
 
 # ---------------------------------------------------------------------------

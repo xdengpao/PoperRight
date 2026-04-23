@@ -54,6 +54,12 @@ def _build_rate_limit_map() -> dict[RateLimitGroup, float]:
         RateLimitGroup.KLINE: settings.rate_limit_kline,
         RateLimitGroup.FUNDAMENTALS: settings.rate_limit_fundamentals,
         RateLimitGroup.MONEY_FLOW: settings.rate_limit_money_flow,
+        RateLimitGroup.LIMIT_UP: settings.rate_limit_limit_up,
+        RateLimitGroup.TIER_80: settings.rate_limit_tier_80,
+        RateLimitGroup.TIER_60: settings.rate_limit_tier_60,
+        RateLimitGroup.TIER_20: settings.rate_limit_tier_20,
+        RateLimitGroup.TIER_10: settings.rate_limit_tier_10,
+        RateLimitGroup.TIER_2: settings.rate_limit_tier_2,
     }
 
 
@@ -76,6 +82,9 @@ _RATE_LIMIT_WAIT = 60  # 频率限制等待秒数
 
 # 连续截断告警阈值
 _CONSECUTIVE_TRUNCATION_THRESHOLD = 3
+
+# 截断重试最大递归深度（防止无限拆分）
+_MAX_TRUNCATION_RETRY_DEPTH = 3
 
 
 def check_chunk_config(
@@ -154,16 +163,27 @@ def check_truncation(
 # ---------------------------------------------------------------------------
 
 def _run_async(coro):
-    """在同步 Celery worker 中运行异步协程。"""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import concurrent.futures
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                return pool.submit(asyncio.run, coro).result()
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
+    """在同步 Celery worker 中运行异步协程。
+
+    使用每个 worker 进程独立的持久 event loop，避免 asyncio.run() 每次
+    创建/销毁 loop 导致 SQLAlchemy 异步引擎的连接池绑定失效
+    （'Event loop is closed' 错误）。
+    """
+    loop = _get_worker_loop()
+    return loop.run_until_complete(coro)
+
+
+def _get_worker_loop():
+    """获取当前 worker 进程的持久 event loop（线程局部单例）。"""
+    import threading
+    if not hasattr(_get_worker_loop, "_local"):
+        _get_worker_loop._local = threading.local()
+    local = _get_worker_loop._local
+    loop = getattr(local, "loop", None)
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        local.loop = loop
+    return loop
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +219,8 @@ async def _redis_delete(key: str) -> None:
     queue="data_sync",
     soft_time_limit=7200,
     time_limit=10800,
+    autoretry_for=(),  # 禁用自动重试，_process_import 内部已有完整的错误处理
+    max_retries=0,
 )
 def run_import(
     self,
@@ -483,6 +505,234 @@ def _generate_date_chunks(
     return DateBatchSplitter.split(start_date, end_date, chunk_days)
 
 
+async def _process_chunk_with_retry(
+    entry: ApiEntry,
+    adapter: TushareAdapter,
+    params: dict,
+    task_id: str,
+    chunk_start: str,
+    chunk_end: str,
+    max_rows: int,
+    rate_delay: float,
+    actual_api_name: str,
+    default_params: dict,
+    inject_fields: dict | None,
+    use_trade_date_loop: bool,
+    depth: int = 0,
+) -> dict:
+    """处理单个日期子区间，支持截断自动重试（递归拆分）。
+
+    当检测到数据截断（返回行数 >= max_rows）时，自动将当前子区间拆分为两个更小的
+    子区间（步长减半），递归处理每个子区间。通过 depth 参数限制最大递归深度，
+    防止无限拆分。
+
+    Args:
+        entry: 接口注册信息
+        adapter: Tushare API 适配器
+        params: 用户传入的导入参数
+        task_id: 任务唯一标识
+        chunk_start: 子区间起始日期 YYYYMMDD
+        chunk_end: 子区间结束日期 YYYYMMDD
+        max_rows: 单次 API 返回行数上限
+        rate_delay: 频率限制延迟（秒）
+        actual_api_name: 实际 Tushare 接口名
+        default_params: 默认参数
+        inject_fields: 注入字段（可选）
+        use_trade_date_loop: 是否使用 trade_date 循环模式
+        depth: 当前递归深度（0 = 首次调用）
+
+    Returns:
+        {"records": int, "truncated": bool, "retried": bool, "retry_details": list}
+        - records: 本次处理写入的记录数
+        - truncated: 是否检测到截断（最终状态）
+        - retried: 是否执行了重试
+        - retry_details: 重试详情列表
+
+    对应需求：2.4, 2.5
+    """
+    # 构建本次 API 调用参数
+    call_params = {**default_params, **params}
+    call_params["start_date"] = chunk_start
+    call_params["end_date"] = chunk_end
+
+    # 处理 use_trade_date_loop 模式
+    if use_trade_date_loop:
+        call_params["trade_date"] = chunk_start
+        call_params.pop("start_date", None)
+        call_params.pop("end_date", None)
+
+    data = await _call_api_with_retry(
+        adapter, actual_api_name, call_params, entry,
+    )
+    rows = TushareAdapter._rows_from_data(data)
+
+    if not rows:
+        return {"records": 0, "truncated": False, "retried": False, "retry_details": []}
+
+    # 检测截断
+    truncated = check_truncation(
+        len(rows), max_rows, entry.api_name, chunk_start, chunk_end,
+    )
+
+    if truncated:
+        # 达到最大重试深度，记录 ERROR 并写入已获取的（可能不完整的）数据
+        if depth >= _MAX_TRUNCATION_RETRY_DEPTH:
+            logger.error(
+                "截断重试达到最大深度 %d，无法进一步拆分子区间 %s~%s，"
+                "数据可能不完整。api=%s, rows=%d, max_rows=%d",
+                _MAX_TRUNCATION_RETRY_DEPTH, chunk_start, chunk_end,
+                entry.api_name, len(rows), max_rows,
+            )
+            # 写入已获取的数据（尽管可能不完整）
+            records = await _write_chunk_rows(rows, entry, inject_fields)
+            return {
+                "records": records,
+                "truncated": True,
+                "retried": True,
+                "retry_details": [{
+                    "chunk_start": chunk_start,
+                    "chunk_end": chunk_end,
+                    "depth": depth,
+                    "action": "max_depth_reached",
+                    "rows": len(rows),
+                }],
+            }
+
+        # 丢弃当前截断数据，拆分子区间重新请求
+        logger.info(
+            "截断自动重试：拆分子区间 %s~%s（depth=%d），api=%s, rows=%d >= max_rows=%d",
+            chunk_start, chunk_end, depth + 1, entry.api_name, len(rows), max_rows,
+        )
+
+        # 使用 DateBatchSplitter 将当前子区间拆分为两半
+        from datetime import datetime as _dt
+        start_dt = _dt.strptime(chunk_start, "%Y%m%d").date()
+        end_dt = _dt.strptime(chunk_end, "%Y%m%d").date()
+        total_days = (end_dt - start_dt).days + 1
+
+        # 如果只有 1 天，无法再拆分
+        if total_days <= 1:
+            logger.error(
+                "截断重试：子区间 %s~%s 仅 %d 天，无法进一步拆分，"
+                "数据可能不完整。api=%s, rows=%d",
+                chunk_start, chunk_end, total_days, entry.api_name, len(rows),
+            )
+            records = await _write_chunk_rows(rows, entry, inject_fields)
+            return {
+                "records": records,
+                "truncated": True,
+                "retried": True,
+                "retry_details": [{
+                    "chunk_start": chunk_start,
+                    "chunk_end": chunk_end,
+                    "depth": depth,
+                    "action": "cannot_split_further",
+                    "rows": len(rows),
+                }],
+            }
+
+        # 拆分为两半
+        half_days = max(total_days // 2, 1)
+        sub_chunks = DateBatchSplitter.split(chunk_start, chunk_end, half_days)
+
+        total_records = 0
+        still_truncated = False
+        retry_details: list[dict] = []
+
+        for sub_start, sub_end in sub_chunks:
+            # 检查停止信号
+            if await _check_stop_signal(task_id):
+                return {
+                    "records": total_records,
+                    "truncated": still_truncated,
+                    "retried": True,
+                    "retry_details": retry_details,
+                    "stopped": True,
+                }
+
+            sub_result = await _process_chunk_with_retry(
+                entry=entry,
+                adapter=adapter,
+                params=params,
+                task_id=task_id,
+                chunk_start=sub_start,
+                chunk_end=sub_end,
+                max_rows=max_rows,
+                rate_delay=rate_delay,
+                actual_api_name=actual_api_name,
+                default_params=default_params,
+                inject_fields=inject_fields,
+                use_trade_date_loop=use_trade_date_loop,
+                depth=depth + 1,
+            )
+
+            total_records += sub_result["records"]
+            if sub_result["truncated"]:
+                still_truncated = True
+            retry_details.extend(sub_result.get("retry_details", []))
+
+            # 子区间处理后检查停止信号
+            if sub_result.get("stopped"):
+                return {
+                    "records": total_records,
+                    "truncated": still_truncated,
+                    "retried": True,
+                    "retry_details": retry_details,
+                    "stopped": True,
+                }
+
+            # 频率限制
+            time.sleep(rate_delay)
+
+        return {
+            "records": total_records,
+            "truncated": still_truncated,
+            "retried": True,
+            "retry_details": [{
+                "chunk_start": chunk_start,
+                "chunk_end": chunk_end,
+                "depth": depth,
+                "action": "split_and_retry",
+                "sub_chunks": len(sub_chunks),
+                "total_records": total_records,
+            }] + retry_details,
+        }
+
+    # 未截断，正常写入数据
+    records = await _write_chunk_rows(rows, entry, inject_fields)
+    return {"records": records, "truncated": False, "retried": False, "retry_details": []}
+
+
+async def _write_chunk_rows(
+    rows: list[dict],
+    entry: ApiEntry,
+    inject_fields: dict | None,
+) -> int:
+    """将行数据写入数据库（字段映射 + 代码转换 + 写入）。
+
+    Args:
+        rows: API 返回的原始行数据
+        entry: 接口注册信息
+        inject_fields: 注入字段（可选）
+
+    Returns:
+        成功写入的记录数
+    """
+    if inject_fields:
+        for row in rows:
+            row.update(inject_fields)
+
+    mapped_rows = _apply_field_mappings(rows, entry)
+    converted_rows = _convert_codes(mapped_rows, entry)
+
+    if entry.storage_engine == StorageEngine.TS:
+        await _write_to_timescaledb(converted_rows, entry)
+    else:
+        await _write_to_postgresql(converted_rows, entry)
+
+    return len(converted_rows)
+
+
 async def _process_batched_by_date(
     entry: ApiEntry,
     adapter: TushareAdapter,
@@ -496,10 +746,13 @@ async def _process_batched_by_date(
     使用 DateBatchSplitter 进行日期拆分，步长取自注册表 entry.date_chunk_days。
     截断阈值取自 entry.extra_config.get("max_rows", 3000)。
 
+    当检测到截断时，自动将子区间拆分为更小的子区间重新请求（最多 3 层递归）。
+    当连续截断计数达到阈值（3 次）时，自动将后续所有子区间的步长减半。
+
     适用于带 DATE_RANGE 参数且单次调用可能超过 Tushare 行数上限的接口
     （如 dc_daily、ths_daily、tdx_daily、top_list 等）。
 
-    对应需求：3.1, 3.2, 4.3, 4.4
+    对应需求：2.4, 2.5, 3.1, 3.2, 4.3, 4.4
     """
     start_date = params.get("start_date", "")
     end_date = params.get("end_date", "")
@@ -525,9 +778,10 @@ async def _process_batched_by_date(
     total_records = 0
     success_chunks = 0
     consecutive_truncation_count = 0
-    truncation_error_logged = False
     truncation_warnings: list[dict] = []
     needs_smaller_chunk = False
+    # 截断自动恢复记录（对应需求 2.5）
+    truncation_recoveries: list[dict] = []
 
     await _update_progress(
         task_id, status="running", total=total, completed=0,
@@ -540,95 +794,120 @@ async def _process_batched_by_date(
     inject_fields = entry.extra_config.get("inject_fields")
     use_trade_date_loop = entry.extra_config.get("use_trade_date_loop", False)
 
-    for chunk_start, chunk_end in chunks:
+    # 当前生效的 chunk 列表（连续截断时可能重新拆分剩余区间）
+    remaining_chunks = list(chunks)
+    chunk_index = 0
+
+    while chunk_index < len(remaining_chunks):
+        chunk_start, chunk_end = remaining_chunks[chunk_index]
+
         # 检查停止信号
         if await _check_stop_signal(task_id):
             logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
             # 构建已完成部分的分批统计
-            batch_stats: dict = {
-                "batch_mode": "by_date",
-                "total_chunks": total,
-                "success_chunks": success_chunks,
-                "truncation_count": len(truncation_warnings),
-                "truncation_details": [
-                    {
-                        "chunk": f"{w['chunk_start']}-{w['chunk_end']}",
-                        "rows": w["row_count"],
-                        "max_rows": w["max_rows"],
-                    }
-                    for w in truncation_warnings[:10]
-                ],
-            }
+            batch_stats = _build_batch_stats(
+                total, success_chunks, truncation_warnings, truncation_recoveries,
+                needs_smaller_chunk,
+            )
             return {"status": "stopped", "record_count": total_records, "batch_stats": batch_stats}
 
-        # 构建本次 API 调用参数
-        call_params = {**default_params, **params}
-        call_params["start_date"] = chunk_start
-        call_params["end_date"] = chunk_end
-
-        # 处理 use_trade_date_loop 模式：将 start_date 转为 trade_date，移除日期范围参数
-        if use_trade_date_loop:
-            call_params["trade_date"] = chunk_start
-            call_params.pop("start_date", None)
-            call_params.pop("end_date", None)
-
         try:
-            data = await _call_api_with_retry(
-                adapter, actual_api_name, call_params, entry,
+            result = await _process_chunk_with_retry(
+                entry=entry,
+                adapter=adapter,
+                params=params,
+                task_id=task_id,
+                chunk_start=chunk_start,
+                chunk_end=chunk_end,
+                max_rows=max_rows,
+                rate_delay=rate_delay,
+                actual_api_name=actual_api_name,
+                default_params=default_params,
+                inject_fields=inject_fields,
+                use_trade_date_loop=use_trade_date_loop,
+                depth=0,
             )
-            rows = TushareAdapter._rows_from_data(data)
 
-            if rows:
-                if inject_fields:
-                    for row in rows:
-                        row.update(inject_fields)
-
-                mapped_rows = _apply_field_mappings(rows, entry)
-                converted_rows = _convert_codes(mapped_rows, entry)
-
-                try:
-                    if entry.storage_engine == StorageEngine.TS:
-                        await _write_to_timescaledb(converted_rows, entry)
-                    else:
-                        await _write_to_postgresql(converted_rows, entry)
-                    total_records += len(converted_rows)
-                    success_chunks += 1
-                except Exception as db_exc:
-                    logger.error(
-                        "DB 写入失败 api=%s chunk=%s~%s: %s",
-                        entry.api_name, chunk_start, chunk_end, db_exc,
-                    )
-
-                # 运行时截断检测（对应需求 6.2）
-                truncated = check_truncation(
-                    len(rows), max_rows, entry.api_name, chunk_start, chunk_end,
+            # 处理停止信号（从递归重试中传播）
+            if result.get("stopped"):
+                batch_stats = _build_batch_stats(
+                    total, success_chunks, truncation_warnings, truncation_recoveries,
+                    needs_smaller_chunk,
                 )
-                if truncated:
-                    consecutive_truncation_count += 1
-                    # 记录截断警告到列表（对应需求 6.3, 7.3）
-                    truncation_warnings.append({
+                return {
+                    "status": "stopped",
+                    "record_count": total_records + result["records"],
+                    "batch_stats": batch_stats,
+                }
+
+            total_records += result["records"]
+
+            if result["truncated"]:
+                consecutive_truncation_count += 1
+                # 记录截断警告
+                truncation_warnings.append({
+                    "chunk_start": chunk_start,
+                    "chunk_end": chunk_end,
+                    "row_count": result["records"],
+                    "max_rows": max_rows,
+                    "retried": result["retried"],
+                })
+
+                # 记录截断恢复详情
+                if result["retried"]:
+                    truncation_recoveries.append({
                         "chunk_start": chunk_start,
                         "chunk_end": chunk_end,
-                        "row_count": len(rows),
-                        "max_rows": max_rows,
+                        "retry_details": result.get("retry_details", []),
+                        "recovered_records": result["records"],
                     })
-                    # 连续截断检测（对应需求 6.4）
-                    if (
-                        consecutive_truncation_count >= _CONSECUTIVE_TRUNCATION_THRESHOLD
-                        and not truncation_error_logged
-                    ):
-                        logger.error(
-                            "接口 %s 连续 %d 个子区间数据被截断，建议减小 date_chunk_days（当前=%d）",
-                            entry.api_name, consecutive_truncation_count, chunk_days,
+
+                # 连续截断自动缩小后续步长（对应需求 2.5）
+                if (
+                    consecutive_truncation_count >= _CONSECUTIVE_TRUNCATION_THRESHOLD
+                    and not needs_smaller_chunk
+                ):
+                    needs_smaller_chunk = True
+                    new_chunk_days = max(chunk_days // 2, 1)
+                    logger.warning(
+                        "接口 %s 连续 %d 个子区间数据被截断，自动将后续步长从 %d 天缩小到 %d 天",
+                        entry.api_name, consecutive_truncation_count,
+                        chunk_days, new_chunk_days,
+                    )
+
+                    # 重新拆分剩余未处理的子区间
+                    remaining_after = remaining_chunks[chunk_index + 1:]
+                    if remaining_after:
+                        # 取剩余区间的整体范围，用新步长重新拆分
+                        remaining_start = remaining_after[0][0]
+                        remaining_end = remaining_after[-1][1]
+                        new_chunks = DateBatchSplitter.split(
+                            remaining_start, remaining_end, new_chunk_days,
                         )
-                        truncation_error_logged = True
-                        needs_smaller_chunk = True
-                else:
-                    consecutive_truncation_count = 0
+                        remaining_chunks = remaining_chunks[:chunk_index + 1] + new_chunks
+                        total = len(remaining_chunks)
+
+                        # 记录步长缩小恢复信息
+                        truncation_recoveries.append({
+                            "action": "auto_shrink_step",
+                            "old_chunk_days": chunk_days,
+                            "new_chunk_days": new_chunk_days,
+                            "remaining_chunks_resplit": len(new_chunks),
+                            "consecutive_truncation_count": consecutive_truncation_count,
+                        })
+
+                    chunk_days = new_chunk_days
+
+                if result["records"] > 0:
+                    success_chunks += 1
             else:
-                # 无数据返回，重置连续截断计数
+                # 未截断，重置连续截断计数
                 consecutive_truncation_count = 0
-                success_chunks += 1
+                if result["records"] > 0:
+                    success_chunks += 1
+                elif result["records"] == 0:
+                    # 无数据返回也算成功处理
+                    success_chunks += 1
 
         except TushareAPIError as api_exc:
             if api_exc.code and api_exc.code == -2001:
@@ -656,23 +935,62 @@ async def _process_batched_by_date(
         # 频率限制
         time.sleep(rate_delay)
 
+        chunk_index += 1
+
     # 构建分批统计信息（对应需求 8.1, 8.2）
-    batch_stats: dict = {
+    batch_stats = _build_batch_stats(
+        total, success_chunks, truncation_warnings, truncation_recoveries,
+        needs_smaller_chunk,
+    )
+
+    return {"status": "completed", "record_count": total_records, "batch_stats": batch_stats}
+
+
+def _build_batch_stats(
+    total_chunks: int,
+    success_chunks: int,
+    truncation_warnings: list[dict],
+    truncation_recoveries: list[dict],
+    needs_smaller_chunk: bool,
+) -> dict:
+    """构建分批统计信息字典。
+
+    Args:
+        total_chunks: 总子区间数
+        success_chunks: 成功处理的子区间数
+        truncation_warnings: 截断警告列表
+        truncation_recoveries: 截断自动恢复详情列表
+        needs_smaller_chunk: 是否触发了步长自动缩小
+
+    Returns:
+        分批统计字典，包含截断恢复详情
+
+    对应需求：8.1, 8.2
+    """
+    stats: dict = {
         "batch_mode": "by_date",
-        "total_chunks": total,
+        "total_chunks": total_chunks,
         "success_chunks": success_chunks,
         "truncation_count": len(truncation_warnings),
         "truncation_details": [
             {
                 "chunk": f"{w['chunk_start']}-{w['chunk_end']}",
-                "rows": w["row_count"],
-                "max_rows": w["max_rows"],
+                "rows": w.get("row_count", 0),
+                "max_rows": w.get("max_rows", 0),
+                "retried": w.get("retried", False),
             }
             for w in truncation_warnings[:10]
         ],
     }
 
-    return {"status": "completed", "record_count": total_records, "batch_stats": batch_stats}
+    # 截断自动恢复详情（对应需求 2.5）
+    if truncation_recoveries:
+        stats["truncation_recoveries"] = truncation_recoveries[:10]
+
+    if needs_smaller_chunk:
+        stats["auto_shrink_applied"] = True
+
+    return stats
 
 
 # ---------------------------------------------------------------------------
@@ -1406,39 +1724,43 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
                     v = Decimal(v) if v else None
                 except (InvalidOperation, ValueError):
                     v = None
-            # String 列：int/float → str
+            # String 列：int/float/date/datetime → str
+            # 特殊处理：日期类型值写入 VARCHAR 日期列时，规范化为 YYYYMMDD 格式
             elif k in string_columns and not isinstance(v, str):
-                v = str(v)
+                if isinstance(v, datetime_type):
+                    v = v.strftime("%Y%m%d")
+                elif isinstance(v, date_type):
+                    v = v.strftime("%Y%m%d")
+                else:
+                    v = str(v)
+            elif k in string_columns and isinstance(v, str):
+                # 字符串值但格式为 "YYYY-MM-DD HH:MM:SS" 或 "YYYY-MM-DD"，
+                # 且目标列长度 <= 8（VARCHAR(8) 日期列），规范化为 YYYYMMDD
+                col_obj = table_obj.columns.get(k) if table_obj is not None else None
+                if col_obj is not None and hasattr(col_obj.type, "length") and col_obj.type.length and col_obj.type.length <= 8:
+                    if len(v) >= 10 and "-" in v:
+                        v = v[:10].replace("-", "")
             result[k] = v
         return result
 
     filtered_rows = [_coerce_row(row) for row in rows]
 
-    # 过滤掉关键列值为 NULL 的行（Tushare 有时返回不完整数据）
-    # 1. 数据库中实际 NOT NULL 的列（排除自增主键和有默认值的列）
-    # 2. ON CONFLICT 冲突列（NULL 值无法参与唯一约束匹配）
+    # 过滤掉冲突列值为 NULL 或缺失的行（NULL 值无法参与唯一约束匹配）
+    # 只检查 ON CONFLICT 冲突列，其他 NOT NULL 列交给数据库约束处理
     must_not_null: set[str] = set()
-    if table_obj is not None:
-        must_not_null |= {
-            col.name for col in table_obj.columns
-            if not col.nullable and col.server_default is None
-            and not col.primary_key and not col.autoincrement
-        }
     if entry.conflict_columns:
-        must_not_null |= set(entry.conflict_columns)
-    # 只检查本次 INSERT 涉及的列
-    check_cols = must_not_null & set(columns)
-    if check_cols:
+        must_not_null = set(entry.conflict_columns)
+    if must_not_null:
         before_count = len(filtered_rows)
         filtered_rows = [
             row for row in filtered_rows
-            if all(row.get(c) is not None for c in check_cols)
+            if all(row.get(c) is not None for c in must_not_null)
         ]
         skipped = before_count - len(filtered_rows)
         if skipped:
-            logger.warning(
-                "跳过 %d 行（关键列含 NULL 值），表=%s 检查列=%s",
-                skipped, entry.target_table, check_cols,
+            logger.debug(
+                "跳过 %d 行（冲突列含 NULL 或缺失），表=%s 检查列=%s",
+                skipped, entry.target_table, must_not_null,
             )
 
     if not filtered_rows:
@@ -1500,14 +1822,29 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 
     stmt = text(sql)
 
-    async with AsyncSessionPG() as session:
-        try:
-            for row in filtered_rows:
-                await session.execute(stmt, row)
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
+    # 死锁重试：多个 worker 并发写同一张表时可能触发 PostgreSQL 死锁
+    max_retries = 3
+    for attempt in range(max_retries):
+        async with AsyncSessionPG() as session:
+            try:
+                for row in filtered_rows:
+                    await session.execute(stmt, row)
+                await session.commit()
+                return
+            except Exception as exc:
+                await session.rollback()
+                # 检测死锁错误，重试
+                exc_str = str(exc)
+                if "deadlock" in exc_str.lower() and attempt < max_retries - 1:
+                    import time as _time
+                    wait = 0.5 * (attempt + 1)
+                    logger.warning(
+                        "死锁检测，%0.1fs 后重试 (attempt %d/%d)，表=%s",
+                        wait, attempt + 1, max_retries, entry.target_table,
+                    )
+                    _time.sleep(wait)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------------------

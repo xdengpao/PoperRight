@@ -138,6 +138,12 @@
                   :disabled="!store.selectedApiName || store.integrityLoading"
                   @click="handleCheckIntegrity"
                 >{{ store.integrityLoading ? '校验中...' : '完整性校验' }}</button>
+                <button
+                  class="btn btn-danger"
+                  :disabled="!store.selectedApiName || store.deleteLoading || (!store.filters.dataTimeStart && !store.filters.dataTimeEnd)"
+                  @click="handleDeleteData"
+                  title="删除数据时间范围内的记录"
+                >{{ store.deleteLoading ? '删除中...' : '删除' }}</button>
               </div>
             </div>
           </section>
@@ -590,6 +596,27 @@ function handleCheckIntegrity(): void {
   store.checkIntegrity(store.selectedApiName, Object.keys(timeRange).length > 0 ? timeRange : undefined)
 }
 
+/** 删除数据时间范围内的记录 */
+async function handleDeleteData(): Promise<void> {
+  if (!store.selectedApiName) return
+  const start = store.filters.dataTimeStart
+  const end = store.filters.dataTimeEnd
+  if (!start && !end) return
+
+  const rangeText = [start, end].filter(Boolean).join(' ~ ')
+  const confirmed = window.confirm(
+    `确认删除 ${store.selectedApiName} 在数据时间 ${rangeText} 范围内的所有记录？\n此操作不可撤销。`
+  )
+  if (!confirmed) return
+
+  const result = await store.deleteData(store.selectedApiName, start, end)
+  if (result) {
+    window.alert(`已删除 ${result.deleted_count.toLocaleString()} 条记录`)
+  } else {
+    window.alert('删除失败，请查看控制台日志')
+  }
+}
+
 /** 选择某条导入记录查看数据 */
 function selectImportLog(log: ImportLogItem): void {
   if (!store.selectedApiName) return
@@ -865,6 +892,8 @@ onMounted(() => {
 .btn-primary:hover:not(:disabled) { background: #388bfd; }
 .btn-secondary { background: #21262d; color: #e6edf3; border: 1px solid #30363d; }
 .btn-secondary:hover:not(:disabled) { border-color: #8b949e; }
+.btn-danger { background: #da3633; color: #fff; }
+.btn-danger:hover:not(:disabled) { background: #f85149; }
 
 /* ── 导入记录区域 ── */
 .import-logs-section { padding: 0; }

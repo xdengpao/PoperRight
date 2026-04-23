@@ -773,14 +773,24 @@ async function fetchHistory(): Promise<void> {
   try {
     const { data } = await apiClient.get<ImportLog[]>('/data/tushare/import/history', { params: { limit: 20 } })
     historyList.value = data
+  } catch {
+    historyList.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
 
-    // 恢复正在运行的任务到活跃任务列表并启动轮询
-    const runningLogs = data.filter(
-      log => log.status === 'running' && log.celery_task_id
-        && !activeTasks.value.some(t => t.task_id === log.celery_task_id),
-    )
-    for (const log of runningLogs) {
-      const taskId = log.celery_task_id!
+/**
+ * 从后端查询所有 running 状态的导入任务，恢复到活跃任务列表并启动轮询。
+ * 不受 history limit 限制，确保页面刷新后能看到全部活跃任务。
+ */
+async function restoreRunningTasks(): Promise<void> {
+  try {
+    const { data } = await apiClient.get<ImportLog[]>('/data/tushare/import/running')
+    for (const log of data) {
+      if (!log.celery_task_id) continue
+      if (activeTasks.value.some(t => t.task_id === log.celery_task_id)) continue
+      const taskId = log.celery_task_id
       activeTasks.value.push({
         task_id: taskId,
         api_name: log.api_name,
@@ -793,9 +803,7 @@ async function fetchHistory(): Promise<void> {
       startPolling(taskId)
     }
   } catch {
-    historyList.value = []
-  } finally {
-    historyLoading.value = false
+    // 静默失败，不影响页面加载
   }
 }
 
@@ -840,6 +848,7 @@ onMounted(() => {
   fetchRegistry()
   fetchHistory()
   fetchLastImportTimes()
+  restoreRunningTasks()
 })
 
 onUnmounted(() => {

@@ -35,8 +35,11 @@ async def _ensure_default_admin() -> None:
 async def _cleanup_stale_import_tasks() -> None:
     """清理服务重启后残留的 running 状态导入任务。
 
-    将 tushare_import_log 中 status='running' 的记录标记为 failed，
-    并清理对应的 Redis 并发锁。
+    处理流程：
+    1. 为每个残留任务设置 Redis 停止信号，让 worker 中正在执行的任务优雅退出
+    2. 通过 Celery revoke 撤销尚在队列中或正在执行的任务
+    3. 将数据库中 status='running' 的记录标记为 failed
+    4. 清理对应的 Redis 并发锁
     """
     from sqlalchemy import update
 
@@ -55,7 +58,40 @@ async def _cleanup_stale_import_tasks() -> None:
         now = datetime.utcnow()
         stale_ids = [log.id for log in stale_logs]
         stale_api_names = {log.api_name for log in stale_logs}
+        # 收集 celery_task_id 用于发送停止信号和 revoke
+        stale_task_ids = [
+            log.celery_task_id for log in stale_logs if log.celery_task_id
+        ]
 
+        # 1. 为每个残留任务设置 Redis 停止信号，worker 的 _check_stop_signal() 会检测到并优雅退出
+        try:
+            from app.core.redis_client import cache_set
+            for task_id in stale_task_ids:
+                try:
+                    await cache_set(
+                        f"tushare:import:stop:{task_id}", "1", ex=3600,
+                    )
+                except Exception:
+                    pass
+            if stale_task_ids:
+                print(f"[init] 已为 {len(stale_task_ids)} 个残留任务设置停止信号")
+        except Exception:
+            pass
+
+        # 2. 通过 Celery revoke 撤销任务（terminate=True 会发送 SIGTERM）
+        try:
+            from app.core.celery_app import celery_app
+            for task_id in stale_task_ids:
+                try:
+                    celery_app.control.revoke(task_id, terminate=True)
+                except Exception:
+                    pass
+            if stale_task_ids:
+                print(f"[init] 已 revoke {len(stale_task_ids)} 个 Celery 任务")
+        except Exception:
+            pass
+
+        # 3. 更新数据库状态
         await session.execute(
             update(TushareImportLog)
             .where(TushareImportLog.id.in_(stale_ids))
@@ -67,7 +103,7 @@ async def _cleanup_stale_import_tasks() -> None:
         )
         await session.commit()
 
-    # 清理 Redis 并发锁（独立 try，不影响数据库更新）
+    # 4. 清理 Redis 并发锁（独立 try，不影响数据库更新）
     try:
         from app.core.redis_client import cache_delete
         for api_name in stale_api_names:

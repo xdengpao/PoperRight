@@ -453,6 +453,34 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
     filters.value = createDefaultFilters()
   }
 
+  /** 删除数据状态 */
+  const deleteLoading = ref(false)
+
+  /** 删除指定时间范围内的数据 */
+  async function deleteData(apiName: string, dataTimeStart: string | null, dataTimeEnd: string | null): Promise<{ deleted_count: number } | null> {
+    deleteLoading.value = true
+    try {
+      const res = await apiClient.post<{ deleted_count: number; target_table: string }>(
+        `/data/tushare/preview/${encodeURIComponent(apiName)}/delete-data`,
+        {
+          data_time_start: dataTimeStart || null,
+          data_time_end: dataTimeEnd || null,
+        },
+      )
+      // 删除后刷新数据
+      await Promise.all([
+        fetchPreviewData(apiName),
+        fetchStats(apiName),
+        fetchChartData(apiName),
+      ])
+      return res.data
+    } catch {
+      return null
+    } finally {
+      deleteLoading.value = false
+    }
+  }
+
   return {
     // 状态
     registry,
@@ -471,6 +499,7 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
     chartData,
     chartDataLoading,
     selectedChartColumns,
+    deleteLoading,
     // 方法
     fetchRegistry,
     fetchPreviewData,
@@ -478,6 +507,7 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
     fetchImportLogs,
     checkIntegrity,
     fetchChartData,
+    deleteData,
     setSelectedChartColumns,
     clearIntegrityReport,
     setSelectedApi,
