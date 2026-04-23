@@ -246,6 +246,20 @@ export function getDefaultSelectedColumns(numericColumns: string[]): string[] {
   return numericColumns.slice(0, Math.min(3, numericColumns.length))
 }
 
+/**
+ * 将日期字符串格式化为 HTML date input 所需的 "YYYY-MM-DD" 格式
+ *
+ * 支持两种输入格式：
+ * - "20240101" → "2024-01-01"（8 位紧凑格式）
+ * - "2024-01-01T00:00:00" → "2024-01-01"（ISO 格式截取前 10 位）
+ */
+export function formatDateForInput(raw: string): string {
+  if (raw.length === 8 && !raw.includes('-')) {
+    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`
+  }
+  return raw.slice(0, 10)
+}
+
 // ─── 默认筛选条件 ─────────────────────────────────────────────────────────────
 
 function createDefaultFilters(): PreviewFilters {
@@ -441,6 +455,12 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
       fetchImportLogs(apiName),
       fetchChartData(apiName),
     ])
+
+    // 自动填充数据时间筛选器：利用 stats 返回的时间范围作为默认值
+    if (stats.value?.earliest_time && stats.value?.latest_time) {
+      filters.value.dataTimeStart = formatDateForInput(stats.value.earliest_time)
+      filters.value.dataTimeEnd = formatDateForInput(stats.value.latest_time)
+    }
   }
 
   /** 切换展示模式 */
@@ -457,7 +477,13 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
   const deleteLoading = ref(false)
 
   /** 删除指定时间范围内的数据 */
-  async function deleteData(apiName: string, dataTimeStart: string | null, dataTimeEnd: string | null): Promise<{ deleted_count: number } | null> {
+  async function deleteData(
+    apiName: string,
+    dataTimeStart: string | null,
+    dataTimeEnd: string | null,
+    importTimeStart?: string | null,
+    importTimeEnd?: string | null,
+  ): Promise<{ deleted_count: number } | null> {
     deleteLoading.value = true
     try {
       const res = await apiClient.post<{ deleted_count: number; target_table: string }>(
@@ -465,6 +491,8 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
         {
           data_time_start: dataTimeStart || null,
           data_time_end: dataTimeEnd || null,
+          import_time_start: importTimeStart || null,
+          import_time_end: importTimeEnd || null,
         },
       )
       // 删除后刷新数据

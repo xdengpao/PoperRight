@@ -140,17 +140,29 @@
                 >{{ store.integrityLoading ? '校验中...' : '完整性校验' }}</button>
                 <button
                   class="btn btn-danger"
-                  :disabled="!store.selectedApiName || store.deleteLoading || (!store.filters.dataTimeStart && !store.filters.dataTimeEnd)"
+                  :disabled="!store.selectedApiName || store.deleteLoading"
                   @click="handleDeleteData"
-                  title="删除数据时间范围内的记录"
+                  title="删除数据时间范围或导入时间范围内的记录"
                 >{{ store.deleteLoading ? '删除中...' : '删除' }}</button>
               </div>
             </div>
           </section>
 
+          <!-- 完整性校验 Loading 反馈 -->
+          <section
+            v-if="store.integrityLoading"
+            class="card integrity-loading-section"
+            aria-label="正在校验数据完整性"
+          >
+            <div class="integrity-loading-content">
+              <span class="integrity-spinner" aria-hidden="true"></span>
+              <span class="integrity-loading-text">正在校验数据完整性...</span>
+            </div>
+          </section>
+
           <!-- 完整性校验结果（可折叠卡片） -->
           <section
-            v-if="store.integrityReport"
+            v-else-if="store.integrityReport"
             class="card integrity-report-section"
             aria-label="完整性校验结果"
           >
@@ -596,20 +608,37 @@ function handleCheckIntegrity(): void {
   store.checkIntegrity(store.selectedApiName, Object.keys(timeRange).length > 0 ? timeRange : undefined)
 }
 
-/** 删除数据时间范围内的记录 */
+/** 删除数据时间范围或导入时间范围内的记录 */
 async function handleDeleteData(): Promise<void> {
   if (!store.selectedApiName) return
   const start = store.filters.dataTimeStart
   const end = store.filters.dataTimeEnd
-  if (!start && !end) return
+  const importStart = store.filters.importTimeStart
+  const importEnd = store.filters.importTimeEnd
 
-  const rangeText = [start, end].filter(Boolean).join(' ~ ')
-  const confirmed = window.confirm(
-    `确认删除 ${store.selectedApiName} 在数据时间 ${rangeText} 范围内的所有记录？\n此操作不可撤销。`
+  let confirmMsg: string
+  if (!start && !end && !importStart && !importEnd) {
+    confirmMsg = `确认清空 ${store.selectedApiName} 的全部数据？\n此操作不可撤销。`
+  } else {
+    const rangeParts: string[] = []
+    if (start || end) {
+      rangeParts.push(`数据时间 ${[start, end].filter(Boolean).join(' ~ ')}`)
+    }
+    if (importStart || importEnd) {
+      rangeParts.push(`导入时间 ${[importStart, importEnd].filter(Boolean).join(' ~ ')}`)
+    }
+    confirmMsg = `确认删除 ${store.selectedApiName} 在${rangeParts.join('，')}范围内的所有记录？\n此操作不可撤销。`
+  }
+
+  if (!window.confirm(confirmMsg)) return
+
+  const result = await store.deleteData(
+    store.selectedApiName,
+    start,
+    end,
+    importStart,
+    importEnd,
   )
-  if (!confirmed) return
-
-  const result = await store.deleteData(store.selectedApiName, start, end)
   if (result) {
     window.alert(`已删除 ${result.deleted_count.toLocaleString()} 条记录`)
   } else {
@@ -1019,6 +1048,40 @@ onMounted(() => {
 }
 .mode-btn:hover { color: #e6edf3; border-color: #8b949e; }
 .mode-btn.active { color: #e6edf3; background: #1f6feb; border-color: #1f6feb; }
+
+/* ── 完整性校验 Loading ── */
+.integrity-loading-section {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+}
+
+.integrity-loading-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #8b949e;
+  font-size: 14px;
+}
+
+.integrity-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #30363d;
+  border-top-color: #58a6ff;
+  border-radius: 50%;
+  animation: integrity-spin 0.8s linear infinite;
+}
+
+@keyframes integrity-spin {
+  to { transform: rotate(360deg); }
+}
+
+.integrity-loading-text {
+  color: #8b949e;
+}
 
 /* ── 完整性校验结果 ── */
 .integrity-report-section { padding: 0; }

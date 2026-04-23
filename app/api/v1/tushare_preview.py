@@ -175,6 +175,8 @@ class DeleteDataRequest(BaseModel):
     """数据删除请求"""
     data_time_start: str | None = None
     data_time_end: str | None = None
+    import_time_start: str | None = None
+    import_time_end: str | None = None
 
 
 @router.post("/{api_name}/delete-data")
@@ -184,7 +186,8 @@ async def delete_data(
 ) -> DeleteDataResponse:
     """删除指定时间范围内的数据
 
-    根据数据时间字段删除指定范围内的记录。至少需要指定起始或结束日期之一。
+    根据数据时间字段删除指定范围内的记录。至少需要指定起始或结束日期之一，
+    或指定导入时间范围。
     """
     svc = TusharePreviewService()
     try:
@@ -192,6 +195,8 @@ async def delete_data(
             api_name,
             data_time_start=body.data_time_start,
             data_time_end=body.data_time_end,
+            import_time_start=body.import_time_start,
+            import_time_end=body.import_time_end,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

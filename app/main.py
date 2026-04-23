@@ -114,6 +114,14 @@ async def _cleanup_stale_import_tasks() -> None:
     except Exception:
         pass
 
+    # 5. 清空 Celery 消息队列，防止 worker 重启后拉取到旧任务
+    try:
+        from app.core.celery_app import celery_app
+        celery_app.control.purge()
+        print("[init] 已清空 Celery 消息队列")
+    except Exception:
+        pass
+
     print(f"[init] 已清理 {len(stale_ids)} 个残留导入任务: {stale_api_names}")
 
 

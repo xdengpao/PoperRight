@@ -2268,8 +2268,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=100,
-    extra_config={"data_source": "TI", "max_rows": 4000, "estimated_daily_rows": 30},
+    date_chunk_days=10,
+    extra_config={"data_source": "TI", "max_rows": 4000, "estimated_daily_rows": 200},
 ))
 
 register(ApiEntry(
@@ -2322,8 +2322,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=100,
-    extra_config={"data_source": "CI", "max_rows": 4000, "estimated_daily_rows": 30},
+    date_chunk_days=10,
+    extra_config={"data_source": "CI", "max_rows": 4000, "estimated_daily_rows": 300},
 ))
 
 # ===========================================================================

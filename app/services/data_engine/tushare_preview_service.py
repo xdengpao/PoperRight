@@ -1621,29 +1621,271 @@ class TusharePreviewService:
         *,
         data_time_start: str | None = None,
         data_time_end: str | None = None,
+        import_time_start: str | None = None,
+        import_time_end: str | None = None,
     ) -> DeleteDataResponse:
-        """删除指定接口在指定数据时间范围内的数据。
+        """删除指定接口在指定数据时间范围内的数据，或按导入时间范围删除。
 
         根据 api_name 从注册表获取目标表和时间字段，构建 DELETE SQL。
-        至少需要指定 data_time_start 或 data_time_end 之一，防止误删全表。
+        支持两种删除模式：
+        1. 按数据时间范围删除（data_time_start/data_time_end）
+        2. 按导入时间范围删除（import_time_start/import_time_end）：
+           先查询匹配的导入记录，再根据 params_json 重建数据查询条件删除
 
         Args:
             api_name: Tushare 接口名称
             data_time_start: 数据时间范围起始（如 "2024-01-01" 或 "20240101"）
+            data_time_end: 数据时间范围结束
+            import_time_start: 导入时间范围起始（ISO 格式）
+            import_time_end: 导入时间范围结束（ISO 格式）
+
+        Returns:
+            DeleteDataResponse 包含删除记录数和范围信息
+
+        Raises:
+            ValueError: 接口不存在、无时间字段、或未指定任何时间范围
+        """
+        entry = TUSHARE_API_REGISTRY.get(api_name)
+        if entry is None:
+            raise ValueError(f"未知接口: {api_name}")
+
+        has_import_time = bool(import_time_start or import_time_end)
+        has_data_time = bool(data_time_start or data_time_end)
+
+        if not has_data_time and not has_import_time:
+            # 无任何时间范围：对无时间字段的快照表允许全表清空
+            SessionFactory = self._get_session(entry.storage_engine)
+            async with SessionFactory() as session:
+                col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
+                col_result = await session.execute(text(col_sql))
+                table_columns = list(col_result.keys()) if col_result.keys() else []
+            time_field = self._get_time_field_pure(entry.target_table, table_columns)
+            if time_field:
+                raise ValueError("请至少指定数据时间范围或导入时间范围")
+            # 无时间字段的快照表，直接清空
+            async with SessionFactory() as session:
+                try:
+                    result = await session.execute(
+                        text(f"DELETE FROM {entry.target_table}")
+                    )
+                    deleted_count = result.rowcount
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+            logger.info(
+                "清空快照表 api=%s table=%s deleted=%d",
+                api_name, entry.target_table, deleted_count,
+            )
+            return DeleteDataResponse(
+                deleted_count=deleted_count,
+                target_table=entry.target_table,
+                time_field=None,
+                data_time_start=None,
+                data_time_end=None,
+            )
+
+        # 按导入时间范围删除路径
+        if has_import_time:
+            return await self._delete_by_import_time(
+                api_name,
+                entry,
+                import_time_start=import_time_start,
+                import_time_end=import_time_end,
+            )
+
+        # 按数据时间范围删除路径（原有逻辑）
+        return await self._delete_by_data_time(
+            api_name,
+            entry,
+            data_time_start=data_time_start,
+            data_time_end=data_time_end,
+        )
+
+    async def _delete_by_import_time(
+        self,
+        api_name: str,
+        entry: ApiEntry,
+        *,
+        import_time_start: str | None = None,
+        import_time_end: str | None = None,
+    ) -> DeleteDataResponse:
+        """按导入时间范围删除数据。
+
+        先查询 tushare_import_log 表获取匹配时间范围内的导入记录，
+        再使用 _build_incremental_filter() 从每条记录的 params_json
+        重建数据查询条件，按这些条件执行删除。
+
+        Args:
+            api_name: Tushare 接口名称
+            entry: API 接口注册信息
+            import_time_start: 导入时间范围起始
+            import_time_end: 导入时间范围结束
+
+        Returns:
+            DeleteDataResponse 包含删除记录数和范围信息
+        """
+        # 1. 查询匹配的导入记录
+        async with AsyncSessionPG() as pg_session:
+            stmt = (
+                select(TushareImportLog)
+                .where(TushareImportLog.api_name == api_name)
+            )
+            if import_time_start:
+                from datetime import datetime as dt
+                try:
+                    start_dt = dt.fromisoformat(import_time_start)
+                except ValueError:
+                    start_dt = dt.fromisoformat(import_time_start + ":00")
+                stmt = stmt.where(TushareImportLog.started_at >= start_dt)
+            if import_time_end:
+                from datetime import datetime as dt
+                try:
+                    end_dt = dt.fromisoformat(import_time_end)
+                except ValueError:
+                    end_dt = dt.fromisoformat(import_time_end + ":00")
+                stmt = stmt.where(TushareImportLog.started_at <= end_dt)
+            result = await pg_session.execute(stmt)
+            import_logs = result.scalars().all()
+
+        if not import_logs:
+            return DeleteDataResponse(
+                deleted_count=0,
+                target_table=entry.target_table,
+                time_field=self._get_time_field_pure(entry.target_table),
+                data_time_start=None,
+                data_time_end=None,
+            )
+
+        # 2. 获取时间字段和作用域过滤
+        SessionFactory = self._get_session(entry.storage_engine)
+
+        async with SessionFactory() as session:
+            col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
+            col_result = await session.execute(text(col_sql))
+            table_columns = list(col_result.keys()) if col_result.keys() else []
+
+        time_field = self._get_time_field_pure(entry.target_table, table_columns)
+        scope_filters = self._build_scope_filter_pure(entry)
+
+        # 3. 对每条导入记录重建条件并执行删除
+        total_deleted = 0
+        snapshot_truncated = False  # 防止无时间字段的快照表被重复清空
+        is_timestamp_field = time_field in ("time", "started_at", "finished_at", "updated_at") if time_field else False
+
+        for log_record in import_logs:
+            inc_filters = self._build_incremental_filter(log_record, entry)
+            inc_data_start = inc_filters.get("data_time_start")
+            inc_data_end = inc_filters.get("data_time_end")
+            inc_ts_code = inc_filters.get("ts_code")
+
+            # 如果导入记录没有可用的过滤条件，对无时间字段的快照表直接清空
+            if not inc_data_start and not inc_data_end and not inc_ts_code:
+                if not time_field:
+                    # 无时间字段的快照表（如 stock_basic），直接 TRUNCATE
+                    if not snapshot_truncated:
+                        delete_sql = f"DELETE FROM {entry.target_table}"
+                        async with SessionFactory() as session:
+                            try:
+                                result = await session.execute(text(delete_sql))
+                                total_deleted += result.rowcount
+                                await session.commit()
+                            except Exception:
+                                await session.rollback()
+                                raise
+                        snapshot_truncated = True
+                continue
+
+            where_clauses: list[str] = []
+            params: dict[str, Any] = {}
+
+            if time_field and inc_data_start:
+                normalized_start = inc_data_start.replace("-", "")
+                if is_timestamp_field:
+                    where_clauses.append(f'"{time_field}" >= :start_time')
+                    params["start_time"] = datetime(
+                        int(normalized_start[:4]),
+                        int(normalized_start[4:6]),
+                        int(normalized_start[6:8]),
+                    )
+                else:
+                    where_clauses.append(f'"{time_field}" >= :start_time')
+                    params["start_time"] = normalized_start
+
+            if time_field and inc_data_end:
+                normalized_end = inc_data_end.replace("-", "")
+                if is_timestamp_field:
+                    where_clauses.append(f'"{time_field}" <= :end_time')
+                    params["end_time"] = datetime(
+                        int(normalized_end[:4]),
+                        int(normalized_end[4:6]),
+                        int(normalized_end[6:8]),
+                        23, 59, 59,
+                    )
+                else:
+                    where_clauses.append(f'"{time_field}" <= :end_time')
+                    params["end_time"] = normalized_end
+
+            if inc_ts_code:
+                where_clauses.append("ts_code = :ts_code")
+                params["ts_code"] = inc_ts_code
+
+            # 添加作用域过滤条件
+            for clause, scope_params in scope_filters:
+                where_clauses.append(clause)
+                params.update(scope_params)
+
+            if not where_clauses:
+                continue
+
+            where_sql = " AND ".join(where_clauses)
+            delete_sql = f"DELETE FROM {entry.target_table} WHERE {where_sql}"
+
+            async with SessionFactory() as session:
+                try:
+                    result = await session.execute(text(delete_sql), params)
+                    total_deleted += result.rowcount
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
+
+        logger.info(
+            "按导入时间删除数据 api=%s table=%s import_time=%s~%s deleted=%d records_count=%d",
+            api_name, entry.target_table,
+            import_time_start, import_time_end, total_deleted, len(import_logs),
+        )
+
+        return DeleteDataResponse(
+            deleted_count=total_deleted,
+            target_table=entry.target_table,
+            time_field=time_field,
+            data_time_start=None,
+            data_time_end=None,
+        )
+
+    async def _delete_by_data_time(
+        self,
+        api_name: str,
+        entry: ApiEntry,
+        *,
+        data_time_start: str | None = None,
+        data_time_end: str | None = None,
+    ) -> DeleteDataResponse:
+        """按数据时间范围删除数据（原有逻辑）。
+
+        Args:
+            api_name: Tushare 接口名称
+            entry: API 接口注册信息
+            data_time_start: 数据时间范围起始
             data_time_end: 数据时间范围结束
 
         Returns:
             DeleteDataResponse 包含删除记录数和范围信息
 
         Raises:
-            ValueError: 接口不存在、无时间字段、或未指定时间范围
+            ValueError: 无时间字段或未指定时间范围
         """
-        entry = TUSHARE_API_REGISTRY.get(api_name)
-        if entry is None:
-            raise ValueError(f"未知接口: {api_name}")
-
-        if not data_time_start and not data_time_end:
-            raise ValueError("请至少指定数据时间范围的起始或结束日期")
 
         # 获取时间字段
         SessionFactory = self._get_session(entry.storage_engine)
@@ -1664,6 +1906,8 @@ class TusharePreviewService:
         # 判断时间字段类型：TIMESTAMPTZ（如 kline.time）vs VARCHAR（如 trade_date）
         is_timestamp_field = time_field in ("time", "started_at", "finished_at", "updated_at")
 
+        # NOTE: 时间范围条件先添加，作用域过滤条件在后面追加
+
         if data_time_start:
             normalized_start = data_time_start.replace("-", "")
             if is_timestamp_field:
@@ -1683,6 +1927,12 @@ class TusharePreviewService:
             else:
                 where_clauses.append(f'"{time_field}" <= :end_time')
                 params["end_time"] = normalized_end
+
+        # 共享表作用域过滤：确保仅删除属于当前 API 接口的数据
+        scope_filters = self._build_scope_filter_pure(entry)
+        for clause, scope_params in scope_filters:
+            where_clauses.append(clause)
+            params.update(scope_params)
 
         where_sql = " AND ".join(where_clauses)
         delete_sql = f'DELETE FROM {entry.target_table} WHERE {where_sql}'
