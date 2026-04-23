@@ -271,3 +271,264 @@ class TestLoadScreenData:
     async def test_default_lookback_days(self):
         """默认回溯天数应为 365。"""
         assert DEFAULT_LOOKBACK_DAYS == 365
+
+
+# ---------------------------------------------------------------------------
+# 数据加载降级单元测试（需求 12.3, 13.5, 14.5, 15.4, 16.5, 17.3）
+# ---------------------------------------------------------------------------
+
+
+class TestEnrichStkFactorDegradation:
+    """测试 _enrich_stk_factor_factors 空数据降级行为（需求 12.3）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_none(self):
+        """stk_factor 表无数据时，所有技术面专业因子应降级为 None。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_stk_factor_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("kdj_k", "kdj_d", "kdj_j", "cci", "wr",
+                       "trix", "bias", "psy", "obv_signal"):
+            assert fd[factor] is None, f"因子 {factor} 应降级为 None"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，因子应降级为 None 并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_stk_factor_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("kdj_k", "kdj_d", "kdj_j", "cci", "wr",
+                       "trix", "bias", "psy", "obv_signal"):
+            assert fd.get(factor) is None, f"因子 {factor} 应降级为 None"
+        assert "stk_factor" in caplog.text.lower() or "技术面" in caplog.text
+
+
+class TestEnrichChipFactorsDegradation:
+    """测试 _enrich_chip_factors 空数据降级行为（需求 13.5）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_none(self):
+        """cyq_perf 表无数据时，所有筹码因子应降级为 None。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_chip_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("chip_winner_rate", "chip_cost_5pct", "chip_cost_15pct",
+                       "chip_cost_50pct", "chip_weight_avg", "chip_concentration"):
+            assert fd[factor] is None, f"因子 {factor} 应降级为 None"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，筹码因子应降级为 None 并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_chip_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("chip_winner_rate", "chip_cost_5pct", "chip_cost_15pct",
+                       "chip_cost_50pct", "chip_weight_avg", "chip_concentration"):
+            assert fd.get(factor) is None, f"因子 {factor} 应降级为 None"
+
+
+class TestEnrichMarginFactorsDegradation:
+    """测试 _enrich_margin_factors 空数据降级行为（需求 14.5）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_none(self):
+        """margin_detail 表无数据时，所有两融因子应降级为 None。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_margin_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("rzye_change", "rqye_ratio", "rzrq_balance_trend", "margin_net_buy"):
+            assert fd[factor] is None, f"因子 {factor} 应降级为 None"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，两融因子应降级为 None 并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_margin_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("rzye_change", "rqye_ratio", "rzrq_balance_trend", "margin_net_buy"):
+            assert fd.get(factor) is None, f"因子 {factor} 应降级为 None"
+
+
+class TestEnrichEnhancedMoneyFlowDegradation:
+    """测试 _enrich_enhanced_money_flow_factors 空数据降级行为（需求 15.4）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_none(self):
+        """moneyflow_ths 和 moneyflow_dc 表均无数据时，增强资金流因子应降级为 None。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_enhanced_money_flow_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("super_large_net_inflow", "large_net_inflow",
+                       "small_net_outflow", "money_flow_strength", "net_inflow_rate"):
+            assert fd[factor] is None, f"因子 {factor} 应降级为 None"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，增强资金流因子应降级为 None 并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_enhanced_money_flow_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("super_large_net_inflow", "large_net_inflow",
+                       "small_net_outflow", "money_flow_strength", "net_inflow_rate"):
+            assert fd.get(factor) is None, f"因子 {factor} 应降级为 None"
+
+
+class TestEnrichBoardHitFactorsDegradation:
+    """测试 _enrich_board_hit_factors 空数据降级行为（需求 16.5）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_defaults(self):
+        """打板数据表无数据时，数值型因子降级为 0，布尔型降级为 False。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        mock_session.execute = AsyncMock(return_value=mock_result)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_board_hit_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        assert fd["limit_up_count"] == 0
+        assert fd["limit_up_streak"] == 0
+        assert fd["limit_up_open_pct"] == 0
+        assert fd["dragon_tiger_net_buy"] is False
+        assert fd["first_limit_up"] is False
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，打板因子应降级为默认值并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_board_hit_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        assert fd.get("limit_up_count", 0) == 0
+        assert fd.get("limit_up_streak", 0) == 0
+        assert fd.get("dragon_tiger_net_buy", False) is False
+        assert fd.get("first_limit_up", False) is False
+
+
+class TestEnrichIndexFactorsDegradation:
+    """测试 _enrich_index_factors 空数据降级行为（需求 17.3）。"""
+
+    @pytest.mark.asyncio
+    async def test_empty_table_sets_none(self):
+        """指数数据表无数据时，所有指数因子应降级为 None。"""
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = []
+        # 需要处理 scalar_one_or_none 调用（用于 index_weights 查询）
+        mock_scalar_result = MagicMock()
+        mock_scalar_result.scalar_one_or_none.return_value = None
+        mock_result_2 = MagicMock()
+        mock_result_2.scalars.return_value.all.return_value = []
+        mock_result_2.scalar_one_or_none.return_value = None
+
+        call_count = [0]
+        async def mock_execute(stmt):
+            call_count[0] += 1
+            # 前两次是 index_dailybasic 和 index_tech 查询
+            if call_count[0] <= 2:
+                return mock_result
+            # 后续是 index_weight 查询
+            return mock_result_2
+
+        mock_session.execute = AsyncMock(side_effect=mock_execute)
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        await provider._enrich_index_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio"):
+            assert fd[factor] is None, f"因子 {factor} 应降级为 None"
+
+    @pytest.mark.asyncio
+    async def test_connection_error_sets_defaults(self, caplog):
+        """数据库连接异常时，指数因子应降级为 None 并记录 WARNING。"""
+        mock_session = AsyncMock()
+        mock_session.execute = AsyncMock(side_effect=RuntimeError("DB error"))
+
+        provider = ScreenDataProvider(pg_session=mock_session)
+        stocks_data = {"000001.SZ": {"close": 15.0}}
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            await provider._enrich_index_factors(stocks_data, date(2024, 1, 15))
+
+        fd = stocks_data["000001.SZ"]
+        for factor in ("index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio"):
+            assert fd.get(factor) is None, f"因子 {factor} 应降级为 None"

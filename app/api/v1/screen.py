@@ -137,8 +137,12 @@ class VolumePriceConfigIn(BaseModel):
 
 
 class SectorScreenConfigIn(BaseModel):
+    """板块筛选配置输入模型（需求 22.1）
+
+    sector_type 已改为可选参数，以 sector_data_source 为主维度进行板块筛选。
+    """
     sector_data_source: str = "DC"
-    sector_type: str = "CONCEPT"
+    sector_type: str | None = None  # 可选过滤参数，默认 None（需求 22.1）
     sector_period: int = 5
     sector_top_n: int = 30
 
@@ -727,9 +731,12 @@ def _factor_meta_to_dict(meta: FactorMeta) -> dict:
 
 @router.get("/screen/factor-registry")
 async def get_factor_registry(
-    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector"),
+    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector/chip/margin/board_hit"),
 ) -> dict:
-    """返回因子元数据注册表。"""
+    """返回因子元数据注册表（含 CHIP、MARGIN、BOARD_HIT 新增类别）。
+
+    对应需求：18.3
+    """
     if category is not None:
         # 验证 category 是否为有效的 FactorCategory 值
         try:
@@ -749,13 +756,13 @@ async def get_factor_registry(
 
 @router.get("/screen/factors")
 async def list_factors(
-    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector"),
+    category: str | None = Query(None, description="按类别筛选：technical/money_flow/fundamental/sector/chip/margin/board_hit"),
 ) -> dict:
-    """返回所有因子元数据（按 category 分组）。
+    """返回所有因子元数据（按 category 分组，含 CHIP、MARGIN、BOARD_HIT 新增类别）。
 
     复用 get_factor_registry 逻辑，提供 RESTful 风格的因子列表端点。
 
-    对应需求：11.2, 11.4
+    对应需求：11.2, 11.4, 18.3
     """
     if category is not None:
         try:
@@ -800,7 +807,11 @@ async def get_factor_usage(factor_name: str) -> dict:
 
 @router.get("/screen/strategy-examples")
 async def get_strategy_examples() -> list[dict]:
-    """返回策略示例库。"""
+    """返回策略示例库（含配置说明书）。
+
+    响应中包含 config_doc 字段，提供每个策略的配置说明书内容。
+    对应需求：20.3
+    """
     return [
         {
             "name": ex.name,
@@ -810,6 +821,7 @@ async def get_strategy_examples() -> list[dict]:
             "weights": ex.weights,
             "enabled_modules": ex.enabled_modules,
             "sector_config": ex.sector_config,
+            "config_doc": ex.config_doc,  # 配置说明书（需求 20.3）
         }
         for ex in STRATEGY_EXAMPLES
     ]

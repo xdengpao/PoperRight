@@ -181,12 +181,6 @@
             <select v-model="sectorConfig.sector_data_source" class="input sector-select sector-source-select" aria-label="数据来源">
               <option v-for="opt in sectorDataSourceOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
-            <select v-model="sectorConfig.sector_type" class="input sector-select" aria-label="板块类型">
-              <option value="INDUSTRY">行业板块</option>
-              <option value="CONCEPT">概念板块</option>
-              <option value="REGION">地区板块</option>
-              <option value="STYLE">风格板块</option>
-            </select>
             <div class="sector-period-input">
               <input v-model.number="sectorConfig.sector_period" type="number" min="1" max="60" class="input param-input" aria-label="涨幅周期" />
               <span class="param-hint">天</span>
@@ -919,7 +913,7 @@ import type { FactorMeta, StrategyExample } from '@/stores/screener'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
-type FactorType = 'technical' | 'capital' | 'fundamental' | 'sector'
+type FactorType = 'technical' | 'capital' | 'fundamental' | 'sector' | 'chip' | 'margin' | 'board_hit'
 
 interface FactorCondition {
   type: FactorType
@@ -975,6 +969,9 @@ const factorTypes: { key: FactorType; label: string }[] = [
   { key: 'capital', label: '资金面' },
   { key: 'fundamental', label: '基本面' },
   { key: 'sector', label: '板块面' },
+  { key: 'chip', label: '筹码面' },
+  { key: 'margin', label: '两融面' },
+  { key: 'board_hit', label: '打板面' },
 ]
 
 /** 每个因子类型下可选的因子名称枚举
@@ -991,12 +988,26 @@ const factorNameOptions: Record<FactorType, { value: string; label: string }[]> 
     { value: 'rsi', label: 'RSI强势信号' },
     { value: 'dma', label: 'DMA平行线差' },
     { value: 'breakout', label: '形态突破' },
+    { value: 'kdj_k', label: 'KDJ-K值' },
+    { value: 'kdj_d', label: 'KDJ-D值' },
+    { value: 'kdj_j', label: 'KDJ-J值' },
+    { value: 'cci', label: 'CCI顺势指标' },
+    { value: 'wr', label: '威廉指标' },
+    { value: 'trix', label: 'TRIX三重指数平滑' },
+    { value: 'bias', label: '乖离率' },
+    { value: 'psy', label: '心理线指标' },
+    { value: 'obv_signal', label: 'OBV能量潮信号' },
   ],
   capital: [
     { value: 'turnover', label: '换手率' },
     { value: 'money_flow', label: '主力资金净流入' },
     { value: 'large_order', label: '大单成交占比' },
     { value: 'volume_price', label: '日均成交额' },
+    { value: 'super_large_net_inflow', label: '超大单净流入' },
+    { value: 'large_net_inflow', label: '大单净流入' },
+    { value: 'small_net_outflow', label: '小单净流出' },
+    { value: 'money_flow_strength', label: '资金流强度综合评分' },
+    { value: 'net_inflow_rate', label: '净流入占比' },
   ],
   fundamental: [
     { value: 'pe', label: '市盈率 TTM' },
@@ -1009,6 +1020,31 @@ const factorNameOptions: Record<FactorType, { value: string; label: string }[]> 
   sector: [
     { value: 'sector_rank', label: '板块涨幅排名' },
     { value: 'sector_trend', label: '板块趋势' },
+    { value: 'index_pe', label: '指数市盈率' },
+    { value: 'index_turnover', label: '指数换手率' },
+    { value: 'index_ma_trend', label: '指数均线趋势' },
+    { value: 'index_vol_ratio', label: '指数量比' },
+  ],
+  chip: [
+    { value: 'chip_winner_rate', label: '获利比例' },
+    { value: 'chip_cost_5pct', label: '5%成本集中度' },
+    { value: 'chip_cost_15pct', label: '15%成本集中度' },
+    { value: 'chip_cost_50pct', label: '50%成本集中度' },
+    { value: 'chip_weight_avg', label: '筹码加权平均成本' },
+    { value: 'chip_concentration', label: '筹码集中度综合评分' },
+  ],
+  margin: [
+    { value: 'rzye_change', label: '融资余额变化率' },
+    { value: 'rqye_ratio', label: '融券余额占比' },
+    { value: 'rzrq_balance_trend', label: '两融余额趋势' },
+    { value: 'margin_net_buy', label: '融资净买入额' },
+  ],
+  board_hit: [
+    { value: 'limit_up_count', label: '近期涨停次数' },
+    { value: 'limit_up_streak', label: '连板天数' },
+    { value: 'limit_up_open_pct', label: '涨停封板率' },
+    { value: 'dragon_tiger_net_buy', label: '龙虎榜净买入' },
+    { value: 'first_limit_up', label: '首板涨停标记' },
   ],
 }
 
@@ -1063,6 +1099,7 @@ function getFactorCategory(factorName: string): string {
   const category = meta?.category ?? 'technical'
   // 后端 FactorCategory 'money_flow' 对应前端 FactorType 'capital'
   if (category === 'money_flow') return 'capital'
+  // 新增类别 chip、margin、board_hit 与后端一致
   return category
 }
 
@@ -1247,7 +1284,6 @@ const volumePriceConfig = reactive<VolumePriceConfig>({
 
 const sectorConfig = reactive({
   sector_data_source: 'DC',
-  sector_type: 'CONCEPT',
   sector_period: 5,
   sector_top_n: 30,
 })
@@ -1256,8 +1292,10 @@ const sectorConfig = reactive({
 
 const DATA_SOURCE_LABELS: Record<string, string> = {
   DC: '东方财富 DC',
-  TI: '同花顺 TI',
+  THS: '同花顺 THS',
   TDX: '通达信 TDX',
+  TI: '申万行业 TI',
+  CI: '中信行业 CI',
 }
 
 /** 当前选中数据源的覆盖率统计 */
@@ -1271,7 +1309,7 @@ const selectedSourceCoverage = computed(() => {
 
 /** 数据源下拉选项（含覆盖率摘要） */
 const sectorDataSourceOptions = computed(() => {
-  const sources = ['DC', 'TI', 'TDX']
+  const sources = ['DC', 'THS', 'TDX', 'TI', 'CI']
   const coverage = screenerStore.sectorCoverage
   return sources.map((ds) => {
     const stats = Array.isArray(coverage)
@@ -1308,7 +1346,6 @@ function loadStrategyExample(ex: StrategyExample) {
   // Load sector config
   if (ex.sector_config) {
     sectorConfig.sector_data_source = ex.sector_config.sector_data_source
-    sectorConfig.sector_type = ex.sector_config.sector_type
     sectorConfig.sector_period = ex.sector_config.sector_period
     sectorConfig.sector_top_n = ex.sector_config.sector_top_n
   }
@@ -1592,11 +1629,10 @@ async function selectStrategy(id: string) {
     const sc = cfg.sector_config as Record<string, unknown> | undefined
     if (sc) {
       sectorConfig.sector_data_source = (sc.sector_data_source as string) ?? 'DC'
-      sectorConfig.sector_type = (sc.sector_type as string) ?? 'CONCEPT'
       sectorConfig.sector_period = (sc.sector_period as number) ?? 5
       sectorConfig.sector_top_n = (sc.sector_top_n as number) ?? 30
     } else {
-      Object.assign(sectorConfig, { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 5, sector_top_n: 30 })
+      Object.assign(sectorConfig, { sector_data_source: 'DC', sector_period: 5, sector_top_n: 30 })
     }
 
     // 激活该策略（需求 22.3）
@@ -1900,6 +1936,9 @@ onUnmounted(() => {
 .factor-type-badge.capital { background: #3a2a1a; color: #d29922; }
 .factor-type-badge.fundamental { background: #1a3a2a; color: #3fb950; }
 .factor-type-badge.sector { background: #2a1a3a; color: #bc8cff; }
+.factor-type-badge.chip { background: #1a3a3a; color: #56d4dd; }
+.factor-type-badge.margin { background: #3a1a2a; color: #f778ba; }
+.factor-type-badge.board_hit { background: #3a2a0a; color: #f0883e; }
 
 .factor-type-select { width: 90px; flex-shrink: 0; }
 .factor-name { flex: 1; min-width: 120px; }

@@ -425,25 +425,33 @@ class VolumePriceConfig:
 
 @dataclass
 class SectorScreenConfig:
-    """板块筛选配置（需求 5.1）"""
-    sector_data_source: str = "DC"       # DC（东方财富）/ TI（同花顺）/ TDX（通达信）
-    sector_type: str = "CONCEPT"         # INDUSTRY / CONCEPT / REGION / STYLE
+    """板块筛选配置（需求 5.1, 22.1）
+
+    重构说明（需求 22）：
+    - sector_type 改为可选参数（默认 None），不再作为必选过滤维度
+    - 以 sector_data_source 为主维度进行板块筛选
+    - to_dict() 不再输出 sector_type 字段
+    - from_dict() 向后兼容：忽略旧配置中的 sector_type
+    """
+    sector_data_source: str = "DC"       # DC / THS / TDX / TI / CI（需求 22.1）
+    sector_type: str | None = None       # 可选过滤（默认 None，查询全部）（需求 22.1）
     sector_period: int = 5               # 涨幅计算周期（天）
     sector_top_n: int = 30               # 排名阈值
 
     def to_dict(self) -> dict:
+        """序列化为字典，不输出 sector_type 字段（需求 22.7）"""
         return {
             "sector_data_source": self.sector_data_source,
-            "sector_type": self.sector_type,
             "sector_period": self.sector_period,
             "sector_top_n": self.sector_top_n,
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "SectorScreenConfig":
+        """从字典反序列化，向后兼容旧配置中的 sector_type（需求 22.6）"""
         return cls(
             sector_data_source=data.get("sector_data_source", "DC"),
-            sector_type=data.get("sector_type", "CONCEPT"),
+            sector_type=None,  # 不再从配置中读取 sector_type（需求 22.1）
             sector_period=data.get("sector_period", 5),
             sector_top_n=data.get("sector_top_n", 30),
         )

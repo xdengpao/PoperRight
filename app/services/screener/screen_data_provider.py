@@ -26,6 +26,19 @@ from app.models.kline import KlineBar
 from app.models.money_flow import MoneyFlow
 from app.models.sector import SectorConstituent, SectorInfo
 from app.models.stock import StockInfo
+from app.models.tushare_import import (
+    CyqPerf,
+    IndexDailybasic,
+    IndexTech,
+    IndexWeight,
+    LimitList,
+    LimitStep,
+    MarginDetail,
+    MoneyflowDc,
+    MoneyflowThs,
+    StkFactor,
+    TopList,
+)
 from app.services.data_engine.adj_factor_repository import AdjFactorRepository
 from app.services.data_engine.forward_adjustment import adjust_kline_bars
 from app.services.data_engine.kline_repository import KlineRepository
@@ -159,11 +172,41 @@ class ScreenDataProvider:
                 )
                 continue
 
+        # 3.5 批量加载新增因子数据（需求 12-17, 21.2）
+        try:
+            await self._enrich_stk_factor_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_stk_factor_factors 异常，跳过", exc_info=True)
+        try:
+            await self._enrich_chip_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_chip_factors 异常，跳过", exc_info=True)
+        try:
+            await self._enrich_margin_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_margin_factors 异常，跳过", exc_info=True)
+        try:
+            await self._enrich_enhanced_money_flow_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_enhanced_money_flow_factors 异常，跳过", exc_info=True)
+        try:
+            await self._enrich_board_hit_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_board_hit_factors 异常，跳过", exc_info=True)
+        try:
+            await self._enrich_index_factors(result, screen_date)
+        except Exception:
+            logger.warning("_enrich_index_factors 异常，跳过", exc_info=True)
+
         # 4. 计算百分位排名（percentile 类型因子）
         try:
             percentile_factors = [
                 "money_flow", "volume_price", "roe",
                 "profit_growth", "market_cap", "revenue_growth",
+                # 需求 21.5：新增 PERCENTILE 类型因子
+                "chip_winner_rate", "chip_concentration",
+                "rzye_change", "margin_net_buy",
+                "super_large_net_inflow", "large_net_inflow",
             ]
             self._compute_percentile_ranks(result, percentile_factors)
         except Exception:
@@ -207,13 +250,13 @@ class ScreenDataProvider:
                     ts_session=ts_sess,
                     pg_session=pg_sess,
                     data_source=sector_cfg.sector_data_source,
-                    sector_type=sector_cfg.sector_type,
+                    sector_type=sector_cfg.sector_type,  # 需求 22.1：默认 None，不按类型过滤
                     period=sector_cfg.sector_period,
                 )
                 stock_sector_map = await ssf.map_stocks_to_sectors(
                     pg_session=pg_sess,
                     data_source=sector_cfg.sector_data_source,
-                    sector_type=sector_cfg.sector_type,
+                    sector_type=sector_cfg.sector_type,  # 需求 22.1：默认 None，不按类型过滤
                 )
                 ssf.filter_by_sector_strength(
                     stocks_data=result,
@@ -928,6 +971,581 @@ class ScreenDataProvider:
                     continue
 
                 data[ind_rel_field] = float(val) / median
+
+    # ------------------------------------------------------------------
+    # 纯计算函数（需求 13.4, 14.4, 15.3）— 供属性测试直接调用
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_chip_concentration(
+        cost_5pct: float, cost_15pct: float, cost_50pct: float,
+    ) -> float:
+        """
+        筹码集中度综合评分（需求 13.4）。
+
+        公式: score = 100 - (cost_5pct * 0.5 + cost_15pct * 0.3 + cost_50pct * 0.2)
+        结果 clamp 到 [0, 100]。cost 值越小表示筹码越集中，评分越高。
+        """
+        raw = 100.0 - (cost_5pct * 0.5 + cost_15pct * 0.3 + cost_50pct * 0.2)
+        return max(0.0, min(100.0, raw))
+
+    @staticmethod
+    def compute_rzrq_balance_trend(balances: list[float]) -> bool:
+        """
+        两融余额趋势判定（需求 14.4）。
+
+        当且仅当最近 5 个交易日融资余额严格递增时返回 True。
+        序列长度不足 5 时返回 False。
+        """
+        if len(balances) < 5:
+            return False
+        last5 = balances[-5:]
+        return all(last5[i] > last5[i - 1] for i in range(1, 5))
+
+    @staticmethod
+    def compute_money_flow_strength(
+        super_large: float, large: float, mid: float, small_outflow: float,
+    ) -> float:
+        """
+        资金流强度综合评分（需求 15.3）。
+
+        公式: score = super_large * 0.4 + large * 0.3 + mid * 0.2 + small_outflow * 0.1
+        各分项应已映射到 [0, 100] 区间，结果 clamp 到 [0, 100]。
+        """
+        raw = super_large * 0.4 + large * 0.3 + mid * 0.2 + small_outflow * 0.1
+        return max(0.0, min(100.0, raw))
+
+    # ------------------------------------------------------------------
+    # 技术面专业因子批量加载（需求 12.2, 12.3, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_stk_factor_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        从 stk_factor 表批量查询全市场技术面专业因子数据（需求 12.2）。
+
+        写入因子: kdj_k, kdj_d, kdj_j, cci, wr, trix, bias, psy, obv_signal
+        无数据时降级为 None，记录 WARNING 日志（需求 12.3）。
+        """
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    rows = await self._query_stk_factor(pg, screen_date_str)
+            else:
+                rows = await self._query_stk_factor(pg, screen_date_str)
+
+            row_map: dict[str, StkFactor] = {r.ts_code: r for r in rows}
+
+            for symbol, fd in stocks_data.items():
+                row = row_map.get(symbol)
+                if row is None:
+                    for f in ("kdj_k", "kdj_d", "kdj_j", "cci", "wr",
+                              "trix", "bias", "psy", "obv_signal"):
+                        fd[f] = None
+                    continue
+                fd["kdj_k"] = row.kdj_k
+                fd["kdj_d"] = row.kdj_d
+                fd["kdj_j"] = row.kdj_j
+                fd["cci"] = row.cci
+                fd["wr"] = row.wr
+                # trix: 正值视为多头信号（需求 12.1）
+                fd["trix"] = (row.trix is not None and row.trix > 0) if row.trix is not None else None
+                fd["bias"] = row.bias
+                # psy / obv_signal 不在 stk_factor 表中，降级为 None
+                fd["psy"] = None
+                fd["obv_signal"] = None
+        except Exception:
+            logger.warning("批量加载 stk_factor 数据失败，技术面专业因子降级为 None", exc_info=True)
+            for fd in stocks_data.values():
+                for f in ("kdj_k", "kdj_d", "kdj_j", "cci", "wr",
+                          "trix", "bias", "psy", "obv_signal"):
+                    fd.setdefault(f, None)
+
+    async def _query_stk_factor(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[StkFactor]:
+        """查询指定交易日全市场 stk_factor 数据。"""
+        stmt = select(StkFactor).where(StkFactor.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    # ------------------------------------------------------------------
+    # 筹码面因子批量加载（需求 13.3, 13.4, 13.5, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_chip_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        从 cyq_perf 表批量查询全市场筹码数据（需求 13.3）。
+
+        计算 chip_concentration 综合评分（需求 13.4）。
+        无数据时降级为 None，记录 WARNING 日志（需求 13.5）。
+        """
+        _chip_factors = (
+            "chip_winner_rate", "chip_cost_5pct", "chip_cost_15pct",
+            "chip_cost_50pct", "chip_weight_avg", "chip_concentration",
+        )
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    rows = await self._query_cyq_perf(pg, screen_date_str)
+            else:
+                rows = await self._query_cyq_perf(pg, screen_date_str)
+
+            row_map: dict[str, CyqPerf] = {r.ts_code: r for r in rows}
+
+            for symbol, fd in stocks_data.items():
+                row = row_map.get(symbol)
+                if row is None:
+                    for f in _chip_factors:
+                        fd[f] = None
+                    continue
+                fd["chip_winner_rate"] = row.winner_rate
+                fd["chip_cost_5pct"] = row.cost_5pct
+                fd["chip_cost_15pct"] = row.cost_15pct
+                fd["chip_cost_50pct"] = row.cost_50pct
+                fd["chip_weight_avg"] = row.weight_avg
+                # 计算筹码集中度综合评分（需求 13.4）
+                c5 = row.cost_5pct if row.cost_5pct is not None else 50.0
+                c15 = row.cost_15pct if row.cost_15pct is not None else 50.0
+                c50 = row.cost_50pct if row.cost_50pct is not None else 50.0
+                fd["chip_concentration"] = self.compute_chip_concentration(c5, c15, c50)
+        except Exception:
+            logger.warning("批量加载 cyq_perf 数据失败，筹码因子降级为 None", exc_info=True)
+            for fd in stocks_data.values():
+                for f in _chip_factors:
+                    fd.setdefault(f, None)
+
+    async def _query_cyq_perf(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[CyqPerf]:
+        """查询指定交易日全市场 cyq_perf 数据。"""
+        stmt = select(CyqPerf).where(CyqPerf.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    # ------------------------------------------------------------------
+    # 两融面因子批量加载（需求 14.3, 14.4, 14.5, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_margin_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        从 margin_detail 表批量查询最近 5 个交易日的两融数据（需求 14.3）。
+
+        计算 rzrq_balance_trend（需求 14.4）。
+        无数据时降级为 None，记录 WARNING 日志（需求 14.5）。
+        """
+        _margin_factors = ("rzye_change", "rqye_ratio", "rzrq_balance_trend", "margin_net_buy")
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            start_date = screen_date - timedelta(days=15)
+            start_date_str = start_date.strftime("%Y%m%d")
+
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    rows = await self._query_margin_detail(pg, start_date_str, screen_date_str)
+            else:
+                rows = await self._query_margin_detail(pg, start_date_str, screen_date_str)
+
+            # 按 ts_code 分组，按 trade_date 升序
+            from collections import defaultdict
+            grouped: dict[str, list[MarginDetail]] = defaultdict(list)
+            for r in rows:
+                grouped[r.ts_code].append(r)
+            for v in grouped.values():
+                v.sort(key=lambda x: x.trade_date)
+
+            for symbol, fd in stocks_data.items():
+                records = grouped.get(symbol)
+                if not records:
+                    for f in _margin_factors:
+                        fd[f] = None
+                    continue
+
+                latest = records[-1]
+                # rzye_change: 融资余额日环比变化率
+                if len(records) >= 2 and records[-2].rzye and latest.rzye and records[-2].rzye != 0:
+                    fd["rzye_change"] = (latest.rzye - records[-2].rzye) / records[-2].rzye * 100.0
+                else:
+                    fd["rzye_change"] = None
+
+                # rqye_ratio: 融券余额占比（原始值，无流通市值数据时直接存储）
+                fd["rqye_ratio"] = latest.rqye if latest.rqye is not None else None
+
+                # rzrq_balance_trend: 最近 5 日融资余额是否严格递增（需求 14.4）
+                balances = [r.rzye for r in records if r.rzye is not None]
+                fd["rzrq_balance_trend"] = self.compute_rzrq_balance_trend(balances)
+
+                # margin_net_buy: 融资净买入额 = rzmre - rzche（需求 14.2）
+                rzmre = latest.rzmre if latest.rzmre is not None else 0.0
+                rzche = latest.rzche if latest.rzche is not None else 0.0
+                fd["margin_net_buy"] = rzmre - rzche
+
+        except Exception:
+            logger.warning("批量加载 margin_detail 数据失败，两融因子降级为 None", exc_info=True)
+            for fd in stocks_data.values():
+                for f in _margin_factors:
+                    fd.setdefault(f, None)
+
+    async def _query_margin_detail(
+        self, session: AsyncSession, start_date_str: str, end_date_str: str,
+    ) -> list[MarginDetail]:
+        """查询指定日期范围内全市场 margin_detail 数据。"""
+        stmt = (
+            select(MarginDetail)
+            .where(
+                MarginDetail.trade_date >= start_date_str,
+                MarginDetail.trade_date <= end_date_str,
+            )
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    # ------------------------------------------------------------------
+    # 增强资金流因子批量加载（需求 15.2, 15.3, 15.4, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_enhanced_money_flow_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        优先从 moneyflow_ths 表查询，无数据时回退到 moneyflow_dc 表（需求 15.2）。
+
+        计算 money_flow_strength 综合评分（需求 15.3）。
+        无数据时降级为 None，记录 WARNING 日志（需求 15.4）。
+        """
+        _emf_factors = (
+            "super_large_net_inflow", "large_net_inflow",
+            "small_net_outflow", "money_flow_strength", "net_inflow_rate",
+        )
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    ths_rows = await self._query_moneyflow_ths(pg, screen_date_str)
+                    dc_rows = await self._query_moneyflow_dc(pg, screen_date_str) if not ths_rows else []
+            else:
+                ths_rows = await self._query_moneyflow_ths(pg, screen_date_str)
+                dc_rows = await self._query_moneyflow_dc(pg, screen_date_str) if not ths_rows else []
+
+            # 构建 ts_code → row 映射（优先 THS，回退 DC）
+            row_map: dict[str, MoneyflowThs | MoneyflowDc] = {}
+            for r in ths_rows:
+                row_map[r.ts_code] = r
+            if not ths_rows:
+                for r in dc_rows:
+                    row_map[r.ts_code] = r
+
+            for symbol, fd in stocks_data.items():
+                row = row_map.get(symbol)
+                if row is None:
+                    for f in _emf_factors:
+                        fd[f] = None
+                    continue
+
+                # 超大单净流入
+                elg_net = ((row.buy_elg_amount or 0.0) - (row.sell_elg_amount or 0.0))
+                fd["super_large_net_inflow"] = elg_net
+
+                # 大单净流入
+                lg_net = ((row.buy_lg_amount or 0.0) - (row.sell_lg_amount or 0.0))
+                fd["large_net_inflow"] = lg_net
+
+                # 小单净流出（小单净流出为正表示散户在卖出）
+                sm_net = ((row.sell_sm_amount or 0.0) - (row.buy_sm_amount or 0.0))
+                fd["small_net_outflow"] = sm_net > 0
+
+                # 中单净流入
+                md_net = ((row.buy_md_amount or 0.0) - (row.sell_md_amount or 0.0))
+
+                # 资金流强度综合评分（需求 15.3）
+                def _map_to_score(val: float) -> float:
+                    """将净流入额映射到 [0, 100] 区间。"""
+                    if val > 0:
+                        return min(100.0, 50.0 + val / 10000.0)
+                    else:
+                        return max(0.0, 50.0 + val / 10000.0)
+
+                fd["money_flow_strength"] = self.compute_money_flow_strength(
+                    _map_to_score(elg_net),
+                    _map_to_score(lg_net),
+                    _map_to_score(md_net),
+                    _map_to_score(sm_net),
+                )
+
+                # 净流入占比
+                total_amount = row.net_mf_amount
+                fd["net_inflow_rate"] = total_amount if total_amount is not None else None
+
+        except Exception:
+            logger.warning(
+                "批量加载增强资金流数据失败，增强资金流因子降级为 None", exc_info=True,
+            )
+            for fd in stocks_data.values():
+                for f in _emf_factors:
+                    fd.setdefault(f, None)
+
+    async def _query_moneyflow_ths(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[MoneyflowThs]:
+        """查询指定交易日全市场 moneyflow_ths 数据。"""
+        stmt = select(MoneyflowThs).where(MoneyflowThs.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _query_moneyflow_dc(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[MoneyflowDc]:
+        """查询指定交易日全市场 moneyflow_dc 数据。"""
+        stmt = select(MoneyflowDc).where(MoneyflowDc.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    # ------------------------------------------------------------------
+    # 打板面因子批量加载（需求 16.3, 16.4, 16.5, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_board_hit_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        从 limit_list / limit_step / top_list 表批量查询打板专题数据（需求 16.3）。
+
+        无数据时降级为默认值（数值型 0，布尔型 False）（需求 16.5）。
+        """
+        _board_factors_defaults = {
+            "limit_up_count": 0,
+            "limit_up_streak": 0,
+            "limit_up_open_pct": 0,
+            "dragon_tiger_net_buy": False,
+            "first_limit_up": False,
+        }
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            start_date = screen_date - timedelta(days=20)
+            start_date_str = start_date.strftime("%Y%m%d")
+            # 龙虎榜近 3 日
+            dt_start = screen_date - timedelta(days=7)
+            dt_start_str = dt_start.strftime("%Y%m%d")
+
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    limit_rows = await self._query_limit_list(pg, start_date_str, screen_date_str)
+                    step_rows = await self._query_limit_step(pg, screen_date_str)
+                    top_rows = await self._query_top_list(pg, dt_start_str, screen_date_str)
+            else:
+                limit_rows = await self._query_limit_list(pg, start_date_str, screen_date_str)
+                step_rows = await self._query_limit_step(pg, screen_date_str)
+                top_rows = await self._query_top_list(pg, dt_start_str, screen_date_str)
+
+            # limit_list: 按 ts_code 分组
+            from collections import defaultdict
+            limit_grouped: dict[str, list[LimitList]] = defaultdict(list)
+            for r in limit_rows:
+                limit_grouped[r.ts_code].append(r)
+
+            # limit_step: ts_code → LimitStep
+            step_map: dict[str, LimitStep] = {r.ts_code: r for r in step_rows}
+
+            # top_list: 按 ts_code 分组
+            top_grouped: dict[str, list[TopList]] = defaultdict(list)
+            for r in top_rows:
+                top_grouped[r.ts_code].append(r)
+
+            for symbol, fd in stocks_data.items():
+                # 涨停次数（需求 16.4）
+                limit_records = limit_grouped.get(symbol, [])
+                up_records = [r for r in limit_records if r.limit == "U"]
+                fd["limit_up_count"] = len(up_records)
+
+                # 涨停封板率：取最近一次涨停的 open_times 计算
+                if up_records:
+                    latest_up = max(up_records, key=lambda x: x.trade_date)
+                    open_times = latest_up.open_times or 0
+                    # 封板率 = 100 - open_times * 10（简化计算，开板次数越多封板率越低）
+                    fd["limit_up_open_pct"] = max(0, 100 - open_times * 10)
+                    # 首板涨停：当日涨停且连板天数为 1 或无连板记录
+                    step_rec = step_map.get(symbol)
+                    is_today_up = any(r.trade_date == screen_date_str for r in up_records)
+                    streak = step_rec.step if step_rec and step_rec.step else 0
+                    fd["first_limit_up"] = is_today_up and streak <= 1
+                else:
+                    fd["limit_up_open_pct"] = 0
+                    fd["first_limit_up"] = False
+
+                # 连板天数
+                step_rec = step_map.get(symbol)
+                fd["limit_up_streak"] = step_rec.step if step_rec and step_rec.step else 0
+
+                # 龙虎榜净买入
+                top_records = top_grouped.get(symbol, [])
+                if top_records:
+                    total_net = sum((r.net_amount or 0.0) for r in top_records)
+                    fd["dragon_tiger_net_buy"] = total_net > 0
+                else:
+                    fd["dragon_tiger_net_buy"] = False
+
+        except Exception:
+            logger.warning("批量加载打板数据失败，打板因子降级为默认值", exc_info=True)
+            for fd in stocks_data.values():
+                for f, default in _board_factors_defaults.items():
+                    fd.setdefault(f, default)
+
+    async def _query_limit_list(
+        self, session: AsyncSession, start_date_str: str, end_date_str: str,
+    ) -> list[LimitList]:
+        """查询指定日期范围内全市场 limit_list 数据。"""
+        stmt = (
+            select(LimitList)
+            .where(LimitList.trade_date >= start_date_str, LimitList.trade_date <= end_date_str)
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _query_limit_step(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[LimitStep]:
+        """查询指定交易日全市场 limit_step 数据。"""
+        stmt = select(LimitStep).where(LimitStep.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _query_top_list(
+        self, session: AsyncSession, start_date_str: str, end_date_str: str,
+    ) -> list[TopList]:
+        """查询指定日期范围内全市场 top_list 数据。"""
+        stmt = (
+            select(TopList)
+            .where(TopList.trade_date >= start_date_str, TopList.trade_date <= end_date_str)
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    # ------------------------------------------------------------------
+    # 指数专题因子批量加载（需求 17.2, 17.3, 21.2）
+    # ------------------------------------------------------------------
+
+    async def _enrich_index_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+    ) -> None:
+        """
+        从 index_dailybasic 和 index_tech 表查询指数因子数据（需求 17.2）。
+
+        根据股票所属指数写入 4 个指数因子到 factor_dict。
+        无数据时降级为 None，记录 WARNING 日志（需求 17.3）。
+        """
+        _index_factors = ("index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio")
+        # 默认关注的主要指数
+        _TARGET_INDICES = ["000300.SH", "000905.SH", "000001.SH"]
+        try:
+            screen_date_str = screen_date.strftime("%Y%m%d")
+            pg = self._pg_session
+            if pg is None:
+                async with AsyncSessionPG() as pg:
+                    basic_rows = await self._query_index_dailybasic(pg, screen_date_str)
+                    tech_rows = await self._query_index_tech(pg, screen_date_str)
+                    weight_map = await self._query_index_weights(pg, _TARGET_INDICES)
+            else:
+                basic_rows = await self._query_index_dailybasic(pg, screen_date_str)
+                tech_rows = await self._query_index_tech(pg, screen_date_str)
+                weight_map = await self._query_index_weights(pg, _TARGET_INDICES)
+
+            # 构建 index_code → 指标 映射
+            basic_map: dict[str, IndexDailybasic] = {r.ts_code: r for r in basic_rows}
+            tech_map: dict[str, IndexTech] = {r.ts_code: r for r in tech_rows}
+
+            # 构建 symbol → index_code 映射（取第一个匹配的指数）
+            stock_index_map: dict[str, str] = {}
+            for idx_code, constituents in weight_map.items():
+                for con_code in constituents:
+                    if con_code not in stock_index_map:
+                        stock_index_map[con_code] = idx_code
+
+            for symbol, fd in stocks_data.items():
+                idx_code = stock_index_map.get(symbol)
+                if idx_code is None:
+                    # 无指数归属，使用上证指数作为默认
+                    idx_code = "000001.SH"
+
+                basic = basic_map.get(idx_code)
+                tech = tech_map.get(idx_code)
+
+                fd["index_pe"] = basic.pe if basic else None
+                fd["index_turnover"] = basic.turnover_rate if basic else None
+                # 指数均线趋势：使用 MACD > 0 作为多头信号的简化判断
+                if tech and tech.macd is not None:
+                    fd["index_ma_trend"] = tech.macd > 0
+                else:
+                    fd["index_ma_trend"] = None
+                fd["index_vol_ratio"] = None  # vol_ratio 不在 index_dailybasic 中
+
+        except Exception:
+            logger.warning("批量加载指数因子数据失败，指数因子降级为 None", exc_info=True)
+            for fd in stocks_data.values():
+                for f in _index_factors:
+                    fd.setdefault(f, None)
+
+    async def _query_index_dailybasic(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[IndexDailybasic]:
+        """查询指定交易日指数每日指标。"""
+        stmt = select(IndexDailybasic).where(IndexDailybasic.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _query_index_tech(
+        self, session: AsyncSession, trade_date_str: str,
+    ) -> list[IndexTech]:
+        """查询指定交易日指数技术面因子。"""
+        stmt = select(IndexTech).where(IndexTech.trade_date == trade_date_str)
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    async def _query_index_weights(
+        self, session: AsyncSession, index_codes: list[str],
+    ) -> dict[str, list[str]]:
+        """查询指数成分股映射（最新权重数据）。"""
+        result: dict[str, list[str]] = {code: [] for code in index_codes}
+        for idx_code in index_codes:
+            # 查询最新交易日的成分股
+            latest_stmt = (
+                select(func.max(IndexWeight.trade_date))
+                .where(IndexWeight.index_code == idx_code)
+            )
+            date_res = await session.execute(latest_stmt)
+            latest_date = date_res.scalar_one_or_none()
+            if latest_date is None:
+                continue
+            stmt = (
+                select(IndexWeight.con_code)
+                .where(IndexWeight.index_code == idx_code, IndexWeight.trade_date == latest_date)
+            )
+            res = await session.execute(stmt)
+            result[idx_code] = [row[0] for row in res.all()]
+        return result
 
     # ------------------------------------------------------------------
     # 板块分类数据加载（需求 9）

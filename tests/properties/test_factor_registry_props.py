@@ -74,10 +74,10 @@ def test_factor_registry_has_19_factors():
 
     **Validates: Requirements 11.1**
 
-    注册表应包含恰好 19 个因子。
+    注册表应包含恰好 52 个因子（原 19 个 + 新增 33 个）。
     """
-    assert len(FACTOR_REGISTRY) == 19, (
-        f"注册表应包含 19 个因子，实际为 {len(FACTOR_REGISTRY)}"
+    assert len(FACTOR_REGISTRY) == 52, (
+        f"注册表应包含 52 个因子，实际为 {len(FACTOR_REGISTRY)}"
     )
 
 

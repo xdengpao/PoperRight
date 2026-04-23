@@ -34,29 +34,67 @@ from app.services.screener.factor_registry import (
 
 MAX_STRATEGIES_PER_USER = 20
 
-# 因子类别映射
+# 因子类别映射（需求 21.4：全量 52 个因子）
 FACTOR_CATEGORIES: dict[str, str] = {
-    # 技术面
+    # 技术面（原有 7 个 + 新增 9 个 = 16 个）
     "ma_trend": "technical",
+    "ma_support": "technical",
     "macd": "technical",
     "boll": "technical",
     "rsi": "technical",
     "dma": "technical",
     "breakout": "technical",
-    # 资金面
+    "kdj_k": "technical",
+    "kdj_d": "technical",
+    "kdj_j": "technical",
+    "cci": "technical",
+    "wr": "technical",
+    "trix": "technical",
+    "bias": "technical",
+    "psy": "technical",
+    "obv_signal": "technical",
+    # 资金面（原有 4 个 + 新增 5 个 = 9 个）
     "money_flow": "money_flow",
     "large_order": "money_flow",
     "volume_price": "money_flow",
     "turnover": "money_flow",
-    # 基本面
+    "super_large_net_inflow": "money_flow",
+    "large_net_inflow": "money_flow",
+    "small_net_outflow": "money_flow",
+    "money_flow_strength": "money_flow",
+    "net_inflow_rate": "money_flow",
+    # 基本面（6 个，不变）
     "pe": "fundamental",
     "pb": "fundamental",
     "roe": "fundamental",
     "profit_growth": "fundamental",
     "market_cap": "fundamental",
-    # 板块面
+    "revenue_growth": "fundamental",
+    # 板块面（原有 2 个 + 新增 4 个 = 6 个）
     "sector_rank": "sector",
     "sector_trend": "sector",
+    "index_pe": "sector",
+    "index_turnover": "sector",
+    "index_ma_trend": "sector",
+    "index_vol_ratio": "sector",
+    # 筹码面（新增 6 个，需求 13.2）
+    "chip_winner_rate": "chip",
+    "chip_cost_5pct": "chip",
+    "chip_cost_15pct": "chip",
+    "chip_cost_50pct": "chip",
+    "chip_weight_avg": "chip",
+    "chip_concentration": "chip",
+    # 两融面（新增 4 个，需求 14.2）
+    "rzye_change": "margin",
+    "rqye_ratio": "margin",
+    "rzrq_balance_trend": "margin",
+    "margin_net_buy": "margin",
+    # 打板面（新增 5 个，需求 16.2）
+    "limit_up_count": "board_hit",
+    "limit_up_streak": "board_hit",
+    "limit_up_open_pct": "board_hit",
+    "dragon_tiger_net_buy": "board_hit",
+    "first_limit_up": "board_hit",
 }
 
 

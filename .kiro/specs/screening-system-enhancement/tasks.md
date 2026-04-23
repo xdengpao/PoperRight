@@ -15,289 +15,289 @@
 
 ## Tasks
 
-- [ ] 1. 因子注册表与类别枚举扩展
-  - [ ] 1.1 扩展 FactorCategory 枚举，新增 CHIP、MARGIN、BOARD_HIT 三个值
+- [x] 1. 因子注册表与类别枚举扩展
+  - [x] 1.1 扩展 FactorCategory 枚举，新增 CHIP、MARGIN、BOARD_HIT 三个值
     - 修改 `app/services/screener/factor_registry.py` 中的 `FactorCategory` 枚举
     - _Requirements: 13.1, 14.1, 16.1, 21.4_
-  - [ ] 1.2 注册 9 个技术面专业因子（stk_factor_pro）到 FACTOR_REGISTRY
+  - [x] 1.2 注册 9 个技术面专业因子（stk_factor_pro）到 FACTOR_REGISTRY
     - 新增 `kdj_k`、`kdj_d`、`kdj_j`、`cci`、`wr`、`trix`、`bias`、`psy`、`obv_signal`
     - 每个因子包含完整的 `FactorMeta`（factor_name、label、category、threshold_type、default_threshold/default_range、value_min、value_max、unit、description、examples）
     - _Requirements: 12.1, 21.1_
-  - [ ] 1.3 注册 6 个筹码面因子（cyq_perf）到 FACTOR_REGISTRY
+  - [x] 1.3 注册 6 个筹码面因子（cyq_perf）到 FACTOR_REGISTRY
     - 新增 `chip_winner_rate`、`chip_cost_5pct`、`chip_cost_15pct`、`chip_cost_50pct`、`chip_weight_avg`、`chip_concentration`
     - _Requirements: 13.2, 21.1_
-  - [ ] 1.4 注册 4 个两融面因子（margin_detail）到 FACTOR_REGISTRY
+  - [x] 1.4 注册 4 个两融面因子（margin_detail）到 FACTOR_REGISTRY
     - 新增 `rzye_change`、`rqye_ratio`、`rzrq_balance_trend`、`margin_net_buy`
     - _Requirements: 14.2, 21.1_
-  - [ ] 1.5 注册 5 个增强资金流因子（moneyflow_ths/dc）到 FACTOR_REGISTRY
+  - [x] 1.5 注册 5 个增强资金流因子（moneyflow_ths/dc）到 FACTOR_REGISTRY
     - 新增 `super_large_net_inflow`、`large_net_inflow`、`small_net_outflow`、`money_flow_strength`、`net_inflow_rate`
     - _Requirements: 15.1, 21.1_
-  - [ ] 1.6 注册 5 个打板面因子（limit_list_d 等）到 FACTOR_REGISTRY
+  - [x] 1.6 注册 5 个打板面因子（limit_list_d 等）到 FACTOR_REGISTRY
     - 新增 `limit_up_count`、`limit_up_streak`、`limit_up_open_pct`、`dragon_tiger_net_buy`、`first_limit_up`
     - _Requirements: 16.2, 21.1_
-  - [ ] 1.7 注册 4 个指数专题因子（index_dailybasic 等）到 FACTOR_REGISTRY
+  - [x] 1.7 注册 4 个指数专题因子（index_dailybasic 等）到 FACTOR_REGISTRY
     - 新增 `index_pe`、`index_turnover`、`index_ma_trend`、`index_vol_ratio`
     - _Requirements: 17.1, 21.1_
-  - [ ] 1.8 更新 FACTOR_CATEGORIES 映射字典（strategy_engine.py）
+  - [x] 1.8 更新 FACTOR_CATEGORIES 映射字典（strategy_engine.py）
     - 在 `strategy_engine.py` 的 `FACTOR_CATEGORIES` 字典中注册所有 33 个新因子的类别映射
     - _Requirements: 21.4_
-  - [ ]* 1.9 编写因子注册表完整性属性测试
+  - [x] 1.9 编写因子注册表完整性属性测试
     - **Property 13: 因子注册表与类别映射一致性**
     - **Property 14: 因子元数据完整性**
     - **Validates: Requirements 18.1, 21.1, 21.4**
-  - [ ]* 1.10 编写因子注册表单元测试
+  - [x] 1.10 编写因子注册表单元测试
     - 验证 52 个因子元数据字段完整、类别正确、examples 非空
     - 验证 `get_factors_by_category()` 对新类别返回正确结果
     - _Requirements: 18.1, 21.1_
 
-- [ ] 2. 板块面因子分类重构（SectorScreenConfig + SectorStrengthFilter）
-  - [ ] 2.1 重构 SectorScreenConfig（schemas.py）
+- [x] 2. 板块面因子分类重构（SectorScreenConfig + SectorStrengthFilter）
+  - [x] 2.1 重构 SectorScreenConfig（schemas.py）
     - 移除 `sector_type` 必选字段，改为可选（默认 `None`）
     - `to_dict()` 不再输出 `sector_type` 字段
     - `from_dict()` 向后兼容：忽略旧配置中的 `sector_type`，不报错
     - _Requirements: 22.1, 22.6, 22.7_
-  - [ ] 2.2 重构 SectorStrengthFilter（sector_strength.py）
+  - [x] 2.2 重构 SectorStrengthFilter（sector_strength.py）
     - `compute_sector_ranks()` 的 `sector_type` 参数改为可选（默认 `None`）
     - `map_stocks_to_sectors()` 的 `sector_type` 参数改为可选（默认 `None`）
     - `_load_sector_info()` 的 `sector_type` 参数改为可选，`None` 时查询该 `data_source` 下所有板块
     - _Requirements: 22.2, 22.3_
-  - [ ] 2.3 确保 DataSource 枚举包含 CI（中信行业）
+  - [x] 2.3 确保 DataSource 枚举包含 CI（中信行业）
     - 检查 `app/models/sector.py` 中 `DataSource` 枚举已包含 `CI = "CI"`
     - _Requirements: 22.4_
-  - [ ] 2.4 更新 ScreenDataProvider 中板块数据加载调用
+  - [x] 2.4 更新 ScreenDataProvider 中板块数据加载调用
     - 修改 `load_screen_data()` 中调用 `compute_sector_ranks()` 和 `map_stocks_to_sectors()` 时不再传递 `sector_type`（或传递 `None`）
     - _Requirements: 3.4, 22.1_
-  - [ ]* 2.5 编写 SectorScreenConfig 序列化属性测试
+  - [x] 2.5 编写 SectorScreenConfig 序列化属性测试
     - **Property 9: SectorScreenConfig 序列化不含 sector_type**
     - **Validates: Requirements 22.1, 22.6, 22.7**
 
-- [ ] 3. Checkpoint - 确保因子注册表和板块重构测试通过
+- [x] 3. Checkpoint - 确保因子注册表和板块重构测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 4. 数据提供服务扩展（ScreenDataProvider 新增 6 个 _enrich 方法）
-  - [ ] 4.1 实现 `_enrich_stk_factor_factors()` 批量方法
+- [x] 4. 数据提供服务扩展（ScreenDataProvider 新增 6 个 _enrich 方法）
+  - [x] 4.1 实现 `_enrich_stk_factor_factors()` 批量方法
     - 从 `stk_factor` 表批量查询全市场技术面专业因子数据
     - 将 `kdj_k`、`kdj_d`、`kdj_j`、`cci`、`wr`、`trix`、`bias`、`psy`、`obv_signal` 写入各股票的 `factor_dict`
     - 无数据时降级为 `None`，记录 WARNING 日志
     - _Requirements: 12.2, 12.3, 21.2_
-  - [ ] 4.2 实现 `_enrich_chip_factors()` 批量方法
+  - [x] 4.2 实现 `_enrich_chip_factors()` 批量方法
     - 从 `cyq_perf` 表批量查询全市场筹码数据
     - 计算 `chip_concentration` 综合评分：`score = 100 - (cost_5pct × 0.5 + cost_15pct × 0.3 + cost_50pct × 0.2)`，clamp 到 [0, 100]
     - 将 6 个筹码因子写入各股票的 `factor_dict`
     - 无数据时降级为 `None`，记录 WARNING 日志
     - _Requirements: 13.3, 13.4, 13.5, 21.2_
-  - [ ] 4.3 实现 `_enrich_margin_factors()` 批量方法
+  - [x] 4.3 实现 `_enrich_margin_factors()` 批量方法
     - 从 `margin_detail` 表批量查询最近 5 个交易日的两融数据
     - 计算 `rzrq_balance_trend`：检查最近 5 日融资余额是否严格递增
     - 将 4 个两融因子写入各股票的 `factor_dict`
     - 无数据时降级为 `None`，记录 WARNING 日志
     - _Requirements: 14.3, 14.4, 14.5, 21.2_
-  - [ ] 4.4 实现 `_enrich_enhanced_money_flow_factors()` 批量方法
+  - [x] 4.4 实现 `_enrich_enhanced_money_flow_factors()` 批量方法
     - 优先从 `moneyflow_ths` 表查询，无数据时回退到 `moneyflow_dc` 表
     - 计算 `money_flow_strength` 综合评分：`score = super_large × 0.4 + large × 0.3 + mid × 0.2 + small_outflow × 0.1`
     - 将 5 个增强资金流因子写入各股票的 `factor_dict`
     - 无数据时降级为 `None`，记录 WARNING 日志
     - _Requirements: 15.2, 15.3, 15.4, 21.2_
-  - [ ] 4.5 实现 `_enrich_board_hit_factors()` 批量方法
+  - [x] 4.5 实现 `_enrich_board_hit_factors()` 批量方法
     - 从 `limit_list` 表查询近 10 个交易日涨跌停数据
     - 从 `limit_step` 表查询连板数据
     - 从 `top_list` 表查询龙虎榜数据
     - 将 5 个打板因子写入各股票的 `factor_dict`
     - 无数据时降级为默认值（数值型 `0`，布尔型 `False`）
     - _Requirements: 16.3, 16.4, 16.5, 21.2_
-  - [ ] 4.6 实现 `_enrich_index_factors()` 批量方法
+  - [x] 4.6 实现 `_enrich_index_factors()` 批量方法
     - 从 `index_dailybasic` 和 `index_tech` 表查询指数因子数据
     - 根据股票所属指数写入 4 个指数因子到 `factor_dict`
     - 无数据时降级为 `None`，记录 WARNING 日志
     - _Requirements: 17.2, 17.3, 21.2_
-  - [ ] 4.7 在 `load_screen_data()` 中集成 6 个新 `_enrich_*_factors()` 调用
+  - [x] 4.7 在 `load_screen_data()` 中集成 6 个新 `_enrich_*_factors()` 调用
     - 在步骤 3（K 线因子计算）和步骤 4（百分位排名）之间插入 6 个新方法调用
     - 扩展 `_compute_percentile_ranks()` 的 `percentile_factors` 列表，新增 `chip_winner_rate`、`chip_concentration`、`rzye_change`、`margin_net_buy`、`super_large_net_inflow`、`large_net_inflow`
     - _Requirements: 21.2, 21.5_
-  - [ ]* 4.8 编写筹码集中度评分属性测试
+  - [x] 4.8 编写筹码集中度评分属性测试
     - **Property 10: 筹码集中度综合评分公式正确性与有界性**
     - **Validates: Requirements 13.4**
-  - [ ]* 4.9 编写两融余额趋势属性测试
+  - [x] 4.9 编写两融余额趋势属性测试
     - **Property 11: 两融余额趋势判定正确性**
     - **Validates: Requirements 14.4**
-  - [ ]* 4.10 编写资金流强度评分属性测试
+  - [x] 4.10 编写资金流强度评分属性测试
     - **Property 12: 资金流强度综合评分有界性**
     - **Validates: Requirements 15.3**
-  - [ ]* 4.11 编写数据加载降级单元测试
+  - [x] 4.11 编写数据加载降级单元测试
     - 模拟各数据表为空或连接异常，验证因子默认值和日志输出
     - _Requirements: 12.3, 13.5, 14.5, 15.4, 16.5, 17.3_
 
-- [ ] 5. Checkpoint - 确保数据提供服务扩展测试通过
+- [x] 5. Checkpoint - 确保数据提供服务扩展测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 6. 现有系统修复与增强（需求 1-11）
-  - [ ] 6.1 修复资金流因子数据接入（需求 1）
+- [x] 6. 现有系统修复与增强（需求 1-11）
+  - [x] 6.1 修复资金流因子数据接入（需求 1）
     - 确保 `_enrich_money_flow_factors()` 从 `money_flow` 表查询真实数据
     - 将 `money_flow` 和 `large_order` 原始数值写入 `factor_dict` 以便百分位排名
     - 无数据时降级为 `False`，记录 WARNING 日志
     - _Requirements: 1.1, 1.2, 1.3, 1.4_
-  - [ ] 6.2 接入 Celery 选股任务数据管线（需求 2）
+  - [x] 6.2 接入 Celery 选股任务数据管线（需求 2）
     - 确保 `run_eod_screening` 通过 `ScreenDataProvider` 异步加载全市场数据
     - 确保 `_load_active_strategy_async()` 从 `strategy_template` 表查询活跃策略
     - 选股结果写入 Redis 缓存，记录执行耗时和选出股票数量
     - 数据库连接失败时按 Celery 重试策略自动重试（最多 3 次）
     - _Requirements: 2.1, 2.2, 2.3, 2.4_
-  - [ ] 6.3 修复板块因子接入主选股管线（需求 3）
+  - [x] 6.3 修复板块因子接入主选股管线（需求 3）
     - 确保 `sector_rank` 和 `sector_trend` 写入每只股票的 `factor_dict` 内部
     - 验证 `sector_rank` 为 `int | None`、`sector_trend` 为 `bool`
     - 板块数据加载失败时降级为默认值，选股流程不中断
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
-  - [ ] 6.4 集成风控到选股执行器（需求 4）
+  - [x] 6.4 集成风控到选股执行器（需求 4）
     - 确保 `ScreenExecutor` 调用 `MarketRiskChecker.check_market_risk()`
     - DANGER 状态返回空结果（或仅允许强势股通过）
     - CAUTION 状态提升阈值至 90
     - 剔除单日涨幅 > 9% 和黑名单股票
     - 在 `ScreenItem` 中记录风控过滤信息
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6_
-  - [ ] 6.5 重构趋势评分为加权求和（需求 5）
+  - [x] 6.5 重构趋势评分为加权求和（需求 5）
     - 确保 `_compute_weighted_score()` 使用加权求和公式
     - 评分为 0 的模块不计入分母
     - 默认权重：`factor_editor=0.30`、`ma_trend=0.25`、`indicator_params=0.20`、`breakout=0.15`、`volume_price=0.10`
     - 结果在 [0, 100] 闭区间内
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
-  - [ ] 6.6 支持多重突破信号并发（需求 6）
+  - [x] 6.6 支持多重突破信号并发（需求 6）
     - 确保 `_detect_all_breakouts()` 对所有启用的突破类型逐一检测
     - 所有检测到的突破信号存储为列表格式写入 `breakout_list`
     - 为每种有效突破类型生成独立的 `SignalDetail`
     - 保持向后兼容：`breakout` 字段为单个字典时仍能正确处理
     - _Requirements: 6.1, 6.2, 6.3, 6.4_
-  - [ ] 6.7 实现信号强度分级（需求 7）
+  - [x] 6.7 实现信号强度分级（需求 7）
     - 确保 `_compute_signal_strength()` 为每个 `SignalDetail` 计算强度等级
     - MA_TREND：>= 90 → STRONG，>= 70 → MEDIUM，其余 → WEAK
     - BREAKOUT：量比 >= 2.0 → STRONG，>= 1.5 → MEDIUM，其余 → WEAK
     - 技术指标：>= 3 个触发 → STRONG，2 个 → MEDIUM，1 个 → WEAK
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
-  - [ ] 6.8 实现信号新鲜度标记（需求 8）
+  - [x] 6.8 实现信号新鲜度标记（需求 8）
     - 确保 `_mark_signal_freshness()` 比较当前信号与上一轮信号
     - 前一次结果不存在时所有信号标记为 NEW
     - `ScreenItem` 包含 `has_new_signal` 布尔字段
     - _Requirements: 8.1, 8.2, 8.3, 8.4_
-  - [ ] 6.9 实现实时选股增量计算架构（需求 9）
+  - [x] 6.9 实现实时选股增量计算架构（需求 9）
     - 确保 `run_realtime_screening` 采用增量计算模式
     - 首次执行时全量预热因子数据到 Redis
     - 仅重新计算受实时数据影响的因子
     - 单轮执行超过 8 秒记录 WARNING 日志
     - _Requirements: 9.1, 9.2, 9.3, 9.4_
-  - [ ] 6.10 实现选股结果去重与变化检测（需求 10）
+  - [x] 6.10 实现选股结果去重与变化检测（需求 10）
     - 确保 `_compute_result_diff()` 正确检测 NEW、UPDATED、REMOVED
     - `ScreenResult` 包含 `changes` 字段
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
-  - [ ] 6.11 实现选股结果到回测闭环验证（需求 11）
+  - [x] 6.11 实现选股结果到回测闭环验证（需求 11）
     - 确保 `screen_to_backtest` API 端点接受选股结果 ID 和回测参数
     - 从选股结果中提取策略配置和股票列表
     - 返回回测任务 ID
     - 选股结果不存在时返回 404
     - _Requirements: 11.1, 11.2, 11.3, 11.4_
-  - [ ]* 6.12 编写加权求和评分属性测试
+  - [x] 6.12 编写加权求和评分属性测试
     - **Property 1: 加权求和评分正确性与有界性**
     - **Validates: Requirements 5.1, 5.3, 5.4**
-  - [ ]* 6.13 编写风控过滤规则属性测试
+  - [x] 6.13 编写风控过滤规则属性测试
     - **Property 2: 风控过滤规则一致性**
     - **Validates: Requirements 4.1, 4.2, 4.3, 4.4, 4.5**
-  - [ ]* 6.14 编写多重突破信号属性测试
+  - [x] 6.14 编写多重突破信号属性测试
     - **Property 3: 多重突破信号列表有效性**
     - **Validates: Requirements 6.1, 6.2, 6.3**
-  - [ ]* 6.15 编写信号强度分级属性测试
+  - [x] 6.15 编写信号强度分级属性测试
     - **Property 4: 信号强度分级阈值一致性**
     - **Validates: Requirements 7.1, 7.2, 7.3, 7.4**
-  - [ ]* 6.16 编写信号新鲜度标记属性测试
+  - [x] 6.16 编写信号新鲜度标记属性测试
     - **Property 5: 信号新鲜度标记一致性**
     - **Validates: Requirements 8.1, 8.3, 8.4**
-  - [ ]* 6.17 编写选股结果变化检测属性测试
+  - [x] 6.17 编写选股结果变化检测属性测试
     - **Property 6: 选股结果变化检测完备性**
     - **Validates: Requirements 10.1, 10.2, 10.3, 10.4**
 
-- [ ] 7. Checkpoint - 确保现有系统修复测试通过
+- [x] 7. Checkpoint - 确保现有系统修复测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 8. FactorEvaluator 全类型覆盖与 StrategyConfig 序列化兼容
-  - [ ] 8.1 确保 FactorEvaluator 正确评估所有新增因子类别
+- [x] 8. FactorEvaluator 全类型覆盖与 StrategyConfig 序列化兼容
+  - [x] 8.1 确保 FactorEvaluator 正确评估所有新增因子类别
     - 验证 RANGE 类型区间判断（KDJ、RSI、WR 等）
     - 验证 BOOLEAN 类型布尔判断（TRIX、OBV_SIGNAL 等）
     - 验证 PERCENTILE 类型百分位比较（筹码面、两融面）
     - 验证 ABSOLUTE 类型绝对值比较（打板面）
     - 验证 INDUSTRY_RELATIVE 类型行业相对值比较（chip_weight_avg）
     - _Requirements: 12.4, 18.4, 21.3_
-  - [ ] 8.2 确保 StrategyConfig 序列化/反序列化向后兼容
+  - [x] 8.2 确保 StrategyConfig 序列化/反序列化向后兼容
     - 不包含新因子的旧配置能正常加载
     - 包含新因子的新配置能正确序列化为 JSONB 存储
     - 旧配置中包含 `sector_type` 字段时反序列化不报错
     - _Requirements: 18.5, 21.6, 22.6_
-  - [ ]* 8.3 编写 FactorEvaluator 阈值类型全覆盖属性测试
+  - [x] 8.3 编写 FactorEvaluator 阈值类型全覆盖属性测试
     - **Property 7: FactorEvaluator 阈值类型全覆盖**
     - **Validates: Requirements 12.4, 18.4, 21.3**
-  - [ ]* 8.4 编写 StrategyConfig 序列化往返属性测试
+  - [x] 8.4 编写 StrategyConfig 序列化往返属性测试
     - **Property 8: StrategyConfig 序列化往返一致性**
     - **Validates: Requirements 18.5, 21.6, 22.6**
 
-- [ ] 9. 策略示例库扩展与配置说明书
-  - [ ] 9.1 更新现有策略示例移除 sector_type 字段
+- [x] 9. 策略示例库扩展与配置说明书
+  - [x] 9.1 更新现有策略示例移除 sector_type 字段
     - 修改 `strategy_examples.py` 中示例 3、4、8、10、11、12 的 `sector_config`
     - 移除 `sector_type` 字段，仅保留 `sector_data_source`、`sector_period`、`sector_top_n`
     - _Requirements: 22.9_
-  - [ ] 9.2 扩展 StrategyExample 数据类，新增 config_doc 字段
+  - [x] 9.2 扩展 StrategyExample 数据类，新增 config_doc 字段
     - 在 `strategy_examples.py` 的 `StrategyExample` 数据类中新增 `config_doc: str = ""` 字段
     - _Requirements: 20.1_
-  - [ ] 9.3 新增 10 个优化选股组合方案
+  - [x] 9.3 新增 10 个优化选股组合方案
     - 筹码集中突破型、两融资金驱动型、多维资金共振型、首板打板策略、价值成长筹码型、指数增强型、连板接力型、主力吸筹型、技术共振型、行业轮动增强型
     - 每个包含完整的 `factors`、`logic`、`weights`、`enabled_modules`、`sector_config`（如适用）
     - 所有因子名称与 FACTOR_REGISTRY 一致
     - _Requirements: 19.1, 19.2, 19.3_
-  - [ ] 9.4 为所有 22 个策略示例编写 config_doc 配置说明书
+  - [x] 9.4 为所有 22 个策略示例编写 config_doc 配置说明书
     - 每个 config_doc 包含：策略概述、因子构成、适用场景、参数调优建议、风险提示、回测建议
     - 使用中文 Markdown 格式
     - _Requirements: 20.1, 20.2, 20.4_
-  - [ ]* 9.5 编写策略示例因子名称一致性属性测试
+  - [x] 9.5 编写策略示例因子名称一致性属性测试
     - **Property 15: 策略示例因子名称一致性**
     - **Validates: Requirements 19.2, 19.3**
-  - [ ]* 9.6 编写策略示例完整性单元测试
+  - [x] 9.6 编写策略示例完整性单元测试
     - 验证 22 个策略示例的 factors、logic、weights、enabled_modules 非空
     - 验证新增示例的 config_doc 非空
     - _Requirements: 19.2, 20.1_
 
-- [ ] 10. Checkpoint - 确保策略示例库测试通过
+- [x] 10. Checkpoint - 确保策略示例库测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [ ] 11. 前端因子编辑器增强
-  - [ ] 11.1 更新 ScreenerView.vue 因子类型选项
+- [x] 11. 前端因子编辑器增强
+  - [x] 11.1 更新 ScreenerView.vue 因子类型选项
     - `factorTypes` 数组新增 `chip`（筹码面）、`margin`（两融面）、`board_hit`（打板面）三个选项
     - `factorNameOptions` 按新类别分组
     - _Requirements: 18.1_
-  - [ ] 11.2 重构板块面因子的"板块类型"下拉为"数据来源"下拉
+  - [x] 11.2 重构板块面因子的"板块类型"下拉为"数据来源"下拉
     - 移除 `sectorConfig.sector_type` 下拉
     - 替换为"数据来源"下拉，选项为：东方财富 DC、同花顺 THS、通达信 TDX、申万行业 TI、中信行业 CI
     - _Requirements: 22.5_
-  - [ ] 11.3 更新 screener.ts store 的 SectorScreenConfig 接口
+  - [x] 11.3 更新 screener.ts store 的 SectorScreenConfig 接口
     - 移除 `sector_type` 字段，保留 `sector_data_source`、`sector_period`、`sector_top_n`
     - 更新 `StrategyExample` 接口新增 `config_doc` 字段
     - _Requirements: 22.5, 20.3_
 
-- [ ] 12. API 层适配
-  - [ ] 12.1 更新 SectorScreenConfigIn 模型（screen.py）
+- [x] 12. API 层适配
+  - [x] 12.1 更新 SectorScreenConfigIn 模型（screen.py）
     - 移除 `sector_type` 字段或改为可选
     - _Requirements: 22.1_
-  - [ ] 12.2 更新 get_strategy_examples 端点返回 config_doc 字段
+  - [x] 12.2 更新 get_strategy_examples 端点返回 config_doc 字段
     - 在策略示例 API 响应中包含 `config_doc` 字段
     - _Requirements: 20.3_
-  - [ ] 12.3 更新因子注册表 API 支持新增类别查询
+  - [x] 12.3 更新因子注册表 API 支持新增类别查询
     - 确保 `get_factor_registry()` 和 `list_factors()` 能返回 CHIP、MARGIN、BOARD_HIT 类别
     - _Requirements: 18.3_
-  - [ ]* 12.4 编写 API 端点单元测试
+  - [x] 12.4 编写 API 端点单元测试
     - 测试因子注册表 API 返回新类别
     - 测试策略示例 API 返回 config_doc
     - _Requirements: 18.3, 20.3_
 
-- [ ] 13. 板块强势筛选器类型不变量验证
-  - [ ]* 13.1 编写板块强势筛选器类型不变量属性测试
+- [x] 13. 板块强势筛选器类型不变量验证
+  - [x] 13.1 编写板块强势筛选器类型不变量属性测试
     - **Property 16: 板块强势筛选器类型不变量**
     - **Validates: Requirements 3.1, 3.2**
 
-- [ ] 14. Final checkpoint - 确保所有测试通过
+- [x] 14. Final checkpoint - 确保所有测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

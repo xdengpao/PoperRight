@@ -8,8 +8,11 @@ Tests cover:
 - pe industry_relative metadata (Req 4.1)
 - sector_rank metadata (Req 6.1)
 - get_factor_meta and get_factors_by_category helpers
+- 新增 33 个因子元数据验证 (Req 12.1, 13.2, 14.2, 15.1, 16.2, 17.1)
+- 新增类别 CHIP、MARGIN、BOARD_HIT 验证 (Req 13.1, 14.1, 16.1)
 
-Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.2, 4.1, 6.1
+Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.2, 4.1, 6.1,
+              12.1, 13.1, 13.2, 14.1, 14.2, 15.1, 16.1, 16.2, 17.1, 18.1, 21.1
 """
 
 import pytest
@@ -341,11 +344,11 @@ class TestGetFactorsByCategory:
 
     def test_technical_factors_count(self):
         factors = get_factors_by_category(FactorCategory.TECHNICAL)
-        assert len(factors) == 7
+        assert len(factors) == 16
 
     def test_money_flow_factors_count(self):
         factors = get_factors_by_category(FactorCategory.MONEY_FLOW)
-        assert len(factors) == 4
+        assert len(factors) == 9
 
     def test_fundamental_factors_count(self):
         factors = get_factors_by_category(FactorCategory.FUNDAMENTAL)
@@ -353,7 +356,19 @@ class TestGetFactorsByCategory:
 
     def test_sector_factors_count(self):
         factors = get_factors_by_category(FactorCategory.SECTOR)
-        assert len(factors) == 2
+        assert len(factors) == 6
+
+    def test_chip_factors_count(self):
+        factors = get_factors_by_category(FactorCategory.CHIP)
+        assert len(factors) == 6
+
+    def test_margin_factors_count(self):
+        factors = get_factors_by_category(FactorCategory.MARGIN)
+        assert len(factors) == 4
+
+    def test_board_hit_factors_count(self):
+        factors = get_factors_by_category(FactorCategory.BOARD_HIT)
+        assert len(factors) == 5
 
     def test_all_returned_factors_match_category(self):
         for category in FactorCategory:
@@ -369,13 +384,19 @@ class TestGetFactorsByCategory:
     def test_technical_factors_include_expected_names(self):
         factors = get_factors_by_category(FactorCategory.TECHNICAL)
         names = {f.factor_name for f in factors}
-        expected = {"ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout"}
+        expected = {
+            "ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout",
+            "kdj_k", "kdj_d", "kdj_j", "cci", "wr", "trix", "bias", "psy", "obv_signal",
+        }
         assert names == expected
 
     def test_sector_factors_include_expected_names(self):
         factors = get_factors_by_category(FactorCategory.SECTOR)
         names = {f.factor_name for f in factors}
-        expected = {"sector_rank", "sector_trend"}
+        expected = {
+            "sector_rank", "sector_trend",
+            "index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio",
+        }
         assert names == expected
 
     def test_total_factors_across_all_categories(self):
@@ -383,3 +404,364 @@ class TestGetFactorsByCategory:
             len(get_factors_by_category(cat)) for cat in FactorCategory
         )
         assert total == len(FACTOR_REGISTRY)
+
+
+# ---------------------------------------------------------------------------
+# 全量 52 个因子完整性验证 (Req 18.1, 21.1)
+# ---------------------------------------------------------------------------
+
+
+class TestAllFactorsCompleteness:
+    """验证全部 52 个因子的元数据完整性"""
+
+    def test_total_factor_count(self):
+        """注册表应包含 52 个因子"""
+        assert len(FACTOR_REGISTRY) == 52
+
+    @pytest.mark.parametrize("factor_name", sorted(FACTOR_REGISTRY.keys()))
+    def test_factor_has_non_empty_label(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.label, f"因子 '{factor_name}' 的 label 为空"
+
+    @pytest.mark.parametrize("factor_name", sorted(FACTOR_REGISTRY.keys()))
+    def test_factor_has_valid_category(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert isinstance(meta.category, FactorCategory)
+
+    @pytest.mark.parametrize("factor_name", sorted(FACTOR_REGISTRY.keys()))
+    def test_factor_has_valid_threshold_type(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert isinstance(meta.threshold_type, ThresholdType)
+
+    @pytest.mark.parametrize("factor_name", sorted(FACTOR_REGISTRY.keys()))
+    def test_factor_has_non_empty_examples(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert len(meta.examples) >= 1, f"因子 '{factor_name}' 的 examples 为空"
+
+    @pytest.mark.parametrize("factor_name", sorted(FACTOR_REGISTRY.keys()))
+    def test_factor_name_matches_key(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.factor_name == factor_name
+
+
+# ---------------------------------------------------------------------------
+# 新增技术面专业因子验证 (Req 12.1)
+# ---------------------------------------------------------------------------
+
+
+class TestNewTechnicalFactors:
+    """验证 9 个新增技术面专业因子 (Req 12.1)"""
+
+    NEW_TECHNICAL_FACTORS = [
+        "kdj_k", "kdj_d", "kdj_j", "cci", "wr",
+        "trix", "bias", "psy", "obv_signal",
+    ]
+
+    @pytest.mark.parametrize("factor_name", NEW_TECHNICAL_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", NEW_TECHNICAL_FACTORS)
+    def test_factor_category_is_technical(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.TECHNICAL
+
+    def test_kdj_k_is_range_type(self):
+        meta = FACTOR_REGISTRY["kdj_k"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (20, 80)
+
+    def test_kdj_d_is_range_type(self):
+        meta = FACTOR_REGISTRY["kdj_d"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (20, 80)
+
+    def test_kdj_j_is_range_type(self):
+        meta = FACTOR_REGISTRY["kdj_j"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (0, 100)
+
+    def test_cci_is_absolute_type(self):
+        meta = FACTOR_REGISTRY["cci"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 100
+
+    def test_wr_is_range_type(self):
+        meta = FACTOR_REGISTRY["wr"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (0, 20)
+
+    def test_trix_is_boolean_type(self):
+        meta = FACTOR_REGISTRY["trix"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+    def test_bias_is_range_type(self):
+        meta = FACTOR_REGISTRY["bias"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (-5, 5)
+
+    def test_psy_is_range_type(self):
+        meta = FACTOR_REGISTRY["psy"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (40, 75)
+
+    def test_obv_signal_is_boolean_type(self):
+        meta = FACTOR_REGISTRY["obv_signal"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+
+# ---------------------------------------------------------------------------
+# 筹码面因子验证 (Req 13.1, 13.2)
+# ---------------------------------------------------------------------------
+
+
+class TestChipFactors:
+    """验证 6 个筹码面因子 (Req 13.1, 13.2)"""
+
+    CHIP_FACTORS = [
+        "chip_winner_rate", "chip_cost_5pct", "chip_cost_15pct",
+        "chip_cost_50pct", "chip_weight_avg", "chip_concentration",
+    ]
+
+    @pytest.mark.parametrize("factor_name", CHIP_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", CHIP_FACTORS)
+    def test_factor_category_is_chip(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.CHIP
+
+    def test_chip_winner_rate_is_percentile(self):
+        meta = FACTOR_REGISTRY["chip_winner_rate"]
+        assert meta.threshold_type == ThresholdType.PERCENTILE
+        assert meta.default_threshold == 50
+
+    def test_chip_cost_5pct_is_absolute(self):
+        meta = FACTOR_REGISTRY["chip_cost_5pct"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 10
+
+    def test_chip_weight_avg_is_industry_relative(self):
+        meta = FACTOR_REGISTRY["chip_weight_avg"]
+        assert meta.threshold_type == ThresholdType.INDUSTRY_RELATIVE
+        assert meta.default_threshold == 1.0
+
+    def test_chip_concentration_is_percentile(self):
+        meta = FACTOR_REGISTRY["chip_concentration"]
+        assert meta.threshold_type == ThresholdType.PERCENTILE
+        assert meta.default_threshold == 70
+
+
+# ---------------------------------------------------------------------------
+# 两融面因子验证 (Req 14.1, 14.2)
+# ---------------------------------------------------------------------------
+
+
+class TestMarginFactors:
+    """验证 4 个两融面因子 (Req 14.1, 14.2)"""
+
+    MARGIN_FACTORS = [
+        "rzye_change", "rqye_ratio", "rzrq_balance_trend", "margin_net_buy",
+    ]
+
+    @pytest.mark.parametrize("factor_name", MARGIN_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", MARGIN_FACTORS)
+    def test_factor_category_is_margin(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.MARGIN
+
+    def test_rzye_change_is_percentile(self):
+        meta = FACTOR_REGISTRY["rzye_change"]
+        assert meta.threshold_type == ThresholdType.PERCENTILE
+        assert meta.default_threshold == 70
+
+    def test_rqye_ratio_is_absolute(self):
+        meta = FACTOR_REGISTRY["rqye_ratio"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 5
+
+    def test_rzrq_balance_trend_is_boolean(self):
+        meta = FACTOR_REGISTRY["rzrq_balance_trend"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+    def test_margin_net_buy_is_percentile(self):
+        meta = FACTOR_REGISTRY["margin_net_buy"]
+        assert meta.threshold_type == ThresholdType.PERCENTILE
+        assert meta.default_threshold == 75
+
+
+# ---------------------------------------------------------------------------
+# 增强资金流因子验证 (Req 15.1)
+# ---------------------------------------------------------------------------
+
+
+class TestEnhancedMoneyFlowFactors:
+    """验证 5 个增强资金流因子 (Req 15.1)"""
+
+    ENHANCED_MF_FACTORS = [
+        "super_large_net_inflow", "large_net_inflow",
+        "small_net_outflow", "money_flow_strength", "net_inflow_rate",
+    ]
+
+    @pytest.mark.parametrize("factor_name", ENHANCED_MF_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", ENHANCED_MF_FACTORS)
+    def test_factor_category_is_money_flow(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.MONEY_FLOW
+
+    def test_super_large_net_inflow_is_percentile(self):
+        meta = FACTOR_REGISTRY["super_large_net_inflow"]
+        assert meta.threshold_type == ThresholdType.PERCENTILE
+        assert meta.default_threshold == 80
+
+    def test_small_net_outflow_is_boolean(self):
+        meta = FACTOR_REGISTRY["small_net_outflow"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+    def test_money_flow_strength_is_absolute(self):
+        meta = FACTOR_REGISTRY["money_flow_strength"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 70
+
+    def test_net_inflow_rate_is_absolute(self):
+        meta = FACTOR_REGISTRY["net_inflow_rate"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 5
+
+
+# ---------------------------------------------------------------------------
+# 打板面因子验证 (Req 16.1, 16.2)
+# ---------------------------------------------------------------------------
+
+
+class TestBoardHitFactors:
+    """验证 5 个打板面因子 (Req 16.1, 16.2)"""
+
+    BOARD_HIT_FACTORS = [
+        "limit_up_count", "limit_up_streak", "limit_up_open_pct",
+        "dragon_tiger_net_buy", "first_limit_up",
+    ]
+
+    @pytest.mark.parametrize("factor_name", BOARD_HIT_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", BOARD_HIT_FACTORS)
+    def test_factor_category_is_board_hit(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.BOARD_HIT
+
+    def test_limit_up_count_is_absolute(self):
+        meta = FACTOR_REGISTRY["limit_up_count"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 1
+
+    def test_limit_up_streak_is_absolute(self):
+        meta = FACTOR_REGISTRY["limit_up_streak"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 2
+
+    def test_limit_up_open_pct_is_absolute(self):
+        meta = FACTOR_REGISTRY["limit_up_open_pct"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 80
+
+    def test_dragon_tiger_net_buy_is_boolean(self):
+        meta = FACTOR_REGISTRY["dragon_tiger_net_buy"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+    def test_first_limit_up_is_boolean(self):
+        meta = FACTOR_REGISTRY["first_limit_up"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+
+# ---------------------------------------------------------------------------
+# 指数专题因子验证 (Req 17.1)
+# ---------------------------------------------------------------------------
+
+
+class TestIndexFactors:
+    """验证 4 个指数专题因子 (Req 17.1)"""
+
+    INDEX_FACTORS = [
+        "index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio",
+    ]
+
+    @pytest.mark.parametrize("factor_name", INDEX_FACTORS)
+    def test_factor_exists(self, factor_name):
+        assert factor_name in FACTOR_REGISTRY
+
+    @pytest.mark.parametrize("factor_name", INDEX_FACTORS)
+    def test_factor_category_is_sector(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.category == FactorCategory.SECTOR
+
+    def test_index_pe_is_range(self):
+        meta = FACTOR_REGISTRY["index_pe"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (10, 25)
+
+    def test_index_turnover_is_range(self):
+        meta = FACTOR_REGISTRY["index_turnover"]
+        assert meta.threshold_type == ThresholdType.RANGE
+        assert meta.default_range == (0.5, 3.0)
+
+    def test_index_ma_trend_is_boolean(self):
+        meta = FACTOR_REGISTRY["index_ma_trend"]
+        assert meta.threshold_type == ThresholdType.BOOLEAN
+
+    def test_index_vol_ratio_is_absolute(self):
+        meta = FACTOR_REGISTRY["index_vol_ratio"]
+        assert meta.threshold_type == ThresholdType.ABSOLUTE
+        assert meta.default_threshold == 1.0
+
+
+# ---------------------------------------------------------------------------
+# 新增类别的 get_factors_by_category 验证
+# ---------------------------------------------------------------------------
+
+
+class TestNewCategoryQueries:
+    """验证 get_factors_by_category 对新类别返回正确结果"""
+
+    def test_chip_category_returns_correct_factors(self):
+        factors = get_factors_by_category(FactorCategory.CHIP)
+        names = {f.factor_name for f in factors}
+        expected = {
+            "chip_winner_rate", "chip_cost_5pct", "chip_cost_15pct",
+            "chip_cost_50pct", "chip_weight_avg", "chip_concentration",
+        }
+        assert names == expected
+
+    def test_margin_category_returns_correct_factors(self):
+        factors = get_factors_by_category(FactorCategory.MARGIN)
+        names = {f.factor_name for f in factors}
+        expected = {
+            "rzye_change", "rqye_ratio", "rzrq_balance_trend", "margin_net_buy",
+        }
+        assert names == expected
+
+    def test_board_hit_category_returns_correct_factors(self):
+        factors = get_factors_by_category(FactorCategory.BOARD_HIT)
+        names = {f.factor_name for f in factors}
+        expected = {
+            "limit_up_count", "limit_up_streak", "limit_up_open_pct",
+            "dragon_tiger_net_buy", "first_limit_up",
+        }
+        assert names == expected
+
+    def test_money_flow_includes_enhanced_factors(self):
+        factors = get_factors_by_category(FactorCategory.MONEY_FLOW)
+        names = {f.factor_name for f in factors}
+        enhanced = {
+            "super_large_net_inflow", "large_net_inflow",
+            "small_net_outflow", "money_flow_strength", "net_inflow_rate",
+        }
+        assert enhanced.issubset(names)

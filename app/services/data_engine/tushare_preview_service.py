@@ -160,8 +160,8 @@ TIME_FIELD_MAP: dict[str, str] = {
     "adjustment_factor": "trade_date",
     # ── 基础数据 ──
     "trade_calendar": "cal_date",
-    "stock_st": "st_date",
-    "st_warning": "trade_date",
+    "stock_st": "trade_date",
+    "st_warning": "imp_date",
     "stk_premarket": "trade_date",
     "stock_hsgt": "in_date",
     "stock_namechange": "start_date",
@@ -973,14 +973,15 @@ class TusharePreviewService:
         )
 
         # 查询总记录数：优先尝试 reltuples 估算，大表跳过精确 COUNT(*)
-        # 仅在无额外过滤条件时使用 reltuples 估算
-        # （有 WHERE 条件时 reltuples 不能反映过滤后的行数）
-        has_filters = bool(
-            scope_filters
-            or (time_field and effective_data_time_start)
+        # scope_filters 是系统自动添加的作用域过滤（如 kline 表的 freq 过滤），
+        # 不算用户指定的过滤条件，仍可使用估算
+        has_user_filters = bool(
+            (time_field and effective_data_time_start)
             or (time_field and effective_data_time_end)
             or ts_code_filter
         )
+        # scope_only: 仅有系统作用域过滤，无用户过滤条件
+        scope_only = bool(scope_filters) and not has_user_filters
 
         count_sql = self._build_query_sql_pure(
             entry.target_table,
@@ -997,7 +998,7 @@ class TusharePreviewService:
             total: int = 0
             use_estimate = False
 
-            if not has_filters:
+            if not has_user_filters:
                 try:
                     reltuples_sql = (
                         "SELECT reltuples FROM pg_class "
@@ -1008,12 +1009,23 @@ class TusharePreviewService:
                         {"table_name": entry.target_table},
                     )
                     rel_row = rel_result.scalar()
-                    if rel_row is not None:
+                    if rel_row is not None and float(rel_row) > 0:
                         use_estimate, estimated_count = (
                             self._estimate_count_pure(float(rel_row))
                         )
                         if use_estimate:
                             total = estimated_count
+                    elif float(rel_row or 0) < 0:
+                        # TimescaleDB 超表 reltuples = -1，尝试 approximate_row_count
+                        try:
+                            arc_sql = f"SELECT approximate_row_count('{entry.target_table}')"
+                            arc_result = await session.execute(text(arc_sql))
+                            arc_val = arc_result.scalar()
+                            if arc_val is not None and int(arc_val) > 1_000_000:
+                                total = int(arc_val)
+                                use_estimate = True
+                        except Exception:
+                            pass
                 except Exception:
                     # reltuples 查询失败时回退到精确 COUNT
                     logger.debug(
@@ -1022,11 +1034,45 @@ class TusharePreviewService:
                     )
 
             # 若未使用估算，执行精确 COUNT(*)
+            # 对于大表（scope_only），先尝试快速估算避免全表扫描
             if not use_estimate:
-                count_result = await session.execute(
-                    text(count_sql), bind_params
-                )
-                total = count_result.scalar() or 0
+                if scope_only:
+                    # 共享大表（如 kline）：使用 reltuples 整表估算值
+                    # 精确 COUNT 可能耗时数十秒，直接使用估算
+                    try:
+                        reltuples_sql = (
+                            "SELECT reltuples FROM pg_class "
+                            "WHERE relname = :table_name"
+                        )
+                        rel_result = await session.execute(
+                            text(reltuples_sql),
+                            {"table_name": entry.target_table},
+                        )
+                        rel_row = rel_result.scalar()
+                        if rel_row is not None and float(rel_row) > 1_000_000:
+                            # 大表：使用估算值，标记为估算
+                            total = int(float(rel_row))
+                            use_estimate = True
+                            logger.debug(
+                                "大表 scope 过滤使用 reltuples 估算: table=%s total≈%d",
+                                entry.target_table, total,
+                            )
+                        else:
+                            # 小表：执行精确 COUNT
+                            count_result = await session.execute(
+                                text(count_sql), bind_params
+                            )
+                            total = count_result.scalar() or 0
+                    except Exception:
+                        count_result = await session.execute(
+                            text(count_sql), bind_params
+                        )
+                        total = count_result.scalar() or 0
+                else:
+                    count_result = await session.execute(
+                        text(count_sql), bind_params
+                    )
+                    total = count_result.scalar() or 0
 
             # 分页数据
             data_result = await session.execute(text(data_sql), bind_params)
@@ -1903,30 +1949,63 @@ class TusharePreviewService:
         where_clauses: list[str] = []
         params: dict[str, Any] = {}
 
-        # 判断时间字段类型：TIMESTAMPTZ（如 kline.time）vs VARCHAR（如 trade_date）
-        is_timestamp_field = time_field in ("time", "started_at", "finished_at", "updated_at")
+        # 查询时间字段的实际数据库列类型，以正确构造参数
+        async with SessionFactory() as session:
+            col_type_sql = (
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = :tbl AND column_name = :col"
+            )
+            col_type_result = await session.execute(
+                text(col_type_sql),
+                {"tbl": entry.target_table, "col": time_field},
+            )
+            col_type_row = col_type_result.scalar_one_or_none()
+            col_data_type = (col_type_row or "").lower()
+
+        # 根据实际列类型分类：timestamp / date / 其他（varchar 等）
+        is_timestamp_field = "timestamp" in col_data_type
+        is_date_field = col_data_type == "date"
+
+        # 检查时间字段是否全为 NULL（快照表场景），若是则忽略时间条件直接删除
+        async with SessionFactory() as session:
+            null_check_sql = (
+                f'SELECT COUNT(*) FROM {entry.target_table} '
+                f'WHERE "{time_field}" IS NOT NULL LIMIT 1'
+            )
+            non_null_count = (await session.execute(text(null_check_sql))).scalar() or 0
+        skip_time_filter = non_null_count == 0
 
         # NOTE: 时间范围条件先添加，作用域过滤条件在后面追加
 
-        if data_time_start:
+        if not skip_time_filter and data_time_start:
             normalized_start = data_time_start.replace("-", "")
+            where_clauses.append(f'"{time_field}" >= :start_time')
             if is_timestamp_field:
                 from datetime import datetime as dt
-                where_clauses.append(f'"{time_field}" >= :start_time')
                 params["start_time"] = dt(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]))
+            elif is_date_field:
+                from datetime import date as d
+                params["start_time"] = d(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]))
             else:
-                where_clauses.append(f'"{time_field}" >= :start_time')
                 params["start_time"] = normalized_start
 
-        if data_time_end:
+        if not skip_time_filter and data_time_end:
             normalized_end = data_time_end.replace("-", "")
+            where_clauses.append(f'"{time_field}" <= :end_time')
             if is_timestamp_field:
                 from datetime import datetime as dt
-                where_clauses.append(f'"{time_field}" <= :end_time')
                 params["end_time"] = dt(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]), 23, 59, 59)
+            elif is_date_field:
+                from datetime import date as d
+                params["end_time"] = d(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]))
             else:
-                where_clauses.append(f'"{time_field}" <= :end_time')
                 params["end_time"] = normalized_end
+
+        if skip_time_filter:
+            logger.info(
+                "时间字段 %s 全为 NULL，忽略时间范围条件 api=%s table=%s",
+                time_field, api_name, entry.target_table,
+            )
 
         # 共享表作用域过滤：确保仅删除属于当前 API 接口的数据
         scope_filters = self._build_scope_filter_pure(entry)
@@ -1935,7 +2014,10 @@ class TusharePreviewService:
             params.update(scope_params)
 
         where_sql = " AND ".join(where_clauses)
-        delete_sql = f'DELETE FROM {entry.target_table} WHERE {where_sql}'
+        if where_sql:
+            delete_sql = f'DELETE FROM {entry.target_table} WHERE {where_sql}'
+        else:
+            delete_sql = f'DELETE FROM {entry.target_table}'
 
         async with SessionFactory() as session:
             try:

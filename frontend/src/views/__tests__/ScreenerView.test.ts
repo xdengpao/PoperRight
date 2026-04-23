@@ -157,6 +157,7 @@ const MOCK_STRATEGY_EXAMPLES: StrategyExample[] = [
     weights: { ma_trend: 0.6, ma_support: 0.4 },
     enabled_modules: ['factor_editor', 'ma_trend'],
     sector_config: null,
+    config_doc: '',
   },
   {
     name: '概念板块热点龙头',
@@ -168,7 +169,8 @@ const MOCK_STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { sector_rank: 0.5, sector_trend: 0.5 },
     enabled_modules: ['factor_editor', 'ma_trend'],
-    sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 3, sector_top_n: 15 },
+    sector_config: { sector_data_source: 'DC', sector_period: 3, sector_top_n: 15 },
+    config_doc: '',
   },
 ]
 
@@ -841,7 +843,7 @@ describe('ScreenerView - sector selector rendering', () => {
                 { type: 'sector', factor_name: 'sector_rank', operator: '<=', threshold: 30, params: {} },
               ],
               weights: { sector_rank: 1.0 },
-              sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 5, sector_top_n: 30 },
+              sector_config: { sector_data_source: 'DC', sector_period: 5, sector_top_n: 30 },
             },
             is_active: true,
             created_at: '2024-01-01',
@@ -860,7 +862,7 @@ describe('ScreenerView - sector selector rendering', () => {
                 { type: 'sector', factor_name: 'sector_rank', operator: '<=', threshold: 30, params: {} },
               ],
               weights: { sector_rank: 1.0 },
-              sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 5, sector_top_n: 30 },
+              sector_config: { sector_data_source: 'DC', sector_period: 5, sector_top_n: 30 },
             },
             is_active: true,
             created_at: '2024-01-01',
@@ -880,17 +882,15 @@ describe('ScreenerView - sector selector rendering', () => {
     const sectorSelectors = wrapper.find('.sector-selectors')
     expect(sectorSelectors.exists()).toBe(true)
 
-    // Data source selector
+    // Data source selector with 5 options: DC, THS, TDX, TI, CI
     const dataSourceSelect = wrapper.find('[aria-label="数据来源"]')
     expect(dataSourceSelect.exists()).toBe(true)
     const dsOptions = dataSourceSelect.findAll('option')
-    expect(dsOptions.length).toBe(3) // DC, TI, TDX
+    expect(dsOptions.length).toBe(5)
 
-    // Sector type selector
+    // Sector type selector should no longer exist (removed per 需求 22.5)
     const sectorTypeSelect = wrapper.find('[aria-label="板块类型"]')
-    expect(sectorTypeSelect.exists()).toBe(true)
-    const stOptions = sectorTypeSelect.findAll('option')
-    expect(stOptions.length).toBe(4) // INDUSTRY, CONCEPT, REGION, STYLE
+    expect(sectorTypeSelect.exists()).toBe(false)
 
     // Period input
     const periodInput = wrapper.find('[aria-label="涨幅周期"]')
@@ -1152,7 +1152,6 @@ function setupSectorCoverageMocks(selectedSource = 'DC') {
             weights: { sector_rank: 1.0 },
             sector_config: {
               sector_data_source: selectedSource,
-              sector_type: 'CONCEPT',
               sector_period: 5,
               sector_top_n: 30,
             },
@@ -1176,7 +1175,6 @@ function setupSectorCoverageMocks(selectedSource = 'DC') {
             weights: { sector_rank: 1.0 },
             sector_config: {
               sector_data_source: selectedSource,
-              sector_type: 'CONCEPT',
               sector_period: 5,
               sector_top_n: 30,
             },
@@ -1216,7 +1214,7 @@ describe('ScreenerView - 板块数据源覆盖率显示', () => {
 
     // 获取所有选项
     const options = dataSourceSelect.findAll('option')
-    expect(options.length).toBe(3)
+    expect(options.length).toBe(5)
 
     // DC 选项应包含板块数和股票数
     const dcOption = options.find(o => o.element.value === 'DC')

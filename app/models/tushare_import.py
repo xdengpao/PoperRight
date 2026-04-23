@@ -93,7 +93,7 @@ Tushare 数据导入相关 ORM 模型（PostgreSQL）
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, Float, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy import text as sa_text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import TIMESTAMP as TIMESTAMPTZ
@@ -182,19 +182,23 @@ class NewShare(PGBase):
 
 
 class StockST(PGBase):
-    """ST 股票列表"""
+    """ST 股票列表（Tushare stock_st 接口）"""
 
     __tablename__ = "stock_st"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    is_st: Mapped[str | None] = mapped_column(String(5), nullable=True)
-    st_date: Mapped[str | None] = mapped_column(String(8), nullable=True)
-    st_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trade_date: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    type: Mapped[str | None] = mapped_column("type", String(20), nullable=True)
+    type_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("ts_code", "trade_date", name="uq_stock_st_ts_code_trade_date"),
+    )
 
     def __repr__(self) -> str:
-        return f"<StockST {self.ts_code} {self.name} is_st={self.is_st}>"
+        return f"<StockST {self.ts_code} {self.name} type={self.type}>"
 
 
 # ---------------------------------------------------------------------------
@@ -203,25 +207,25 @@ class StockST(PGBase):
 
 
 class StWarning(PGBase):
-    """ST 风险警示板"""
+    """ST 风险警示板（Tushare st 接口）"""
 
     __tablename__ = "st_warning"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
-    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    close: Mapped[float | None] = mapped_column(Float, nullable=True)
-    pct_chg: Mapped[float | None] = mapped_column(Float, nullable=True)
-    vol: Mapped[float | None] = mapped_column(Float, nullable=True)
-    amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pub_date: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    imp_date: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    st_tpye: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    st_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    st_explain: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("ts_code", "trade_date", name="uq_st_warning_ts_code_trade_date"),
+        UniqueConstraint("ts_code", "imp_date", name="uq_st_warning_ts_code_imp_date"),
     )
 
     def __repr__(self) -> str:
-        return f"<StWarning {self.ts_code} {self.trade_date}>"
+        return f"<StWarning {self.ts_code} {self.imp_date}>"
 
 
 # ---------------------------------------------------------------------------

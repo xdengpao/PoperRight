@@ -20,7 +20,6 @@ type ThresholdType = 'absolute' | 'percentile' | 'industry_relative' | 'z_score'
 
 interface SectorScreenConfig {
   sector_data_source: string
-  sector_type: string
   sector_period: number
   sector_top_n: number
 }
@@ -124,12 +123,10 @@ const THRESHOLD_TYPES: ThresholdType[] = [
   'absolute', 'percentile', 'industry_relative', 'z_score', 'boolean', 'range',
 ]
 
-const DATA_SOURCES = ['DC', 'TI', 'TDX']
-const SECTOR_TYPES = ['INDUSTRY', 'CONCEPT', 'REGION', 'STYLE']
+const DATA_SOURCES = ['DC', 'THS', 'TDX', 'TI', 'CI']
 
 const sectorScreenConfigArb: fc.Arbitrary<SectorScreenConfig> = fc.record({
   sector_data_source: fc.constantFrom(...DATA_SOURCES),
-  sector_type: fc.constantFrom(...SECTOR_TYPES),
   sector_period: fc.integer({ min: 1, max: 60 }),
   sector_top_n: fc.integer({ min: 1, max: 300 }),
 })
@@ -248,7 +245,7 @@ const STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { sector_rank: 0.4, sector_trend: 0.3, ma_trend: 0.3 },
     enabled_modules: ['ma_trend'],
-    sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 3, sector_top_n: 15 },
+    sector_config: { sector_data_source: 'DC', sector_period: 3, sector_top_n: 15 },
   },
   {
     name: '行业板块轮动策略',
@@ -262,7 +259,7 @@ const STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { sector_rank: 0.3, sector_trend: 0.2, macd: 0.3, rsi: 0.2 },
     enabled_modules: ['indicator_params'],
-    sector_config: { sector_data_source: 'TI', sector_type: 'INDUSTRY', sector_period: 5, sector_top_n: 20 },
+    sector_config: { sector_data_source: 'TI', sector_period: 5, sector_top_n: 20 },
   },
   {
     name: '形态突破放量买入',
@@ -319,7 +316,7 @@ const STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { sector_rank: 0.3, boll: 0.3, ma_trend: 0.2, volume_price: 0.2 },
     enabled_modules: ['indicator_params', 'ma_trend', 'volume_price'],
-    sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 5, sector_top_n: 25 },
+    sector_config: { sector_data_source: 'DC', sector_period: 5, sector_top_n: 25 },
   },
   {
     name: '主力资金驱动策略',
@@ -347,14 +344,14 @@ const STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { sector_rank: 0.3, sector_trend: 0.2, breakout: 0.3, turnover: 0.2 },
     enabled_modules: ['breakout', 'volume_price'],
-    sector_config: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 3, sector_top_n: 10 },
+    sector_config: { sector_data_source: 'DC', sector_period: 3, sector_top_n: 10 },
   },
   {
     name: '多数据源板块交叉验证',
     description: '使用通达信行业数据与东方财富概念数据交叉验证，筛选同时处于强势行业和热门概念的个股',
     factors: [
-      { factor_name: 'sector_rank', operator: '<=', threshold: 30, params: { sector_data_source: 'TDX', sector_type: 'INDUSTRY', sector_period: 5 } },
-      { factor_name: 'sector_rank', operator: '<=', threshold: 20, params: { sector_data_source: 'DC', sector_type: 'CONCEPT', sector_period: 3 } },
+      { factor_name: 'sector_rank', operator: '<=', threshold: 30, params: { sector_data_source: 'TDX', sector_period: 5 } },
+      { factor_name: 'sector_rank', operator: '<=', threshold: 20, params: { sector_data_source: 'DC', sector_period: 3 } },
       { factor_name: 'ma_trend', operator: '>=', threshold: 70, params: {} },
     ],
     logic: 'AND',
@@ -374,7 +371,7 @@ const STRATEGY_EXAMPLES: StrategyExample[] = [
     logic: 'AND',
     weights: { rsi: 0.3, sector_trend: 0.25, sector_rank: 0.25, ma_trend: 0.2 },
     enabled_modules: ['indicator_params', 'ma_trend'],
-    sector_config: { sector_data_source: 'TI', sector_type: 'INDUSTRY', sector_period: 5, sector_top_n: 30 },
+    sector_config: { sector_data_source: 'TI', sector_period: 5, sector_top_n: 30 },
   },
 ]
 
@@ -432,7 +429,6 @@ describe('Property 7 (frontend): StrategyConfig JSON round-trip', () => {
         // sector_config (the new field)
         expect(restored.sector_config).toBeDefined()
         expect(restored.sector_config.sector_data_source).toBe(normalized.sector_config.sector_data_source)
-        expect(restored.sector_config.sector_type).toBe(normalized.sector_config.sector_type)
         expect(restored.sector_config.sector_period).toBe(normalized.sector_config.sector_period)
         expect(restored.sector_config.sector_top_n).toBe(normalized.sector_config.sector_top_n)
       }),
@@ -578,7 +574,6 @@ describe('Property 9 (frontend): Strategy example config completeness', () => {
       // If example has sector factors AND sector_config is provided, verify it
       if (hasSectorFactor && example.sector_config) {
         expect(example.sector_config.sector_data_source).toBeDefined()
-        expect(example.sector_config.sector_type).toBeDefined()
         expect(example.sector_config.sector_period).toBeGreaterThan(0)
         expect(example.sector_config.sector_top_n).toBeGreaterThan(0)
       }

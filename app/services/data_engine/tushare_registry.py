@@ -214,7 +214,7 @@ register(ApiEntry(
     target_table="stock_st",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "st_date"],
+    conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
 ))
@@ -228,7 +228,7 @@ register(ApiEntry(
     target_table="st_warning",
     storage_engine=StorageEngine.PG,
     code_format=CodeFormat.NONE,
-    conflict_columns=["ts_code", "trade_date"],
+    conflict_columns=["ts_code", "imp_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,

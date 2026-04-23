@@ -70,23 +70,26 @@ class SectorStrengthFilter:
         self,
         ts_session: AsyncSession,
         pg_session: AsyncSession,
-        data_source: str,       # "DC" / "TI" / "TDX"
-        sector_type: str,       # "INDUSTRY" / "CONCEPT" / "REGION" / "STYLE"
+        data_source: str,       # "DC" / "TI" / "TDX" / "THS" / "CI"
+        sector_type: str | None = None,  # 可选过滤，None 时查询全部（需求 22.2）
         period: int = 5,        # 涨幅计算周期（天）
     ) -> list[SectorRankResult]:
         """
         计算板块涨跌幅排名。
 
-        1. 从 SectorKline 查询指定 data_source 和 sector_type 的最近 period 天行情
+        1. 从 SectorKline 查询指定 data_source 的最近 period 天行情
         2. 计算每个板块的累计涨跌幅
         3. 按累计涨跌幅降序排列，分配排名
         4. 判断每个板块是否多头趋势（短期均线 > 长期均线）
 
+        重构说明（需求 22.2）：sector_type 改为可选参数，为 None 时查询该
+        data_source 下所有板块，不按板块类型过滤。
+
         Args:
             ts_session: TimescaleDB 异步会话（SectorKline）
             pg_session: PostgreSQL 异步会话（SectorInfo）
-            data_source: 数据来源，如 "DC" / "TI" / "TDX"
-            sector_type: 板块类型，如 "INDUSTRY" / "CONCEPT"
+            data_source: 数据来源，如 "DC" / "TI" / "TDX" / "THS" / "CI"
+            sector_type: 板块类型（可选），为 None 时查询全部
             period: 涨幅计算周期（天），默认 5
 
         Returns:
@@ -183,7 +186,7 @@ class SectorStrengthFilter:
         self,
         pg_session: AsyncSession,
         data_source: str,
-        sector_type: str,
+        sector_type: str | None = None,
         trade_date: date | None = None,
     ) -> dict[str, list[str]]:
         """
@@ -191,10 +194,13 @@ class SectorStrengthFilter:
 
         从 SectorConstituent 查询最近交易日的成分股数据。
 
+        重构说明（需求 22.3）：sector_type 改为可选参数，为 None 时查询该
+        data_source 下所有成分股映射，不按板块类型过滤。
+
         Args:
             pg_session: PostgreSQL 异步会话
             data_source: 数据来源
-            sector_type: 板块类型
+            sector_type: 板块类型（可选），为 None 时查询全部
             trade_date: 交易日期（可选，默认查询最新）
 
         Returns:
@@ -212,14 +218,22 @@ class SectorStrengthFilter:
                     )
                     return {}
 
-            # 查询指定 sector_type 的板块代码
-            sector_codes_stmt = (
-                select(SectorInfo.sector_code)
-                .where(
-                    SectorInfo.data_source == data_source,
-                    SectorInfo.sector_type == sector_type,
+            # 查询指定 sector_type 的板块代码（需求 22.3：sector_type 为 None 时查询全部）
+            if sector_type is not None:
+                sector_codes_stmt = (
+                    select(SectorInfo.sector_code)
+                    .where(
+                        SectorInfo.data_source == data_source,
+                        SectorInfo.sector_type == sector_type,
+                    )
                 )
-            )
+            else:
+                sector_codes_stmt = (
+                    select(SectorInfo.sector_code)
+                    .where(
+                        SectorInfo.data_source == data_source,
+                    )
+                )
             sector_result = await pg_session.execute(sector_codes_stmt)
             valid_sector_codes = {row[0] for row in sector_result.all()}
 
@@ -472,16 +486,16 @@ class SectorStrengthFilter:
     async def _load_sector_info(
         pg_session: AsyncSession,
         data_source: str,
-        sector_type: str,
+        sector_type: str | None = None,
     ) -> dict[str, SectorInfo]:
-        """从 PostgreSQL 加载板块元数据，返回 sector_code → SectorInfo 映射。"""
-        stmt = (
-            select(SectorInfo)
-            .where(
-                SectorInfo.data_source == data_source,
-                SectorInfo.sector_type == sector_type,
-            )
-        )
+        """从 PostgreSQL 加载板块元数据，返回 sector_code → SectorInfo 映射。
+
+        重构说明（需求 22.2）：sector_type 改为可选参数，为 None 时查询该
+        data_source 下所有板块，不按板块类型过滤。
+        """
+        stmt = select(SectorInfo).where(SectorInfo.data_source == data_source)
+        if sector_type is not None:
+            stmt = stmt.where(SectorInfo.sector_type == sector_type)
         result = await pg_session.execute(stmt)
         infos = list(result.scalars().all())
         return {info.sector_code: info for info in infos}

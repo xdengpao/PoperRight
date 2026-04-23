@@ -37,7 +37,6 @@ export interface FactorMeta {
 
 export interface SectorScreenConfig {
   sector_data_source: string
-  sector_type: string
   sector_period: number
   sector_top_n: number
 }
@@ -63,6 +62,7 @@ export interface StrategyExample {
   weights: Record<string, number>
   enabled_modules: string[]
   sector_config: SectorScreenConfig | null
+  config_doc: string
 }
 
 export const useScreenerStore = defineStore('screener', () => {
