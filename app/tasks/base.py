@@ -122,9 +122,9 @@ class DataSyncTask(BaseTask):
     """数据同步任务基类（data_sync 队列）。"""
 
     task_module = "data_sync"
-    # 数据同步任务允许更长的超时时间
-    soft_time_limit = 120
-    time_limit = 300
+    # Tushare 导入任务遍历全市场股票，耗时可达数小时
+    soft_time_limit = 7200   # 2 小时
+    time_limit = 10800       # 3 小时
 
 
 class ScreeningTask(BaseTask):

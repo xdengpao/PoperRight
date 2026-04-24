@@ -800,7 +800,7 @@ class StkAlert(PGBase):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     ts_code: Mapped[str] = mapped_column(String(20), nullable=False)
-    trade_date: Mapped[str] = mapped_column(String(8), nullable=False)
+    trade_date: Mapped[str | None] = mapped_column(String(8), nullable=True)
     alert_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     alert_desc: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
