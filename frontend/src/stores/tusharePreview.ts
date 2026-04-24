@@ -29,6 +29,7 @@ export interface ApiRegistryItem {
   optional_params: string[]
   token_available: boolean
   vip_variant?: string | null
+  deletable?: boolean
 }
 
 /** 列信息 */

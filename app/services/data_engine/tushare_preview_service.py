@@ -1699,53 +1699,80 @@ class TusharePreviewService:
         has_data_time = bool(data_time_start or data_time_end)
 
         if not has_data_time and not has_import_time:
-            # 无任何时间范围：对无时间字段的快照表允许全表清空
-            SessionFactory = self._get_session(entry.storage_engine)
-            async with SessionFactory() as session:
-                col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
-                col_result = await session.execute(text(col_sql))
-                table_columns = list(col_result.keys()) if col_result.keys() else []
-            time_field = self._get_time_field_pure(entry.target_table, table_columns)
-            if time_field:
-                raise ValueError("请至少指定数据时间范围或导入时间范围")
-            # 无时间字段的快照表，直接清空
-            async with SessionFactory() as session:
-                try:
-                    result = await session.execute(
-                        text(f"DELETE FROM {entry.target_table}")
-                    )
-                    deleted_count = result.rowcount
-                    await session.commit()
-                except Exception:
-                    await session.rollback()
-                    raise
-            logger.info(
-                "清空快照表 api=%s table=%s deleted=%d",
-                api_name, entry.target_table, deleted_count,
-            )
-            return DeleteDataResponse(
-                deleted_count=deleted_count,
-                target_table=entry.target_table,
-                time_field=None,
-                data_time_start=None,
-                data_time_end=None,
-            )
+            # 无任何时间范围：全表清空
+            return await self._delete_all(api_name, entry)
 
         # 按导入时间范围删除路径
-        if has_import_time:
-            return await self._delete_by_import_time(
+        if has_import_time and not has_data_time:
+            result = await self._delete_by_import_time(
                 api_name,
                 entry,
                 import_time_start=import_time_start,
                 import_time_end=import_time_end,
             )
+            # 如果导入时间路径删除了 0 条，回退到全表清空
+            if result.deleted_count == 0:
+                return await self._delete_all(api_name, entry)
+            return result
 
-        # 按数据时间范围删除路径（原有逻辑）
+        # 按数据时间范围删除路径
         return await self._delete_by_data_time(
             api_name,
             entry,
             data_time_start=data_time_start,
             data_time_end=data_time_end,
+        )
+
+    async def _delete_all(
+        self, api_name: str, entry: ApiEntry,
+    ) -> DeleteDataResponse:
+        """全表清空。"""
+        SessionFactory = self._get_session(entry.storage_engine)
+        # 共享表需要加作用域过滤，只删当前 API 的数据
+        scope_filters = self._build_scope_filter_pure(entry)
+
+        # 共享表（多个 API 写入同一张表）无作用域过滤时，禁止全表清空
+        _SHARED_TABLES = {"kline", "sector_kline", "financial_statement", "sector_info",
+                          "sector_constituent", "top_holders", "stock_info"}
+        if not scope_filters and entry.target_table in _SHARED_TABLES:
+            # do_update 类型的接口只更新字段，不产生独立数据，无法单独删除
+            if entry.conflict_action == "do_update":
+                raise ValueError(
+                    f"接口 {api_name} 通过更新方式写入共享表 {entry.target_table}，"
+                    f"不产生独立数据行，无需单独删除"
+                )
+            raise ValueError(
+                f"接口 {api_name} 使用共享表 {entry.target_table}，"
+                f"请指定数据时间范围后再删除，避免误删其他接口数据"
+            )
+
+        if scope_filters:
+            where_parts = []
+            params: dict[str, Any] = {}
+            for clause, p in scope_filters:
+                where_parts.append(clause)
+                params.update(p)
+            sql = f"DELETE FROM {entry.target_table} WHERE {' AND '.join(where_parts)}"
+        else:
+            sql = f"DELETE FROM {entry.target_table}"
+            params = {}
+
+        async with SessionFactory() as session:
+            try:
+                result = await session.execute(text(sql), params)
+                deleted_count = result.rowcount
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+        logger.info("清空数据 api=%s table=%s deleted=%d", api_name, entry.target_table, deleted_count)
+        return DeleteDataResponse(
+            deleted_count=deleted_count,
+            target_table=entry.target_table,
+            time_field=None,
+            data_time_start=None,
+            data_time_end=None,
         )
 
     async def _delete_by_import_time(
@@ -1981,8 +2008,13 @@ class TusharePreviewService:
             normalized_start = data_time_start.replace("-", "")
             where_clauses.append(f'"{time_field}" >= :start_time')
             if is_timestamp_field:
-                from datetime import datetime as dt
-                params["start_time"] = dt(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]))
+                from datetime import datetime as dt, timezone, timedelta
+                # TIMESTAMPTZ 字段：扩展范围覆盖时区偏移（CST=UTC+8）
+                # 起始日期的前一天 16:00 UTC = 当天 00:00 CST
+                cst = timezone(timedelta(hours=8))
+                start_dt = dt(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]), tzinfo=cst)
+                # 再往前推一天以确保覆盖
+                params["start_time"] = start_dt - timedelta(days=1)
             elif is_date_field:
                 from datetime import date as d
                 params["start_time"] = d(int(normalized_start[:4]), int(normalized_start[4:6]), int(normalized_start[6:8]))
@@ -1993,8 +2025,11 @@ class TusharePreviewService:
             normalized_end = data_time_end.replace("-", "")
             where_clauses.append(f'"{time_field}" <= :end_time')
             if is_timestamp_field:
-                from datetime import datetime as dt
-                params["end_time"] = dt(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]), 23, 59, 59)
+                from datetime import datetime as dt, timezone, timedelta
+                cst = timezone(timedelta(hours=8))
+                end_dt = dt(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]), 23, 59, 59, tzinfo=cst)
+                # 往后推一天以确保覆盖时区偏移
+                params["end_time"] = end_dt + timedelta(days=1)
             elif is_date_field:
                 from datetime import date as d
                 params["end_time"] = d(int(normalized_end[:4]), int(normalized_end[4:6]), int(normalized_end[6:8]))

@@ -378,6 +378,7 @@ export interface ApiItem {
   required_params: string[]
   optional_params: string[]
   token_available: boolean
+  deletable?: boolean
 }
 
 /** 按子分类分组 */
@@ -701,9 +702,13 @@ async function startImport(api: ApiItem): Promise<void> {
   const params = buildImportParams(api)
   loadingApis.add(api.api_name)
   try {
-    const { data } = await apiClient.post<{ task_id: string; log_id: number; status: string }>(
+    const { data } = await apiClient.post<{ task_id: string; log_id: number; status: string; warning?: string }>(
       '/data/tushare/import', { api_name: api.api_name, params },
     )
+    // 显示依赖关系警告
+    if (data.warning) {
+      alert(data.warning)
+    }
     activeTasks.value.push({
       task_id: data.task_id, api_name: api.api_name,
       status: 'pending', total: 0, completed: 0, failed: 0, current_item: '',

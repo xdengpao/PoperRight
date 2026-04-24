@@ -1874,6 +1874,8 @@ async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
     # 根据 target_table 选择写入目标
     if entry.target_table == "sector_kline":
         await _write_to_sector_kline(rows, entry, freq, data_source)
+    elif entry.target_table == "adjustment_factor":
+        await _write_to_adjustment_factor(rows, entry)
     else:
         await _write_to_kline(rows, entry, freq)
 
@@ -1886,7 +1888,14 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
     sql = text("""
         INSERT INTO kline ("time", "symbol", "freq", "open", "high", "low", "close", "volume", "amount", "adj_type")
         VALUES (:time, :symbol, :freq, :open, :high, :low, :close, :volume, :amount, :adj_type)
-        ON CONFLICT ("time", "symbol", "freq", "adj_type") DO NOTHING
+        ON CONFLICT ("time", "symbol", "freq", "adj_type")
+        DO UPDATE SET
+            "open" = COALESCE(EXCLUDED."open", kline."open"),
+            "high" = COALESCE(EXCLUDED."high", kline."high"),
+            "low" = COALESCE(EXCLUDED."low", kline."low"),
+            "close" = COALESCE(EXCLUDED."close", kline."close"),
+            "volume" = COALESCE(EXCLUDED."volume", kline."volume"),
+            "amount" = COALESCE(EXCLUDED."amount", kline."amount")
     """)
 
     async with AsyncSessionTS() as session:
@@ -1932,6 +1941,57 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
             raise
 
 
+async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None:
+    """写入 adjustment_factor 表（复权因子）。"""
+    from datetime import date as date_type
+
+    from sqlalchemy import text
+
+    from app.core.database import AsyncSessionTS
+
+    sql = text("""
+        INSERT INTO adjustment_factor ("symbol", "trade_date", "adj_type", "adj_factor")
+        VALUES (:symbol, :trade_date, :adj_type, :adj_factor)
+        ON CONFLICT ("symbol", "trade_date", "adj_type") DO NOTHING
+    """)
+
+    async with AsyncSessionTS() as session:
+        try:
+            for row in rows:
+                # symbol：优先使用已转换的 symbol 字段，否则从 ts_code 提取
+                symbol = row.get("symbol", "")
+                if not symbol:
+                    ts_code = row.get("ts_code", "")
+                    if "." in str(ts_code):
+                        symbol = str(ts_code).split(".")[0]
+                    else:
+                        symbol = str(ts_code)
+                if not symbol:
+                    continue
+
+                # trade_date → date 对象
+                trade_date_str = str(row.get("trade_date", ""))
+                if len(trade_date_str) == 8 and trade_date_str.isdigit():
+                    trade_date = date_type(
+                        int(trade_date_str[:4]),
+                        int(trade_date_str[4:6]),
+                        int(trade_date_str[6:8]),
+                    )
+                else:
+                    continue
+
+                await session.execute(sql, {
+                    "symbol": symbol,
+                    "trade_date": trade_date,
+                    "adj_type": 0,
+                    "adj_factor": row.get("adj_factor"),
+                })
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+
+
 async def _write_to_sector_kline(
     rows: list[dict], entry: ApiEntry, freq: str, data_source: str,
 ) -> None:
@@ -1942,7 +2002,14 @@ async def _write_to_sector_kline(
     sql = text("""
         INSERT INTO sector_kline ("time", "sector_code", "data_source", "freq", "open", "high", "low", "close", "volume", "amount")
         VALUES (:time, :sector_code, :data_source, :freq, :open, :high, :low, :close, :volume, :amount)
-        ON CONFLICT ("time", "sector_code", "data_source", "freq") DO NOTHING
+        ON CONFLICT ("time", "sector_code", "data_source", "freq")
+        DO UPDATE SET
+            "open" = COALESCE(EXCLUDED."open", sector_kline."open"),
+            "high" = COALESCE(EXCLUDED."high", sector_kline."high"),
+            "low" = COALESCE(EXCLUDED."low", sector_kline."low"),
+            "close" = COALESCE(EXCLUDED."close", sector_kline."close"),
+            "volume" = COALESCE(EXCLUDED."volume", sector_kline."volume"),
+            "amount" = COALESCE(EXCLUDED."amount", sector_kline."amount")
     """)
 
     async with AsyncSessionTS() as session:

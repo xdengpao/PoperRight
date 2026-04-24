@@ -47,6 +47,7 @@ class TushareImportResponse(BaseModel):
     task_id: str
     log_id: int
     status: str
+    warning: str | None = None
 
 
 class TushareImportStatusResponse(BaseModel):
@@ -81,6 +82,7 @@ class ApiRegistryItem(BaseModel):
     optional_params: list[str]
     token_available: bool
     vip_variant: str | None = None
+    deletable: bool = True
 
 
 class TushareImportLogItem(BaseModel):
@@ -126,8 +128,16 @@ async def get_api_registry() -> list[ApiRegistryItem]:
         TokenTier.SPECIAL: bool(settings.tushare_token_special or settings.tushare_api_token),
     }
 
+    _SHARED_TABLES = {"kline", "sector_kline", "financial_statement", "sector_info",
+                      "sector_constituent", "top_holders", "stock_info"}
+
     items = []
     for entry in entries.values():
+        # 判断是否允许删除：do_update 写入共享表的接口不产生独立数据行
+        deletable = True
+        if entry.conflict_action == "do_update" and entry.target_table in _SHARED_TABLES:
+            deletable = False
+
         items.append(ApiRegistryItem(
             api_name=entry.api_name,
             label=entry.label,
@@ -138,6 +148,7 @@ async def get_api_registry() -> list[ApiRegistryItem]:
             optional_params=[p.value for p in entry.optional_params],
             token_available=token_available_map.get(entry.token_tier, False),
             vip_variant=entry.vip_variant,
+            deletable=deletable,
         ))
 
     return items

@@ -233,7 +233,8 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
-    date_chunk_days=60,
+    date_chunk_days=1,
+    extra_config={"use_trade_date_loop": True},
 ))
 
 register(ApiEntry(
@@ -322,6 +323,10 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    field_mappings=[
+        FieldMapping(source="o_code", target="old_code"),
+        FieldMapping(source="n_code", target="new_code"),
+    ],
 ))
 
 register(ApiEntry(
@@ -499,6 +504,9 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=150,
+    field_mappings=[
+        FieldMapping(source="trade_date", target="suspend_date"),
+    ],
 ))
 
 register(ApiEntry(
@@ -566,6 +574,12 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.MONTH_RANGE],
     rate_limit_group=RateLimitGroup.KLINE,
+    field_mappings=[
+        FieldMapping(source="total_buy_amt", target="buy_amount"),
+        FieldMapping(source="total_buy_vol", target="buy_volume"),
+        FieldMapping(source="total_sell_amt", target="sell_amount"),
+        FieldMapping(source="total_sell_vol", target="sell_volume"),
+    ],
 ))
 
 register(ApiEntry(
@@ -584,6 +598,7 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={"freq": "1d"},
 ))
 
 
@@ -994,6 +1009,9 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
     date_chunk_days=300,
+    field_mappings=[
+        FieldMapping(source="type", target="alert_type"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1145,6 +1163,9 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    field_mappings=[
+        FieldMapping(source="after_share", target="after_vol"),
+    ],
 ))
 
 
@@ -1224,6 +1245,25 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    field_mappings=[
+        FieldMapping(source="macd_dif_bfq", target="macd_dif"),
+        FieldMapping(source="macd_dea_bfq", target="macd_dea"),
+        FieldMapping(source="macd_bfq", target="macd"),
+        FieldMapping(source="kdj_k_bfq", target="kdj_k"),
+        FieldMapping(source="kdj_d_bfq", target="kdj_d"),
+        FieldMapping(source="kdj_bfq", target="kdj_j"),
+        FieldMapping(source="rsi_bfq_6", target="rsi_6"),
+        FieldMapping(source="rsi_bfq_12", target="rsi_12"),
+        FieldMapping(source="rsi_bfq_24", target="rsi_24"),
+        FieldMapping(source="boll_upper_bfq", target="boll_upper"),
+        FieldMapping(source="boll_mid_bfq", target="boll_mid"),
+        FieldMapping(source="boll_lower_bfq", target="boll_lower"),
+        FieldMapping(source="cci_bfq", target="cci"),
+        FieldMapping(source="wr_bfq", target="wr"),
+        FieldMapping(source="dmi_pdi_bfq", target="dmi"),
+        FieldMapping(source="trix_bfq", target="trix"),
+        FieldMapping(source="bias1_bfq", target="bias"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1242,6 +1282,10 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
     date_chunk_days=15,
+    field_mappings=[
+        FieldMapping(source="name", target="participant_name"),
+        FieldMapping(source="shareholding", target="hold_amount"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1352,6 +1396,11 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     batch_by_date=True,
     date_chunk_days=30,
+    field_mappings=[
+        FieldMapping(source="close", target="a_close"),
+        FieldMapping(source="hk_close", target="h_close"),
+        FieldMapping(source="ah_premium", target="ah_ratio"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1369,6 +1418,11 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.TIER_80,
     batch_by_date=True,
     date_chunk_days=60,
+    field_mappings=[
+        FieldMapping(source="rece_org", target="fund_name"),
+        FieldMapping(source="org_type", target="surv_type"),
+        FieldMapping(source="fund_visitors", target="participants"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1496,6 +1550,9 @@ register(ApiEntry(
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
     batch_by_code=True,
+    field_mappings=[
+        FieldMapping(source="net_amount", target="net_mf_amount"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1513,6 +1570,9 @@ register(ApiEntry(
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
     batch_by_code=True,
+    field_mappings=[
+        FieldMapping(source="net_amount", target="net_mf_amount"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1531,6 +1591,10 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=7,
     extra_config={"max_rows": 3000, "estimated_daily_rows": 300},
+    field_mappings=[
+        FieldMapping(source="net_buy_amount", target="buy_amount"),
+        FieldMapping(source="net_sell_amount", target="sell_amount"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1549,7 +1613,11 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=75,
     extra_config={"inject_fields": {"data_source": "THS"}, "max_rows": 3000, "estimated_daily_rows": 30},
-    field_mappings=[FieldMapping(source="name", target="industry_name")],
+    field_mappings=[
+        FieldMapping(source="industry", target="industry_name"),
+        FieldMapping(source="net_buy_amount", target="buy_amount"),
+        FieldMapping(source="net_sell_amount", target="sell_amount"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1586,6 +1654,12 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.MONEY_FLOW,
     batch_by_date=True,
     date_chunk_days=365,
+    field_mappings=[
+        FieldMapping(source="net_amount", target="net_mf_amount"),
+        FieldMapping(source="net_amount_rate", target="net_mf_amount_rate"),
+        FieldMapping(source="close_sh", target="close"),
+        FieldMapping(source="pct_change_sh", target="pct_change"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1736,6 +1810,7 @@ register(ApiEntry(
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="type", target="sector_type"),
+        FieldMapping(source="count", target="constituent_count"),
     ],
 ))
 
@@ -1869,6 +1944,10 @@ register(ApiEntry(
     conflict_columns=["hm_name"],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.LIMIT_UP,
+    field_mappings=[
+        FieldMapping(source="name", target="hm_name"),
+        FieldMapping(source="desc", target="description"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1904,6 +1983,11 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
+    field_mappings=[
+        FieldMapping(source="ts_name", target="name"),
+        FieldMapping(source="hot", target="hot_value"),
+        FieldMapping(source="pct_change", target="pct_chg"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1921,6 +2005,11 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_date=True,
     date_chunk_days=30,
+    field_mappings=[
+        FieldMapping(source="ts_name", target="name"),
+        FieldMapping(source="hot", target="hot_value"),
+        FieldMapping(source="pct_change", target="pct_chg"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1940,6 +2029,7 @@ register(ApiEntry(
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="type", target="sector_type"),
+        FieldMapping(source="idx_count", target="constituent_count"),
     ],
 ))
 
@@ -2032,6 +2122,10 @@ register(ApiEntry(
     conflict_columns=[],
     conflict_action="do_nothing",
     rate_limit_group=RateLimitGroup.LIMIT_UP,
+    field_mappings=[
+        FieldMapping(source="theme_code", target="concept_code"),
+        FieldMapping(source="name", target="concept_name"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2236,6 +2330,12 @@ register(ApiEntry(
     update_columns=["sector_name", "sector_type"],
     rate_limit_group=RateLimitGroup.KLINE,
     extra_config={"data_source": "TI"},
+    field_mappings=[
+        FieldMapping(source="index_code", target="sector_code"),
+        FieldMapping(source="industry_name", target="name"),
+        FieldMapping(source="level", target="sector_type"),
+        FieldMapping(source="src", target="data_source"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2252,6 +2352,11 @@ register(ApiEntry(
     optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     extra_config={"data_source": "TI", "max_rows": 2000},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="symbol"),
+        FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="l1_code", target="sector_code"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2306,6 +2411,11 @@ register(ApiEntry(
     optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
     extra_config={"data_source": "CI", "max_rows": 5000},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="symbol"),
+        FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="l1_code", target="sector_code"),
+    ],
 ))
 
 register(ApiEntry(

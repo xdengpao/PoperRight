@@ -140,9 +140,9 @@
                 >{{ store.integrityLoading ? '校验中...' : '完整性校验' }}</button>
                 <button
                   class="btn btn-danger"
-                  :disabled="!store.selectedApiName || store.deleteLoading"
+                  :disabled="!store.selectedApiName || store.deleteLoading || !currentApiDeletable"
                   @click="handleDeleteData"
-                  title="删除数据时间范围或导入时间范围内的记录"
+                  :title="currentApiDeletable ? '删除数据' : '该接口通过更新方式写入共享表，不支持删除'"
                 >{{ store.deleteLoading ? '删除中...' : '删除' }}</button>
               </div>
             </div>
@@ -376,6 +376,13 @@ const categoryGroups = computed(() => groupRegistryByCategory(store.registry))
 /** 当前选中接口是否有时间字段 */
 const hasTimeField = computed(() => {
   return store.previewData?.time_field != null
+})
+
+/** 当前选中接口是否允许删除 */
+const currentApiDeletable = computed(() => {
+  if (!store.selectedApiName) return false
+  const api = store.registry.find(r => r.api_name === store.selectedApiName)
+  return api?.deletable !== false
 })
 
 /** 是否显示图表 */

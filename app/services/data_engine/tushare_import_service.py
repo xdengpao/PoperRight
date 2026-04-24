@@ -83,6 +83,42 @@ class TushareImportService:
             f"Token 未配置：{tier.value} 级别 Token 和默认 tushare_api_token 均为空"
         )
 
+    async def _check_dependency(self, entry: ApiEntry) -> str | None:
+        """检查导入依赖关系，返回警告信息或 None。
+
+        - batch_by_code + STOCK_SYMBOL/NONE 代码格式：依赖 stock_info 表（需先导入 stock_basic）
+        - batch_by_code + INDEX_CODE 代码格式：依赖 index_info 表（需先导入 index_basic）
+        """
+        from sqlalchemy import text
+
+        from app.core.database import AsyncSessionPG
+
+        if not entry.batch_by_code:
+            return None
+
+        if entry.code_format == CodeFormat.INDEX_CODE:
+            async with AsyncSessionPG() as session:
+                result = await session.execute(text("SELECT COUNT(*) FROM index_info"))
+                count = result.scalar() or 0
+            if count == 0:
+                return (
+                    f"⚠ 接口 {entry.api_name} 需要按指数代码分批导入，"
+                    f"但 index_info 表为空（0 条记录）。"
+                    f"请先导入 index_basic（指数基本信息）再导入此接口，否则将导入 0 条数据。"
+                )
+        else:
+            async with AsyncSessionPG() as session:
+                result = await session.execute(text("SELECT COUNT(*) FROM stock_info"))
+                count = result.scalar() or 0
+            if count == 0:
+                return (
+                    f"⚠ 接口 {entry.api_name} 需要按股票代码分批导入，"
+                    f"但 stock_info 表为空（0 条记录）。"
+                    f"请先导入 stock_basic（股票基础列表）再导入此接口，否则将导入 0 条数据。"
+                )
+
+        return None
+
     def _validate_params(self, entry: ApiEntry, params: dict) -> dict:
         """校验并规范化导入参数。
 
@@ -245,6 +281,9 @@ class TushareImportService:
         # 2. 参数校验
         self._validate_params(entry, params)
 
+        # 2.5 依赖关系检查：batch_by_code 需要 stock_info/index_info 有数据
+        dep_warning = await self._check_dependency(entry)
+
         # 3. Token 路由
         token = self._resolve_token(entry.token_tier)
 
@@ -305,11 +344,14 @@ class TushareImportService:
         )
 
         # 8. 返回结果
-        return {
+        result = {
             "task_id": task_id,
             "log_id": log_id,
             "status": "pending",
         }
+        if dep_warning:
+            result["warning"] = dep_warning
+        return result
 
     # ------------------------------------------------------------------
     # 公开接口：停止导入
