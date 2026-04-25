@@ -1851,11 +1851,12 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
+    code_format=CodeFormat.STOCK_SYMBOL,  # 确保 symbol 为 6 位数字
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.TIER_60,
+    batch_by_sector=True,  # 按板块代码遍历导入
     extra_config={"inject_fields": {"data_source": "THS", "trade_date": "19000101"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -1892,12 +1893,13 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
+    code_format=CodeFormat.STOCK_SYMBOL,  # 确保 symbol 为 6 位数字
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
-    extra_config={"inject_fields": {"data_source": "DC"}},
+    batch_by_sector=True,  # 按板块代码遍历导入
+    extra_config={"inject_fields": {"data_source": "DC", "trade_date": "19000101"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
@@ -2057,12 +2059,13 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.NONE,
+    code_format=CodeFormat.STOCK_SYMBOL,
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
-    extra_config={"inject_fields": {"data_source": "TDX"}},
+    batch_by_sector=True,
+    extra_config={"inject_fields": {"data_source": "TDX", "trade_date": "19000101"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),

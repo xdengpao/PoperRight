@@ -371,6 +371,10 @@ async def _process_import(
             result = await _process_batched_index(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
+        elif strategy == "by_sector":
+            result = await _process_batched_by_sector(
+                entry, adapter, params, task_id, log_id, rate_delay,
+            )
         elif strategy == "by_date":
             result = await _process_batched_by_date(
                 entry, adapter, params, task_id, log_id, rate_delay,
