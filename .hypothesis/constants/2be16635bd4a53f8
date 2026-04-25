@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/tasks/data_sync.py
-# hypothesis_version: 6.151.9
-
-['000001.SZ', '000002.SZ', '1m', '600000.SH', '600519.SH', 'data_sync', 'errors', 'fetched', 'inserted', 'reason', 'skipped', 'status', 'success', 'symbol', 'total', 'trade_date', '大盘概览同步失败 date=%s: %s', '大盘概览数据同步完成 date=%s', '开始基本面数据同步，共 %d 只股票', '开始实时行情同步，共 %d 只股票', '非交易时段，跳过实时行情同步']

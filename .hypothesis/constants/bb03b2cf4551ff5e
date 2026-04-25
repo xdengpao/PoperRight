@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/tasks/screening.py
-# hypothesis_version: 6.151.9
-
-['EOD', 'REALTIME', 'passed', 'reason', 'screen_time', 'screen_type', 'screening', 'skipped', 'status', 'success', 'total_screened', '实时选股完成，筛选出 %d 只标的', '开始盘中实时选股', '开始盘后选股任务', '盘后选股完成，筛选出 %d 只标的', '非交易时段，跳过实时选股']

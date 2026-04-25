@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/data_engine/__init__.py
-# hypothesis_version: 6.151.9
-
-['AdjustmentCalculator', 'ExRightsRecord', 'FundamentalAdapter', 'FundamentalsData', 'FundamentalsSnapshot', 'KlineRepository', 'MarketDataClient', 'MarketOverview', 'MoneyFlowAdapter', 'MoneyFlowData', 'SectorData', 'StockBasicInfo', 'StockFilter', 'interpolate_missing', 'normalize_minmax', 'normalize_zscore', 'remove_outliers']

@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/models/strategy.py
-# hypothesis_version: 6.151.9
-
-[100, 'NOW()', 'gen_random_uuid()', 'screen_result', 'strategy_template', 'strategy_template.id']

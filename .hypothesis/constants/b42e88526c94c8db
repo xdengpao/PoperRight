@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/core/config.py
-# hypothesis_version: 6.151.9
-
-[0.08, 0.15, 0.3, 365, '.env', '09:25', '127.0.0.1', '15:00', '15:30', 'HS256', 'app_allowed_hosts', 'before', 'development', 'ignore', 'localhost', 'production', 'staging', 'utf-8']

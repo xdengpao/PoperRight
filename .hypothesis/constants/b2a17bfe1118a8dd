@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/core/celery_app.py
-# hypothesis_version: 6.151.9
-
-[10.0, 300, 600, 1000, 86400, '1-5', 'Asia/Shanghai', 'a_share_quant', 'app.tasks.backtest', 'app.tasks.backtest.*', 'app.tasks.data_sync', 'app.tasks.review', 'app.tasks.review.*', 'app.tasks.screening', 'backtest', 'daily-review-1545', 'data_sync', 'eod-screening-1530', 'exchange', 'json', 'money-flow-sync-1530', 'options', 'queue', 'realtime-market-sync', 'review', 'routing_key', 'schedule', 'screening', 'task']

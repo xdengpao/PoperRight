@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/screener/strategy_engine.py
-# hypothesis_version: 6.151.9
-
-[0.0, 1.0, '!=', '<', '<=', '==', '>', '>=', 'AND', 'boll', 'breakout', 'config', 'dma', 'fundamental', 'large_order', 'ma_trend', 'macd', 'market_cap', 'money_flow', 'name', 'pb', 'pe', 'profit_growth', 'roe', 'rsi', 'sector', 'sector_rank', 'sector_trend', 'technical', 'turnover', 'volume_price', '导入策略']

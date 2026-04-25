@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/core/schemas.py
-# hypothesis_version: 6.151.9
-
-[0.0, 0.15, 0.3, 120, 250, '0.0003', '0.001', '0.0013', '1000000', 'AND', 'BREAKOUT_BUY', 'BUY', 'CANCELLED', 'CAUTION', 'CONDITION', 'DANGER', 'EOD', 'FILLED', 'HIGH', 'LIMIT', 'LIVE', 'LOW', 'MARKET', 'MARKET_RISK', 'MEDIUM', 'NORMAL', 'OR', 'PAPER', 'PENDING', 'PRICE_THRESHOLD', 'Position', 'REALTIME', 'REJECTED', 'SCREEN_RESULT', 'SELL', 'STOP_LOSS', 'SYSTEM', 'StrategyConfig', 'TAKE_PROFIT', 'TRAILING_STOP', 'factor_name', 'factors', 'indicator_params', 'logic', 'ma_periods', 'operator', 'params', 'threshold', 'weights']

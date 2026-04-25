@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/screener/volume_price.py
-# hypothesis_version: 6.151.9
-
-[-20.0, -2.0, 0.0, 0.98, 1.0, 2.0, 3.0, 15.0, 30.0, 50.0, 100.0, 1000.0, 5000.0, 'HIGH_STAGNATION', 'NONE', 'PRICE_DOWN_VOL_UP', 'PRICE_UP_VOL_DOWN']

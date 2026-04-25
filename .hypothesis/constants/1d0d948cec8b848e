@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/models/user.py
-# hypothesis_version: 6.151.9
-
-[100, 128, 200, 'NOW()', 'app_user', 'audit_log', 'gen_random_uuid()']

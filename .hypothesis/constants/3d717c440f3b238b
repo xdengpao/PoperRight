@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/admin_module.py
-# hypothesis_version: 6.151.9
-
-[365, 'ADMIN', 'DEGRADED', 'ERROR', 'HEALTHY', 'MODULE_ERROR', 'OK', 'READONLY', 'TRADER', 'UNKNOWN', 'action', 'backtest:view', 'backup_id', 'created_at', 'data', 'detail', 'error_count', 'is_active', 'last_check', 'log:view', 'market:view', 'message', 'module', 'modules', 'order:cancel', 'order:submit', 'overall', 'password_hash', 'position:modify', 'position:view', 'review:view', 'role', 'screen:view', 'status', 'system:backup', 'system:config', 'system:restore', 'target', 'time', 'timestamp', 'total_modules', 'type', 'user:assign_role', 'user:create', 'user:delete', 'user_id', 'username']

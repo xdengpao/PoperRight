@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/models/kline.py
-# hypothesis_version: 6.151.9
-
-['KlineBar', 'amount', 'close', 'freq', 'high', 'kline', 'limit_down', 'limit_up', 'low', 'open', 'symbol', 'time', 'turnover', 'vol_ratio']

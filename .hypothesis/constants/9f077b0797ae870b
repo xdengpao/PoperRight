@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/data_engine/fundamental_adapter.py
-# hypothesis_version: 6.151.9
-
-[30.0, '/', '/forecast', '/fundamental', '/shareholder', 'Authorization', 'FundamentalAdapter', 'board', 'data', 'forecast_type', 'is_delisted', 'is_st', 'list_date', 'major_holder_ratio', 'market', 'market_cap', 'name', 'net_profit_yoy', 'pb', 'pe_ttm', 'pledge_ratio', 'revenue_yoy', 'roe', 'symbol', 'updated_at', '基本面 API 网络错误 %s: %s', '拉取业绩预告 symbol=%s', '拉取基本面数据 symbol=%s', '拉取股东数据 symbol=%s', '获取业绩预告完成 symbol=%s', '获取股东数据完成 symbol=%s']

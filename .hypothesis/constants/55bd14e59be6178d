@@ -1,4 +1,0 @@
-# file: /Users/poper/src/PoperRight/app/services/trade_executor.py
-# hypothesis_version: 6.151.9
-
-[0.0, 0.08, 0.15, '0.01', 'Position', 'ScreenItem', 'TREND_BREAKDOWN', 'alert', 'current_price', 'direction', 'ma20', 'message', 'order not found', 'order_id', 'order_type', 'price', 'quantity', 'status', 'submitted_at', 'success', 'symbol', 'time', 'utf-8']
