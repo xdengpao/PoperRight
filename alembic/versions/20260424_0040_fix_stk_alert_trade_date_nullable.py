@@ -1,6 +1,7 @@
 """stk_alert.trade_date 改为 nullable
 
 Tushare stk_alert 接口返回数据不包含 trade_date 字段。
+幂等执行：DROP NOT NULL 在已经 nullable 时不会报错。
 
 Revision ID: 20260424_0040
 """

@@ -258,6 +258,7 @@ def determine_batch_strategy(
     纯函数，不依赖外部状态，便于属性测试验证路由优先级。
 
     优先级路由：
+    0. batch_by_sector → "by_sector"（按板块代码遍历，优先级最高）
     1. batch_by_code → "by_code"（若同时 batch_by_date 且有日期范围 → "by_code_and_date"）
     2. INDEX_CODE 且未指定 ts_code → "by_index"
     3. batch_by_date 且有日期范围 → "by_date"
@@ -270,12 +271,16 @@ def determine_batch_strategy(
 
     Returns:
         策略标识字符串：
-        "by_code", "by_code_and_date", "by_index", "by_date", "by_date_fallback", "single"
+        "by_sector", "by_code", "by_code_and_date", "by_index", "by_date", "by_date_fallback", "single"
 
-    对应需求：4.1, 4.2
+    对应需求：4.1, 4.2, sector-member-batch-import 需求 1.1
     """
     has_date_params = bool(params.get("start_date") and params.get("end_date"))
     has_ts_code = bool(params.get("ts_code"))
+
+    # 优先级 0（新增）：batch_by_sector — 按板块代码遍历，优先级高于所有其他策略
+    if entry.batch_by_sector:
+        return "by_sector"
 
     # 优先级 1：batch_by_code
     use_batch_code = entry.batch_by_code
@@ -1449,6 +1454,181 @@ async def _process_batched_index(
     return {"status": "completed", "record_count": total_records}
 
 
+async def _process_batched_by_sector(
+    entry: ApiEntry,
+    adapter: TushareAdapter,
+    params: dict,
+    task_id: str,
+    log_id: int,
+    rate_delay: float,
+) -> dict:
+    """按板块代码遍历模式：从 sector_info 获取所有板块代码，逐个调用 API。
+
+    流程：
+    1. 从 inject_fields 获取 data_source
+    2. 查询 sector_info WHERE data_source=:ds，获取 (sector_code, name) 列表
+    3. 遍历每个板块代码：
+       a. 检查停止信号
+       b. 调用 Tushare API（ts_code=sector_code）
+       c. inject_fields + 字段映射 + _convert_codes + 写入 DB
+       d. 更新进度（含板块名称）
+       e. 频率限制延迟
+    4. 汇总结果（成功/失败/空数据计数）
+
+    对应需求：sector-member-batch-import 需求 1.2-1.7, 6.1-6.4
+    """
+    from sqlalchemy import select
+
+    from app.core.database import AsyncSessionPG
+    from app.models.sector import SectorInfo
+
+    # 从 inject_fields 获取 data_source
+    inject_fields = entry.extra_config.get("inject_fields", {})
+    ds = inject_fields.get("data_source")
+    if not ds:
+        logger.error("batch_by_sector 模式缺少 inject_fields.data_source, api=%s", entry.api_name)
+        await _finalize_log(log_id, "failed", 0, "batch_by_sector 模式缺少 inject_fields.data_source")
+        return {"status": "failed", "error": "缺少 data_source", "record_count": 0}
+
+    # 查询 sector_info 获取板块代码列表
+    async with AsyncSessionPG() as session:
+        stmt = (
+            select(SectorInfo.sector_code, SectorInfo.name)
+            .where(SectorInfo.data_source == ds)
+            .order_by(SectorInfo.sector_code)
+        )
+        result = await session.execute(stmt)
+        sector_codes = [(r.sector_code, r.name) for r in result.all()]
+
+    # 空列表检查（前置依赖提示）
+    if not sector_codes:
+        logger.warning(
+            "batch_by_sector 模式下 sector_info 表中无 data_source=%s 的板块，"
+            "请先导入板块信息（如 ths_index/dc_index/tdx_index），api=%s",
+            ds, entry.api_name,
+        )
+        return {"status": "completed", "record_count": 0, "batch_stats": {
+            "total_sectors": 0, "success_sectors": 0, "failed_sectors": 0, "empty_sectors": 0,
+        }}
+
+    total = len(sector_codes)
+    completed_count = 0
+    total_records = 0
+    success_count = 0
+    failed_count = 0
+    empty_count = 0
+
+    # 截断检测阈值
+    max_rows = entry.extra_config.get("max_rows", _TUSHARE_MAX_ROWS)
+
+    await _update_progress(task_id, status="running", total=total, completed=0,
+                           batch_mode="by_sector")
+
+    for idx, (sector_code, sector_name) in enumerate(sector_codes):
+        # 检查停止信号
+        if await _check_stop_signal(task_id):
+            logger.info("Tushare 导入收到停止信号 task_id=%s, 已完成 %d/%d 板块", task_id, idx, total)
+            return {
+                "status": "stopped",
+                "record_count": total_records,
+                "batch_stats": {
+                    "total_sectors": total,
+                    "success_sectors": success_count,
+                    "failed_sectors": failed_count,
+                    "empty_sectors": empty_count,
+                },
+            }
+
+        # 构建 API 调用参数
+        call_params = {**params, "ts_code": sector_code}
+
+        try:
+            data = await _call_api_with_retry(adapter, entry.api_name, call_params, entry)
+            rows = TushareAdapter._rows_from_data(data)
+
+            if not rows:
+                # API 返回空数据，跳过，不计为失败
+                empty_count += 1
+                logger.debug("板块 %s (%s) 无成分股数据，跳过", sector_code, sector_name)
+            else:
+                # 截断检测
+                if len(rows) >= max_rows:
+                    logger.warning(
+                        "板块 %s (%s) 返回 %d 行（可能被截断），api=%s, max_rows=%d",
+                        sector_code, sector_name, len(rows), entry.api_name, max_rows,
+                    )
+
+                # inject_fields
+                if inject_fields:
+                    for row in rows:
+                        row.update(inject_fields)
+
+                # 字段映射 + 代码转换
+                mapped_rows = _apply_field_mappings(rows, entry)
+                converted_rows = _convert_codes(mapped_rows, entry)
+
+                try:
+                    if entry.storage_engine == StorageEngine.TS:
+                        await _write_to_timescaledb(converted_rows, entry)
+                    else:
+                        await _write_to_postgresql(converted_rows, entry)
+                    total_records += len(converted_rows)
+                    success_count += 1
+                except Exception as db_exc:
+                    logger.error(
+                        "DB 写入失败 api=%s sector=%s (%s): %s",
+                        entry.api_name, sector_code, sector_name, db_exc,
+                    )
+                    failed_count += 1
+
+        except TushareAPIError as api_exc:
+            # Token 无效，终止整个任务
+            if api_exc.code and api_exc.code == -2001:
+                raise
+            # 其他 API 错误，记录并继续
+            logger.warning(
+                "API 调用失败 api=%s sector=%s (%s): %s",
+                entry.api_name, sector_code, sector_name, api_exc,
+            )
+            failed_count += 1
+        except Exception as exc:
+            logger.error(
+                "处理失败 api=%s sector=%s (%s): %s",
+                entry.api_name, sector_code, sector_name, exc,
+            )
+            failed_count += 1
+
+        completed_count += 1
+        await _update_progress(
+            task_id,
+            status="running",
+            total=total,
+            completed=completed_count,
+            failed=failed_count,
+            current_item=f"{sector_code} ({sector_name})",
+            batch_mode="by_sector",
+        )
+
+        # 频率限制
+        time.sleep(rate_delay)
+
+    logger.info(
+        "batch_by_sector 完成 api=%s data_source=%s: 总板块=%d, 成功=%d, 失败=%d, 空数据=%d, 总记录=%d",
+        entry.api_name, ds, total, success_count, failed_count, empty_count, total_records,
+    )
+
+    return {
+        "status": "completed",
+        "record_count": total_records,
+        "batch_stats": {
+            "total_sectors": total,
+            "success_sectors": success_count,
+            "failed_sectors": failed_count,
+            "empty_sectors": empty_count,
+        },
+    }
+
+
 # ---------------------------------------------------------------------------
 # Redis 进度更新
 # ---------------------------------------------------------------------------
@@ -2000,8 +2180,8 @@ async def _write_to_sector_kline(
     from app.core.database import AsyncSessionTS
 
     sql = text("""
-        INSERT INTO sector_kline ("time", "sector_code", "data_source", "freq", "open", "high", "low", "close", "volume", "amount")
-        VALUES (:time, :sector_code, :data_source, :freq, :open, :high, :low, :close, :volume, :amount)
+        INSERT INTO sector_kline ("time", "sector_code", "data_source", "freq", "open", "high", "low", "close", "volume", "amount", "turnover", "change_pct")
+        VALUES (:time, :sector_code, :data_source, :freq, :open, :high, :low, :close, :volume, :amount, :turnover, :change_pct)
         ON CONFLICT ("time", "sector_code", "data_source", "freq")
         DO UPDATE SET
             "open" = COALESCE(EXCLUDED."open", sector_kline."open"),
@@ -2009,7 +2189,9 @@ async def _write_to_sector_kline(
             "low" = COALESCE(EXCLUDED."low", sector_kline."low"),
             "close" = COALESCE(EXCLUDED."close", sector_kline."close"),
             "volume" = COALESCE(EXCLUDED."volume", sector_kline."volume"),
-            "amount" = COALESCE(EXCLUDED."amount", sector_kline."amount")
+            "amount" = COALESCE(EXCLUDED."amount", sector_kline."amount"),
+            "turnover" = COALESCE(EXCLUDED."turnover", sector_kline."turnover"),
+            "change_pct" = COALESCE(EXCLUDED."change_pct", sector_kline."change_pct")
     """)
 
     async with AsyncSessionTS() as session:
@@ -2039,6 +2221,8 @@ async def _write_to_sector_kline(
                     "close": row.get("close"),
                     "volume": row.get("vol") or row.get("volume") or 0,
                     "amount": row.get("amount"),
+                    "turnover": row.get("turnover_rate") or row.get("turnover"),
+                    "change_pct": row.get("pct_change") or row.get("change_pct"),
                 })
             await session.commit()
         except Exception:

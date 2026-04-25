@@ -1,5 +1,17 @@
 <template>
   <div v-if="shouldShow" class="preview-chart">
+    <!-- 股票代码选择器：多股票表时显示 -->
+    <div v-if="props.availableCodes && props.availableCodes.length > 0" class="code-selector">
+      <label class="code-selector-label" for="chart-code-select">股票代码：</label>
+      <select
+        id="chart-code-select"
+        class="code-selector-select"
+        :value="props.selectedCode ?? ''"
+        @change="emit('update:selectedCode', ($event.target as HTMLSelectElement).value)"
+      >
+        <option v-for="c in props.availableCodes" :key="c" :value="c">{{ c }}</option>
+      </select>
+    </div>
     <!-- 列选择器：仅折线图/柱状图时显示 -->
     <div v-if="showColumnSelector" class="column-selector">
       <span class="column-selector-label">展示列：</span>
@@ -71,10 +83,13 @@ const props = defineProps<{
   timeField: string | null
   columns: ColumnInfo[]
   selectedColumns?: string[]
+  availableCodes?: string[]
+  selectedCode?: string | null
 }>()
 
 const emit = defineEmits<{
   'update:selectedColumns': [value: string[]]
+  'update:selectedCode': [value: string]
 }>()
 
 // ─── K 线图所需列名 ──────────────────────────────────────────────────────────
@@ -405,6 +420,37 @@ function buildBarOption() {
   border: 1px solid #21262d;
   border-radius: 6px;
   padding: 12px;
+}
+
+.code-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #21262d;
+}
+
+.code-selector-label {
+  color: #8b949e;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.code-selector-select {
+  background: #161b22;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 120px;
+}
+
+.code-selector-select:focus {
+  outline: none;
+  border-color: #58a6ff;
 }
 
 .column-selector {

@@ -73,22 +73,24 @@ async def check_integrity(
 @router.get("/{api_name}/chart-data")
 async def query_chart_data_endpoint(
     api_name: str,
-    limit: int | None = Query(default=None, description="返回数据条数，范围 [1, 500]，默认 250"),
+    limit: int | None = Query(default=None, description="返回数据条数上限，默认 500"),
     data_time_start: str | None = Query(default=None, description="数据时间范围起始"),
     data_time_end: str | None = Query(default=None, description="数据时间范围结束"),
+    code: str | None = Query(default=None, description="股票代码（多股票表时指定）"),
 ) -> ChartDataResponse:
     """图表数据独立加载
 
-    返回按时间升序排列的最近 N 条数据，独立于表格分页，用于前端图表渲染。
-    limit 范围 [1, 500]，默认 250。
+    返回按时间升序排列的数据，独立于表格分页，用于前端图表渲染。
+    多股票共享表（如 kline）自动选取一只股票，可通过 code 参数切换。
     """
     svc = TusharePreviewService()
     try:
         return await svc.query_chart_data(
             api_name,
-            limit=limit if limit is not None else 250,
+            limit=limit if limit is not None else 500,
             data_time_start=data_time_start,
             data_time_end=data_time_end,
+            code=code,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

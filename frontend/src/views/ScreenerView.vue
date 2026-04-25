@@ -176,18 +176,31 @@
             ({{ getFactorMeta(factor.factor_name)?.value_min }}–{{ getFactorMeta(factor.factor_name)?.value_max }})
           </span>
 
-          <!-- Sector-specific selectors -->
+          <!-- Sector-specific selectors: 两级下拉（需求 22.6, 22.7） -->
           <div v-if="factor.type === 'sector'" class="sector-selectors">
-            <select v-model="sectorConfig.sector_data_source" class="input sector-select sector-source-select" aria-label="数据来源">
+            <select
+              :value="sectorConfig.sector_data_source"
+              @change="onDataSourceChange(($event.target as HTMLSelectElement).value)"
+              class="input sector-select sector-source-select"
+              aria-label="数据来源"
+            >
               <option v-for="opt in sectorDataSourceOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+            <select
+              :value="sectorConfig.sector_type"
+              @change="sectorConfig.sector_type = ($event.target as HTMLSelectElement).value || null"
+              class="input sector-select sector-type-select"
+              aria-label="板块类型"
+            >
+              <option v-for="opt in sectorTypeOptions" :key="String(opt.value)" :value="opt.value ?? ''">{{ opt.label }}</option>
             </select>
             <div class="sector-period-input">
               <input v-model.number="sectorConfig.sector_period" type="number" min="1" max="60" class="input param-input" aria-label="涨幅周期" />
               <span class="param-hint">天</span>
             </div>
           </div>
-          <div v-if="factor.type === 'sector' && selectedSourceCoverage && selectedSourceCoverage.coverage_ratio < 0.5" class="sector-coverage-warning" role="alert">
-            ⚠️ 该数据源成分股数据不完整（仅 {{ selectedSourceCoverage.sectors_with_constituents }}/{{ selectedSourceCoverage.total_sectors }} 板块有成分股数据），可能影响板块筛选效果，建议使用东方财富（DC）或通达信（TDX）
+          <div v-if="factor.type === 'sector' && selectedSourceCoverage && selectedSourceCoverage.sectors_with_constituents < selectedSourceCoverage.total_sectors * 0.1" class="sector-coverage-warning" role="alert">
+            ⚠️ {{ sectorConfig.sector_data_source }} 仅 {{ selectedSourceCoverage.sectors_with_constituents }}/{{ selectedSourceCoverage.total_sectors }} 个板块有成分股映射，大部分股票无法匹配到板块，板块涨幅排名和板块趋势因子将无法生效。请前往「Tushare 数据导入」页面导入对应的板块成分数据{{ bestAlternativeSource ? `，或切换到数据更完整的${bestAlternativeSource}` : '' }}。
           </div>
 
           <!-- 权重滑块 -->
@@ -1284,6 +1297,7 @@ const volumePriceConfig = reactive<VolumePriceConfig>({
 
 const sectorConfig = reactive({
   sector_data_source: 'DC',
+  sector_type: null as string | null,
   sector_period: 5,
   sector_top_n: 30,
 })
@@ -1307,6 +1321,23 @@ const selectedSourceCoverage = computed(() => {
   ) ?? null
 })
 
+/** 数据源中文名映射 */
+const DS_LABELS: Record<string, string> = {
+  DC: '东方财富 DC', THS: '同花顺 THS', TDX: '通达信 TDX', TI: '申万行业 TI', CI: '中信行业 CI',
+}
+
+/** 推荐的替代数据源（覆盖率最高且不是当前选中的） */
+const bestAlternativeSource = computed(() => {
+  const coverage = screenerStore.sectorCoverage
+  if (!Array.isArray(coverage) || coverage.length === 0) return null
+  const current = sectorConfig.sector_data_source
+  const alternatives = coverage
+    .filter((s) => s.data_source !== current && s.coverage_ratio > 0.1)
+    .sort((a, b) => b.coverage_ratio - a.coverage_ratio)
+  if (alternatives.length === 0) return null
+  return DS_LABELS[alternatives[0].data_source] ?? alternatives[0].data_source
+})
+
 /** 数据源下拉选项（含覆盖率摘要） */
 const sectorDataSourceOptions = computed(() => {
   const sources = ['DC', 'THS', 'TDX', 'TI', 'CI']
@@ -1320,12 +1351,32 @@ const sectorDataSourceOptions = computed(() => {
       const warn = stats.coverage_ratio < 0.5 ? ' ⚠️' : ''
       return {
         value: ds,
-        label: `${baseName}（${stats.sectors_with_constituents} 板块 / ${stats.total_stocks} 股票）${warn}`,
+        label: `${baseName} (${stats.total_sectors} 板块 / ${stats.total_stocks} 股票)${warn}`,
       }
     }
     return { value: ds, label: baseName }
   })
 })
+
+/** 板块类型下拉选项（动态从 API 获取） */
+const sectorTypeOptions = computed(() => {
+  const opts: { value: string | null; label: string }[] = [
+    { value: null, label: '全部' },
+  ]
+  for (const t of screenerStore.sectorTypes) {
+    const code = t.sector_type
+    const label = code != null ? `${t.label} (${code})` : t.label
+    opts.push({ value: code, label })
+  }
+  return opts
+})
+
+/** 切换数据来源时重置板块类型并获取新类型列表 */
+function onDataSourceChange(ds: string) {
+  sectorConfig.sector_data_source = ds
+  sectorConfig.sector_type = null
+  screenerStore.fetchSectorTypes(ds)
+}
 
 // ─── 策略示例 ──────────────────────────────────────────────────────────────────
 
@@ -1346,8 +1397,10 @@ function loadStrategyExample(ex: StrategyExample) {
   // Load sector config
   if (ex.sector_config) {
     sectorConfig.sector_data_source = ex.sector_config.sector_data_source
+    sectorConfig.sector_type = ex.sector_config.sector_type ?? null
     sectorConfig.sector_period = ex.sector_config.sector_period
     sectorConfig.sector_top_n = ex.sector_config.sector_top_n
+    screenerStore.fetchSectorTypes(sectorConfig.sector_data_source)
   }
 
   // Enable required modules
@@ -1629,10 +1682,12 @@ async function selectStrategy(id: string) {
     const sc = cfg.sector_config as Record<string, unknown> | undefined
     if (sc) {
       sectorConfig.sector_data_source = (sc.sector_data_source as string) ?? 'DC'
+      sectorConfig.sector_type = (sc.sector_type as string | null) ?? null
       sectorConfig.sector_period = (sc.sector_period as number) ?? 5
       sectorConfig.sector_top_n = (sc.sector_top_n as number) ?? 30
+      screenerStore.fetchSectorTypes(sectorConfig.sector_data_source)
     } else {
-      Object.assign(sectorConfig, { sector_data_source: 'DC', sector_period: 5, sector_top_n: 30 })
+      Object.assign(sectorConfig, { sector_data_source: 'DC', sector_type: null, sector_period: 5, sector_top_n: 30 })
     }
 
     // 激活该策略（需求 22.3）
@@ -1832,7 +1887,12 @@ function buildStrategyConfig() {
     },
     breakout: { ...breakoutConfig },
     volume_price: { ...volumePriceConfig },
-    sector_config: { ...sectorConfig },
+    sector_config: {
+      sector_data_source: sectorConfig.sector_data_source,
+      ...(sectorConfig.sector_type != null ? { sector_type: sectorConfig.sector_type } : {}),
+      sector_period: sectorConfig.sector_period,
+      sector_top_n: sectorConfig.sector_top_n,
+    },
   }
 }
 
@@ -1855,6 +1915,8 @@ onMounted(async () => {
   screenerStore.fetchStrategyExamples()
   // 加载板块数据源覆盖率
   screenerStore.fetchSectorCoverage()
+  // 加载默认数据来源的板块类型列表（需求 22.7）
+  screenerStore.fetchSectorTypes(sectorConfig.sector_data_source)
   // 自动选中 is_active=true 的策略并回显配置（需求 22.3）
   const active = strategies.value.find((s) => s.is_active)
   if (active) {
@@ -2216,6 +2278,7 @@ details > summary::-webkit-details-marker { display: none; }
 .sector-selectors { display: flex; gap: 8px; align-items: center; margin-top: 4px; width: 100%; flex-wrap: wrap; }
 .sector-select { width: 100px; }
 .sector-source-select { width: auto; min-width: 140px; }
+.sector-type-select { width: auto; min-width: 120px; }
 .sector-period-input { display: flex; align-items: center; gap: 4px; }
 .param-hint { font-size: 12px; color: #8b949e; }
 

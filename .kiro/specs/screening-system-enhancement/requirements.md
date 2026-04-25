@@ -27,8 +27,8 @@
 - **FactorMeta**：因子元数据冻结数据类，包含因子名称、标签、类别、阈值类型、默认值等
 - **FactorCategory**：因子类别枚举，当前包含 technical、money_flow、fundamental、sector 四类
 - **DataSource**：板块数据来源枚举，位于 `app/models/sector.py`，当前包含 DC（东方财富）、TI（同花顺/申万）、TDX（通达信）、CI（中信行业）、THS（同花顺概念/行业）
-- **SectorType**：板块类型枚举，位于 `app/models/sector.py`，当前包含 CONCEPT、INDUSTRY、REGION、STYLE 四类（将被重构为可选过滤参数）
-- **SectorScreenConfig**：板块筛选配置数据类，位于 `app/core/schemas.py`，包含 `sector_data_source`、`sector_type`、`sector_period`、`sector_top_n` 字段
+- **SectorType**：板块类型枚举，位于 `app/models/sector.py`，当前包含 CONCEPT、INDUSTRY、REGION、STYLE 四类（保留但不再作为筛选约束，板块筛选中 `sector_type` 改为自由字符串，有效值由 `sector_info` 表动态决定）
+- **SectorScreenConfig**：板块筛选配置数据类，位于 `app/core/schemas.py`，包含 `sector_data_source`（第一级：数据来源）、`sector_type`（第二级：可选板块类型过滤，`str | None`）、`sector_period`、`sector_top_n` 字段
 - **ThresholdType**：因子阈值类型枚举，包含 absolute、percentile、industry_relative、z_score、boolean、range 六种
 - **stk_factor_pro**：tushare 股票技术面因子专业版接口，提供预计算的技术因子数据，存储于 `stk_factor` 表
 - **cyq_perf**：tushare 每日筹码及胜率接口，提供筹码集中度和获利比例数据，存储于 `cyq_perf` 表
@@ -344,25 +344,44 @@
 6. THE StrategyConfig 的序列化/反序列化 SHALL 保持向后兼容：不包含新因子的旧配置能够正常加载，包含新因子的新配置能够正确序列化为 JSONB 存储；旧配置中包含 `sector_type` 字段时反序列化不报错（参见需求 22）
 7. THE 所有新增代码的注释和文档字符串 SHALL 使用中文编写，并标注对应的需求编号（如"需求 12.1"）
 
-### 需求 22：板块面因子分类重构（适配 Tushare 数据来源体系）
+### 需求 22：板块面因子两级分类重构（数据来源 + 板块类型）
 
-**用户故事：** 作为量化交易者，我希望板块面因子的分类方式从"板块类型"（行业/概念/地区/风格）改为"数据来源"（DC/THS/TDX/TI/CI），以便板块筛选能够正确匹配 tushare 导入的板块数据，解决当前板块类型过滤匹配不上实际数据的问题。
+**用户故事：** 作为量化交易者，我希望板块面因子的筛选方式改为两级分类——第一级选择"数据来源"（DC/THS/TDX/TI/CI），第二级根据所选数据来源动态展示该来源下的"板块类型"子分类——以便板块筛选能够精确匹配 tushare 导入的板块数据，同时保留按板块类型细分过滤的能力。
 
-**背景说明：** 当前系统使用 `SectorType`（INDUSTRY/CONCEPT/REGION/STYLE）作为板块筛选的必选参数，但 tushare 各数据源导入的板块数据有自己的分类体系，`sector_type` 字段值由 tushare 接口的 `type` 字段直接映射，并非系统预定义的四种类型。这导致前端因子编辑器中选择"行业板块"等类型时，无法正确匹配到 tushare 导入的板块数据（如截图所示：同花顺 TI 显示 0 板块/0 股票）。
+**背景说明：** 当前系统使用 `SectorType`（INDUSTRY/CONCEPT/REGION/STYLE）作为板块筛选的必选参数，但 tushare 各数据源导入的板块数据有自己的分类体系，`sector_type` 字段值由 tushare 接口的 `type` 字段直接映射（如 THS 的 `I`/`N`/`R`/`S`/`BB`/`ST`/`TH`，TI 的 `L1`/`L2`/`L3`），并非系统预定义的四种类型。重构后采用两级下拉：第一级"数据来源"下拉（如"东方财富 DC (1020 板块 / 5595 股票)"，附带覆盖率统计），第二级"板块类型"下拉根据所选数据来源动态填充实际的 `sector_type` 值。
+
+**各数据来源的板块类型映射：**
+- THS（同花顺）：`I`（行业板块）、`N`（概念板块）、`R`（地域板块）、`S`（风格板块）、`BB`（板块指数）、`ST`（ST板块）、`TH`（主题板块）
+- DC（东方财富）：`行业板块`、`概念板块`、`地域板块`
+- TDX（通达信）：`行业板块`、`概念板块`、`风格板块`、`地区板块`
+- TI（申万行业）：`L1`（一级行业）、`L2`（二级行业）、`L3`（三级行业）
+- CI（中信行业）：`L1`（一级行业）、`L2`（二级行业）、`L3`（三级行业）
 
 #### 验收标准
 
-1. THE `SectorScreenConfig` SHALL 移除 `sector_type` 必选字段，改为以 `sector_data_source` 为主维度进行板块筛选。`sector_data_source` 的可选值扩展为：`DC`（东方财富概念板块）、`THS`（同花顺行业/概念板块）、`TDX`（通达信板块）、`TI`（申万行业分类）、`CI`（中信行业分类）
-2. THE `SectorStrengthFilter.compute_sector_ranks()` 方法的 `sector_type` 参数 SHALL 改为可选参数（默认值 `None`），WHEN `sector_type` 为 `None` 时，SHALL 查询该 `data_source` 下所有板块，不按板块类型过滤
-3. THE `SectorStrengthFilter.map_stocks_to_sectors()` 方法的 `sector_type` 参数 SHALL 改为可选参数（默认值 `None`），WHEN `sector_type` 为 `None` 时，SHALL 查询该 `data_source` 下所有成分股映射
-4. THE `DataSource` 枚举 SHALL 确保包含 `CI`（中信行业）值，支持 5 个数据来源的完整覆盖
-5. THE 前端因子编辑器中板块面因子的"板块类型"下拉 SHALL 替换为"数据来源"下拉，选项为：
-   - 东方财富 DC（概念板块）
-   - 同花顺 THS（行业/概念板块）
-   - 通达信 TDX（板块）
-   - 申万行业 TI（行业分类）
-   - 中信行业 CI（行业分类）
-6. THE `SectorScreenConfig.from_dict()` SHALL 保持向后兼容：旧配置中包含 `sector_type` 字段时，反序列化时忽略该字段，不影响加载；默认 `sector_data_source` 从 `"DC"` 保持不变
-7. THE `SectorScreenConfig.to_dict()` SHALL 不再输出 `sector_type` 字段，仅输出 `sector_data_source`、`sector_period`、`sector_top_n`
-8. THE `SectorType` 枚举 SHALL 保留（不删除），但不再作为选股筛选的必选参数，仅在数据导入和板块浏览等场景中使用
-9. THE 现有 12 个策略示例（STRATEGY_EXAMPLES）中包含 `sector_config.sector_type` 字段的示例（示例 3、4、8、10、11、12）SHALL 移除 `sector_type` 字段，仅保留 `sector_data_source`、`sector_period`、`sector_top_n`，确保与新的 `SectorScreenConfig.to_dict()` 输出格式一致
+1. THE `SectorScreenConfig` SHALL 以 `sector_data_source` 为主维度（第一级），`sector_type` 为可选二级过滤维度。`sector_data_source` 的可选值为：`DC`（东方财富）、`THS`（同花顺）、`TDX`（通达信）、`TI`（申万行业）、`CI`（中信行业）。`sector_type` 的可选值由所选 `sector_data_source` 决定，默认为 `None`（查询该数据来源下所有板块类型）
+2. THE `SectorScreenConfig` 的 `sector_type` 字段 SHALL 为可选参数（类型 `str | None`，默认值 `None`）。WHEN `sector_type` 为 `None` 时，板块筛选查询该 `data_source` 下所有板块；WHEN `sector_type` 有值时，板块筛选仅查询该 `data_source` 下匹配该 `sector_type` 的板块
+3. THE `SectorStrengthFilter.compute_sector_ranks()` 方法 SHALL 接受可选的 `sector_type` 参数（默认值 `None`）。WHEN `sector_type` 为 `None` 时，SHALL 查询该 `data_source` 下所有板块计算排名；WHEN `sector_type` 有值时，SHALL 仅查询匹配的板块子集计算排名
+4. THE `SectorStrengthFilter.map_stocks_to_sectors()` 方法 SHALL 接受可选的 `sector_type` 参数（默认值 `None`），行为与验收标准 3 一致
+5. THE `DataSource` 枚举 SHALL 确保包含 `DC`、`THS`、`TDX`、`TI`、`CI` 五个值，支持所有数据来源的完整覆盖
+6. THE 前端因子编辑器中板块面因子配置区域 SHALL 展示两个并排下拉框：
+   - 第一个下拉框"数据来源"（`sector_data_source`），选项为：
+     - 东方财富 DC（附带覆盖率统计，格式如"东方财富 DC (1020 板块 / 5595 股票)"）
+     - 同花顺 THS（附带覆盖率统计）
+     - 通达信 TDX（附带覆盖率统计）
+     - 申万行业 TI（附带覆盖率统计）
+     - 中信行业 CI（附带覆盖率统计）
+   - 第二个下拉框"板块类型"（`sector_type`），根据第一个下拉框选中的数据来源动态填充选项，首选项为"全部"（对应 `sector_type=None`）。每个选项 SHALL 显示中文名称而非原始代码值，格式如"行业板块 (I)"或"一级行业 (L1)"
+7. WHEN 用户切换第一个下拉框的数据来源时，THE 前端 SHALL 重置第二个下拉框为"全部"，并通过 API 查询该数据来源下可用的 `sector_type` 值列表动态填充选项
+8. THE Sector_API SHALL 新增 `GET /api/v1/sector/types?data_source={ds}` 端点，返回指定数据来源下所有不重复的 `sector_type` 值列表（从 `sector_info` 表的 `sector_type` 列动态查询），每个值附带中文名称（`label`）和该类型下的板块数量（`count`）
+9. THE 后端 SHALL 维护一份 `sector_type` 原始值到中文名称的映射表（`SECTOR_TYPE_LABEL_MAP`），覆盖所有已知的板块类型代码：
+   - THS：`I` → "行业板块"、`N` → "概念板块"、`R` → "地域板块"、`S` → "风格板块"、`BB` → "板块指数"、`ST` → "ST板块"、`TH` → "主题板块"
+   - DC/TDX：`概念板块` → "概念板块"、`行业板块` → "行业板块"、`风格板块` → "风格板块"、`地域板块` → "地域板块"、`地区板块` → "地区板块"（中文值直接作为标签）
+   - TI/CI：`L1` → "一级行业"、`L2` → "二级行业"、`L3` → "三级行业"
+   - 未在映射表中的值 SHALL 直接使用原始值作为显示标签
+   - `sector_type` 为 `NULL` 的板块 SHALL 在下拉框中显示为"未分类"
+10. THE 覆盖率统计 API（`GET /api/v1/sector/coverage`）SHALL 在每个数据来源的统计中增加 `type_breakdown` 字段，返回该数据来源下按 `sector_type` 分组的板块数量和成分股数量统计，每个分组附带中文名称（`label`）
+11. THE `SectorScreenConfig.to_dict()` SHALL 输出 `sector_data_source`、`sector_type`（仅当值非 `None` 时输出）、`sector_period`、`sector_top_n`
+12. THE `SectorScreenConfig.from_dict()` SHALL 保持向后兼容：旧配置中不包含 `sector_type` 字段时默认为 `None`；旧配置中包含旧枚举值（如 `CONCEPT`、`INDUSTRY`）时忽略该值并设为 `None`；新配置中包含有效的 `sector_type` 字符串时正确读取
+13. THE `SectorType` 枚举 SHALL 保留（不删除），但不再作为选股筛选的类型约束。板块筛选中的 `sector_type` 参数改为自由字符串类型（`str | None`），其有效值由 `sector_info` 表中实际存在的 `sector_type` 列值决定
+14. THE 现有 12 个策略示例（STRATEGY_EXAMPLES）中包含 `sector_config` 的示例 SHALL 更新为仅保留 `sector_data_source`、`sector_period`、`sector_top_n`（`sector_type` 默认为 `None` 时不输出），确保与新的 `SectorScreenConfig.to_dict()` 输出格式一致

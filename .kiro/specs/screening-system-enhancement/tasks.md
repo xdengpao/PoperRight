@@ -50,26 +50,51 @@
     - 验证 `get_factors_by_category()` 对新类别返回正确结果
     - _Requirements: 18.1, 21.1_
 
-- [x] 2. 板块面因子分类重构（SectorScreenConfig + SectorStrengthFilter）
+- [x] 2. 板块面因子两级分类重构（SectorScreenConfig + SectorStrengthFilter + API + 前端）
   - [x] 2.1 重构 SectorScreenConfig（schemas.py）
-    - 移除 `sector_type` 必选字段，改为可选（默认 `None`）
-    - `to_dict()` 不再输出 `sector_type` 字段
-    - `from_dict()` 向后兼容：忽略旧配置中的 `sector_type`，不报错
-    - _Requirements: 22.1, 22.6, 22.7_
+    - `sector_type` 改为可选二级过滤（`str | None`，默认 `None`）
+    - `to_dict()` 条件性输出 `sector_type`（仅当非 `None` 时输出）
+    - `from_dict()` 向后兼容：旧枚举值（CONCEPT/INDUSTRY/REGION/STYLE）→ 设为 `None`；有效新字符串值（如 `"I"`、`"L1"`）→ 正确读取
+    - 新增 `_OLD_SECTOR_TYPE_ENUMS` 集合用于识别旧枚举值
+    - _Requirements: 22.1, 22.2, 22.11, 22.12_
   - [x] 2.2 重构 SectorStrengthFilter（sector_strength.py）
     - `compute_sector_ranks()` 的 `sector_type` 参数改为可选（默认 `None`）
     - `map_stocks_to_sectors()` 的 `sector_type` 参数改为可选（默认 `None`）
-    - `_load_sector_info()` 的 `sector_type` 参数改为可选，`None` 时查询该 `data_source` 下所有板块
-    - _Requirements: 22.2, 22.3_
+    - `_load_sector_info()` 的 `sector_type` 参数改为可选，`None` 时查询该 `data_source` 下所有板块，有值时仅查询匹配的板块子集
+    - _Requirements: 22.3, 22.4_
   - [x] 2.3 确保 DataSource 枚举包含 CI（中信行业）
-    - 检查 `app/models/sector.py` 中 `DataSource` 枚举已包含 `CI = "CI"`
-    - _Requirements: 22.4_
-  - [x] 2.4 更新 ScreenDataProvider 中板块数据加载调用
-    - 修改 `load_screen_data()` 中调用 `compute_sector_ranks()` 和 `map_stocks_to_sectors()` 时不再传递 `sector_type`（或传递 `None`）
+    - 检查 `app/models/sector.py` 中 `DataSource` 枚举已包含 `DC`、`THS`、`TDX`、`TI`、`CI` 五个值
+    - _Requirements: 22.5_
+  - [x] 2.4 新增 SECTOR_TYPE_LABEL_MAP 常量和 get_sector_type_label() 辅助函数
+    - 在 `app/core/schemas.py` 或 `app/api/v1/sector.py` 中新增映射表
+    - 覆盖 THS（I/N/R/S/BB/ST/TH）、DC/TDX（概念板块/行业板块/风格板块/地域板块/地区板块）、TI/CI（L1/L2/L3）
+    - `None` 返回"未分类"，未知值返回原始值
+    - _Requirements: 22.9_
+  - [x] 2.5 新增 GET /api/v1/sector/types 端点
+    - 接受 `data_source` 查询参数
+    - 从 `sector_info` 表动态查询该数据来源下所有不重复的 `sector_type` 值
+    - 每个值附带中文标签（`label`，来自 `SECTOR_TYPE_LABEL_MAP`）和板块数量（`count`）
+    - _Requirements: 22.8_
+  - [x] 2.6 增强 GET /api/v1/sector/coverage 端点
+    - 每个数据来源的统计中新增 `type_breakdown` 字段
+    - 按 `sector_type` 分组返回板块数量和成分股数量，每个分组附带中文标签
+    - _Requirements: 22.10_
+  - [x] 2.7 更新 ScreenDataProvider 中板块数据加载调用
+    - 修改 `load_screen_data()` 中调用 `compute_sector_ranks()` 和 `map_stocks_to_sectors()` 时传递 `sector_type`（从 `SectorScreenConfig` 读取，可能为 `None`）
     - _Requirements: 3.4, 22.1_
-  - [x] 2.5 编写 SectorScreenConfig 序列化属性测试
-    - **Property 9: SectorScreenConfig 序列化不含 sector_type**
-    - **Validates: Requirements 22.1, 22.6, 22.7**
+  - [x] 2.8 编写 SectorScreenConfig 序列化属性测试
+    - **Property 9: SectorScreenConfig 序列化条件性包含 sector_type**
+    - 验证 `sector_type=None` 时 `to_dict()` 不含该键
+    - 验证 `sector_type` 有值时 `to_dict()` 包含该键
+    - 验证旧枚举值 `from_dict()` 设为 `None`
+    - 验证往返一致性 `from_dict(to_dict(config))`
+    - **Validates: Requirements 22.1, 22.11, 22.12**
+  - [x] 2.9 编写 SECTOR_TYPE_LABEL_MAP 标签映射属性测试
+    - **Property 17: SECTOR_TYPE_LABEL_MAP 标签映射完备性**
+    - 验证所有已知键返回正确中文标签
+    - 验证 `None` 返回"未分类"
+    - 验证未知值返回原始值
+    - **Validates: Requirements 22.9**
 
 - [x] 3. Checkpoint - 确保因子注册表和板块重构测试通过
   - Ensure all tests pass, ask the user if questions arise.
@@ -263,23 +288,25 @@
 - [x] 10. Checkpoint - 确保策略示例库测试通过
   - Ensure all tests pass, ask the user if questions arise.
 
-- [x] 11. 前端因子编辑器增强
+- [x] 11. 前端因子编辑器增强（两级板块分类）
   - [x] 11.1 更新 ScreenerView.vue 因子类型选项
     - `factorTypes` 数组新增 `chip`（筹码面）、`margin`（两融面）、`board_hit`（打板面）三个选项
     - `factorNameOptions` 按新类别分组
     - _Requirements: 18.1_
-  - [x] 11.2 重构板块面因子的"板块类型"下拉为"数据来源"下拉
-    - 移除 `sectorConfig.sector_type` 下拉
-    - 替换为"数据来源"下拉，选项为：东方财富 DC、同花顺 THS、通达信 TDX、申万行业 TI、中信行业 CI
-    - _Requirements: 22.5_
+  - [x] 11.2 重构板块面因子配置区域为两级下拉
+    - 第一个下拉框"数据来源"（`sector_data_source`），选项附带覆盖率统计（格式如"东方财富 DC (1020 板块 / 5595 股票)"）
+    - 第二个下拉框"板块类型"（`sector_type`），首选项为"全部"（`null`），其余选项显示中文名称 + 原始代码（如"行业板块 (I)"或"一级行业 (L1)"）
+    - 切换数据来源时重置板块类型为"全部"，调用 `GET /api/v1/sector/types?data_source={ds}` 动态填充
+    - _Requirements: 22.6, 22.7_
   - [x] 11.3 更新 screener.ts store 的 SectorScreenConfig 接口
-    - 移除 `sector_type` 字段，保留 `sector_data_source`、`sector_period`、`sector_top_n`
+    - `sector_type` 改为可选字段（`string | null`），`sector_data_source` 为必选
+    - 新增 `fetchSectorTypes(dataSource: string)` action，调用 `/api/v1/sector/types` 获取可用板块类型列表
     - 更新 `StrategyExample` 接口新增 `config_doc` 字段
-    - _Requirements: 22.5, 20.3_
+    - _Requirements: 22.6, 22.7, 20.3_
 
 - [x] 12. API 层适配
   - [x] 12.1 更新 SectorScreenConfigIn 模型（screen.py）
-    - 移除 `sector_type` 字段或改为可选
+    - `sector_type` 改为可选字段（`str | None = None`）
     - _Requirements: 22.1_
   - [x] 12.2 更新 get_strategy_examples 端点返回 config_doc 字段
     - 在策略示例 API 响应中包含 `config_doc` 字段
@@ -287,10 +314,12 @@
   - [x] 12.3 更新因子注册表 API 支持新增类别查询
     - 确保 `get_factor_registry()` 和 `list_factors()` 能返回 CHIP、MARGIN、BOARD_HIT 类别
     - _Requirements: 18.3_
-  - [x] 12.4 编写 API 端点单元测试
+  - [x] 12.4 编写 sector/types 和 sector/coverage API 单元测试
+    - 测试 `GET /api/v1/sector/types?data_source=THS` 返回正确的 sector_type 列表和中文标签
+    - 测试 `GET /api/v1/sector/coverage` 返回 `type_breakdown` 字段
     - 测试因子注册表 API 返回新类别
     - 测试策略示例 API 返回 config_doc
-    - _Requirements: 18.3, 20.3_
+    - _Requirements: 22.8, 22.10, 18.3, 20.3_
 
 - [x] 13. 板块强势筛选器类型不变量验证
   - [x] 13.1 编写板块强势筛选器类型不变量属性测试
@@ -305,7 +334,7 @@
 - Tasks marked with `*` are optional and can be skipped for faster MVP
 - Each task references specific requirements for traceability
 - Checkpoints ensure incremental validation
-- Property tests validate universal correctness properties (16 properties from design document)
+- Property tests validate universal correctness properties (17 properties from design document)
 - Unit tests validate specific examples and edge cases
 - All new code comments and docstrings in Chinese (中文), annotated with requirement numbers (如"需求 12.1")
 - Data provider methods use batch processing pattern (WHERE trade_date = :screen_date) to avoid N+1 queries

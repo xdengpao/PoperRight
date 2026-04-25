@@ -302,7 +302,10 @@
             :time-field="chartDisplayTimeField"
             :columns="chartDisplayColumns"
             :selected-columns="store.selectedChartColumns"
+            :available-codes="store.chartData?.available_codes ?? []"
+            :selected-code="store.chartData?.selected_code ?? null"
             @update:selected-columns="store.setSelectedChartColumns"
+            @update:selected-code="handleChartCodeChange"
           />
 
           <!-- 数据表格区域 -->
@@ -594,6 +597,12 @@ function handleQuery(): void {
   // 并行请求表格数据和图表数据
   store.fetchPreviewData(store.selectedApiName, store.filters)
   store.fetchChartData(store.selectedApiName)
+}
+
+/** 切换图表股票代码 */
+function handleChartCodeChange(code: string): void {
+  if (!store.selectedApiName) return
+  store.fetchChartData(store.selectedApiName, undefined, code)
 }
 
 /** 执行增量查询 */

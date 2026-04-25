@@ -102,12 +102,14 @@ _beat_schedule = {
         "options": {"queue": "data_sync"},
     },
 
-    # 每日增量 K 线同步：每个交易日 16:00 执行（需求 25.13）
-    "daily-kline-sync-1600": {
-        "task": "app.tasks.data_sync.sync_daily_kline",
-        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
-        "options": {"queue": "data_sync"},
-    },
+    # 每日增量 K 线同步（需求 25.13）
+    # 默认禁用：该任务遍历全市场 5000+ 只股票逐只拉取，耗时较长
+    # 需要时通过 DAILY_KLINE_SYNC_ENABLED=true 环境变量启用
+    # "daily-kline-sync-1600": {
+    #     "task": "app.tasks.data_sync.sync_daily_kline",
+    #     "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+    #     "options": {"queue": "data_sync"},
+    # },
 
     # 风控事件日志清理：每日凌晨 2:00 执行（需求 10.5）
     "risk-event-log-cleanup-0200": {

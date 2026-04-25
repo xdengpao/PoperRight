@@ -129,6 +129,7 @@ class ChartDataResponse(BaseModel):
     """图表数据响应
 
     独立于表格分页的图表数据，按时间升序排列，用于前端图表渲染。
+    对于多股票共享表（如 kline），返回单只股票的时间序列数据。
     """
 
     rows: list[dict]  # 数据行（按时间升序）
@@ -136,6 +137,8 @@ class ChartDataResponse(BaseModel):
     chart_type: str | None  # 推荐图表类型：candlestick / line / bar / None
     columns: list[ColumnInfo]  # 列信息
     total_available: int  # 可用数据总量
+    available_codes: list[str]  # 可选股票代码列表（多股票表时非空）
+    selected_code: str | None  # 当前选中的股票代码（多股票表时非空）
 
 
 class DeleteDataResponse(BaseModel):
@@ -249,7 +252,7 @@ TIME_FIELD_MAP: dict[str, str] = {
     "sz_daily_info": "trade_date",
     # index_info: 无主要时间字段（指数基本信息）
     # ── 板块复用表 ──
-    "sector_info": "updated_at",
+    # sector_info: 无主要数据时间字段（updated_at 是记录更新时间，不适合过滤）
     "sector_constituent": "trade_date",
 }
 
@@ -305,6 +308,31 @@ _STATUS_COLOR_MAP: dict[str, str] = {
     "stopped": "gray",
 }
 
+# ---------------------------------------------------------------------------
+# 常量：sector_type 中文名映射
+# ---------------------------------------------------------------------------
+
+_SECTOR_TYPE_NAME_MAP: dict[str, str] = {
+    # 同花顺 THS
+    "I": "行业板块",
+    "N": "概念板块",
+    "R": "地域板块",
+    "S": "风格板块",
+    "BB": "板块指数",
+    "ST": "ST板块",
+    "TH": "主题板块",
+    # 东方财富 DC / 通达信 TDX（中文值，直接映射自身）
+    "概念板块": "概念板块",
+    "行业板块": "行业板块",
+    "风格板块": "风格板块",
+    "地域板块": "地域板块",
+    "地区板块": "地区板块",
+    # 申万 TI
+    "L1": "一级行业",
+    "L2": "二级行业",
+    "L3": "三级行业",
+}
+
 
 # ---------------------------------------------------------------------------
 # 服务类
@@ -351,6 +379,52 @@ class TusharePreviewService:
                     return candidate
 
         return None
+
+
+    @staticmethod
+    def _coerce_time_param(value: str | Any, storage_engine: "StorageEngine") -> Any:
+        """将时间参数转换为数据库兼容类型。
+
+        TimescaleDB 的 timestamp/timestamptz 列需要 datetime 对象，
+        PostgreSQL 的 varchar 列（如 trade_date）接受字符串，
+        PostgreSQL 的 date 列接受 date 对象或 ISO 字符串。
+
+        Args:
+            value: 时间参数值（字符串或已转换的对象）
+            storage_engine: 存储引擎类型
+
+        Returns:
+            转换后的参数值
+        """
+        if not isinstance(value, str):
+            return value
+
+        # TimescaleDB：转为 datetime
+        if storage_engine == StorageEngine.TS:
+            normalized = value.replace("-", "")
+            if len(normalized) == 8:
+                return datetime(
+                    int(normalized[:4]), int(normalized[4:6]), int(normalized[6:8])
+                )
+            # ISO 格式尝试解析
+            try:
+                return datetime.fromisoformat(value)
+            except ValueError:
+                return value
+
+        # PostgreSQL date 列：转为 date 对象
+        from datetime import date as date_type
+        normalized = value.replace("-", "")
+        if len(normalized) == 8:
+            try:
+                return date_type(
+                    int(normalized[:4]), int(normalized[4:6]), int(normalized[6:8])
+                )
+            except ValueError:
+                return value
+
+        return value
+
 
     @staticmethod
     def _get_column_info_pure(
@@ -731,6 +805,31 @@ class TusharePreviewService:
             return 250
         return max(1, min(500, limit))
 
+
+    @staticmethod
+    def _get_code_column_pure(target_table: str) -> str | None:
+        """获取多股票共享表的代码列名（纯函数）。
+
+        kline / sector_kline 使用 symbol 列，
+        其他多股票表使用 ts_code 列，
+        非共享表返回 None。
+        """
+        if target_table in ("kline", "sector_kline"):
+            return "symbol"
+        _MULTI_CODE_TABLES = {
+            "stk_limit", "hsgt_top10", "ggt_top10",
+            "financial_statement", "dividend", "forecast", "express",
+            "moneyflow_ths", "moneyflow_dc", "tushare_moneyflow",
+            "margin_detail", "stk_factor", "cyq_perf", "cyq_chips",
+        }
+        if target_table in _MULTI_CODE_TABLES:
+            return "ts_code"
+        return None
+
+
+
+
+
     # ------------------------------------------------------------------
     # 异步方法：依赖数据库
     # ------------------------------------------------------------------
@@ -946,14 +1045,18 @@ class TusharePreviewService:
                     ),
                 )
 
-        # 6. 构建查询参数字典
+        # 6. 构建查询参数字典（转换时间参数类型以兼容 asyncpg）
         bind_params: dict[str, Any] = {}
         for _clause, params_dict in scope_filters:
             bind_params.update(params_dict)
         if time_field and effective_data_time_start:
-            bind_params["data_time_start"] = effective_data_time_start
+            bind_params["data_time_start"] = self._coerce_time_param(
+                effective_data_time_start, entry.storage_engine
+            )
         if time_field and effective_data_time_end:
-            bind_params["data_time_end"] = effective_data_time_end
+            bind_params["data_time_end"] = self._coerce_time_param(
+                effective_data_time_end, entry.storage_engine
+            )
         if ts_code_filter:
             bind_params["ts_code"] = ts_code_filter
 
@@ -1092,6 +1195,7 @@ class TusharePreviewService:
 
         # 8. 序列化行数据（处理 datetime 等不可 JSON 序列化的类型）
         serialized_rows: list[dict[str, Any]] = []
+        is_sector_info = entry.target_table == "sector_info"
         for row in rows:
             serialized: dict[str, Any] = {}
             for k, v in row.items():
@@ -1099,10 +1203,18 @@ class TusharePreviewService:
                     serialized[k] = v.isoformat()
                 else:
                     serialized[k] = v
+            # sector_info 表追加 sector_type_name 虚拟列
+            if is_sector_info and "sector_type" in serialized:
+                serialized["sector_type_name"] = _SECTOR_TYPE_NAME_MAP.get(
+                    serialized["sector_type"] or "", serialized.get("sector_type", "")
+                )
             serialized_rows.append(serialized)
 
         # 9. 构建列信息和图表类型
         columns = self._get_column_info_pure(table_columns, entry.field_mappings)
+        # sector_info 表追加 sector_type_name 虚拟列定义
+        if entry.target_table == "sector_info":
+            columns.append(ColumnInfo(name="sector_type_name", label="板块类型", type="string"))
         chart_type = self._infer_chart_type_pure(
             entry.target_table, entry.subcategory, time_field
         )
@@ -1440,8 +1552,12 @@ class TusharePreviewService:
 
         where_clauses_data.append(f"{time_field} >= :data_time_start")
         where_clauses_data.append(f"{time_field} <= :data_time_end")
-        bind_params_data["data_time_start"] = data_time_start
-        bind_params_data["data_time_end"] = data_time_end
+        bind_params_data["data_time_start"] = self._coerce_time_param(
+            data_time_start, entry.storage_engine
+        )
+        bind_params_data["data_time_end"] = self._coerce_time_param(
+            data_time_end, entry.storage_engine
+        )
 
         where_sql_data = " WHERE " + " AND ".join(where_clauses_data)
         actual_sql = (
@@ -1536,118 +1652,129 @@ class TusharePreviewService:
         self,
         api_name: str,
         *,
-        limit: int = 250,
+        limit: int = 500,
         data_time_start: str | None = None,
         data_time_end: str | None = None,
+        code: str | None = None,
     ) -> ChartDataResponse:
         """查询图表数据（独立于表格分页）。
 
-        返回按时间字段升序排列的最近 N 条数据，用于前端图表渲染。
-        limit 范围 [1, 500]，默认 250。无时间字段时返回空响应。
+        返回按时间字段升序排列的数据，用于前端图表渲染。
+        - 用户未指定时间范围时，默认限定最近一年
+        - 多股票共享表（如 kline）自动选取一只股票，支持前端切换
+        - 返回可选股票代码列表供前端选择器使用
 
         Args:
             api_name: Tushare 接口名称
-            limit: 返回数据条数，范围 [1, 500]，默认 250
-            data_time_start: 数据时间范围起始（如 "20240101"），可选
-            data_time_end: 数据时间范围结束（如 "20241231"），可选
+            limit: 返回数据条数上限，默认 500
+            data_time_start: 数据时间范围起始
+            data_time_end: 数据时间范围结束
+            code: 指定股票代码（多股票表时使用）
 
         Returns:
             ChartDataResponse 图表数据响应
-
-        Raises:
-            ValueError: api_name 不在注册表中
         """
-        # 1. 从注册表获取 ApiEntry
         entry = TUSHARE_API_REGISTRY.get(api_name)
         if entry is None:
             raise ValueError(f"接口 {api_name} 未注册")
 
-        # 2. clamp limit 参数
-        clamped_limit = self._clamp_chart_limit_pure(limit)
-
-        # 3. 获取时间字段
+        clamped_limit = max(1, min(5000, limit))
         time_field = self._get_time_field_pure(entry.target_table)
 
-        # 4. 无时间字段时返回空 ChartDataResponse
         if time_field is None:
             return ChartDataResponse(
-                rows=[],
-                time_field=None,
-                chart_type=None,
-                columns=[],
-                total_available=0,
+                rows=[], time_field=None, chart_type=None, columns=[],
+                total_available=0, available_codes=[], selected_code=None,
             )
 
-        # 5. 获取作用域过滤条件
         scope_filters = self._build_scope_filter_pure(entry)
 
-        # 6. 构建 WHERE 子句和参数
+        # 构建基础 WHERE
         where_clauses: list[str] = []
         bind_params: dict[str, Any] = {}
-
         for clause, params_dict in scope_filters:
             where_clauses.append(clause)
             bind_params.update(params_dict)
 
-        # 时间范围过滤
-        if data_time_start:
+        # 默认最近一年
+        effective_start = data_time_start
+        effective_end = data_time_end
+        if not effective_start and not effective_end:
+            from datetime import timedelta
+            one_year_ago = datetime.now() - timedelta(days=365)
+            if entry.storage_engine == StorageEngine.TS:
+                effective_start = one_year_ago
+            else:
+                effective_start = one_year_ago.strftime("%Y%m%d")
+
+        if effective_start:
             where_clauses.append(f"{time_field} >= :data_time_start")
-            bind_params["data_time_start"] = data_time_start
-        if data_time_end:
+            bind_params["data_time_start"] = self._coerce_time_param(
+                effective_start, entry.storage_engine
+            )
+        if effective_end:
             where_clauses.append(f"{time_field} <= :data_time_end")
-            bind_params["data_time_end"] = data_time_end
+            bind_params["data_time_end"] = self._coerce_time_param(
+                effective_end, entry.storage_engine
+            )
 
-        where_sql = ""
-        if where_clauses:
-            where_sql = " WHERE " + " AND ".join(where_clauses)
+        # 判断是否为多股票共享表
+        code_column = self._get_code_column_pure(entry.target_table)
+        SessionFactory = self._get_session(entry.storage_engine)
 
-        # 7. 构建 SQL：按时间降序取最近 N 条，查询后反转为升序
+        available_codes: list[str] = []
+        selected_code: str | None = None
+
+        if code_column:
+            # 查询可选股票列表（按数据量降序，取前 50）
+            scope_where = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+            async with SessionFactory() as session:
+                codes_sql = (
+                    f"SELECT {code_column}, COUNT(*) AS cnt "
+                    f"FROM {entry.target_table}{scope_where} "
+                    f"GROUP BY {code_column} ORDER BY cnt DESC LIMIT 50"
+                )
+                codes_result = await session.execute(text(codes_sql), bind_params)
+                available_codes = [str(row[0]) for row in codes_result.fetchall()]
+
+            if available_codes:
+                selected_code = code if (code and code in available_codes) else available_codes[0]
+                where_clauses.append(f"{code_column} = :chart_code")
+                bind_params["chart_code"] = selected_code
+
+        where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
         data_sql = (
             f"SELECT * FROM {entry.target_table}{where_sql} "
             f"ORDER BY {time_field} DESC LIMIT {clamped_limit}"
         )
-
-        # 构建 COUNT SQL（用于 total_available）
         count_sql = f"SELECT COUNT(*) FROM {entry.target_table}{where_sql}"
 
-        # 8. 执行查询
-        SessionFactory = self._get_session(entry.storage_engine)
-
         async with SessionFactory() as session:
-            # 查询总可用数据量
             count_result = await session.execute(text(count_sql), bind_params)
             total_available = count_result.scalar() or 0
 
-            # 查询图表数据
             data_result = await session.execute(text(data_sql), bind_params)
             rows_raw = data_result.mappings().all()
             rows = [dict(r) for r in rows_raw]
 
-            # 获取列名
             if rows_raw:
                 table_columns = list(rows_raw[0].keys())
             else:
                 col_sql = f"SELECT * FROM {entry.target_table} LIMIT 0"
                 col_result = await session.execute(text(col_sql))
-                table_columns = (
-                    list(col_result.keys()) if col_result.keys() else []
-                )
+                table_columns = list(col_result.keys()) if col_result.keys() else []
 
-        # 9. 序列化行数据（处理 datetime 等不可 JSON 序列化的类型）
+        # 序列化
         serialized_rows: list[dict[str, Any]] = []
         for row in rows:
             serialized: dict[str, Any] = {}
             for k, v in row.items():
-                if isinstance(v, datetime):
-                    serialized[k] = v.isoformat()
-                else:
-                    serialized[k] = v
+                serialized[k] = v.isoformat() if isinstance(v, datetime) else v
             serialized_rows.append(serialized)
 
-        # 10. 反转为升序（图表需要时间升序）
         serialized_rows.reverse()
 
-        # 11. 构建列信息和图表类型
         columns = self._get_column_info_pure(table_columns, entry.field_mappings)
         chart_type = self._infer_chart_type_pure(
             entry.target_table, entry.subcategory, time_field
@@ -1659,7 +1786,11 @@ class TusharePreviewService:
             chart_type=chart_type,
             columns=columns,
             total_available=total_available,
+            available_codes=available_codes,
+            selected_code=selected_code,
         )
+
+
 
     async def delete_data(
         self,

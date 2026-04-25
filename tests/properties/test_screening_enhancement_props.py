@@ -2146,3 +2146,57 @@ class TestProperty16SectorStrengthFilterTypeInvariant:
                 f"期望 bool，实际为 {type(sector_trend).__name__} "
                 f"(值={sector_trend})"
             )
+
+# ---------------------------------------------------------------------------
+# Feature: screening-system-enhancement, Property 17: SECTOR_TYPE_LABEL_MAP 标签映射完备性
+# ---------------------------------------------------------------------------
+
+# 辅助策略：生成不在 SECTOR_TYPE_LABEL_MAP 中的随机字符串
+_known_sector_type_keys = st.sampled_from(sorted(
+    __import__("app.core.schemas", fromlist=["SECTOR_TYPE_LABEL_MAP"]).SECTOR_TYPE_LABEL_MAP.keys()
+))
+
+
+def _not_in_label_map() -> st.SearchStrategy[str]:
+    """生成不在 SECTOR_TYPE_LABEL_MAP 中的随机字符串"""
+    from app.core.schemas import SECTOR_TYPE_LABEL_MAP
+    known = set(SECTOR_TYPE_LABEL_MAP.keys())
+    return st.text(min_size=1, max_size=20).filter(lambda s: s not in known)
+
+
+class TestProperty17SectorTypeLabelMapCompleteness:
+    """
+    Property 17: SECTOR_TYPE_LABEL_MAP 标签映射完备性
+
+    **Validates: Requirements 22.9**
+
+    1. 对于 SECTOR_TYPE_LABEL_MAP 中的所有键，get_sector_type_label(key) 返回对应的中文标签
+    2. get_sector_type_label(None) 返回"未分类"
+    3. 对于任意不在 SECTOR_TYPE_LABEL_MAP 中的字符串 s，get_sector_type_label(s) 返回 s 本身（回退）
+    """
+
+    @given(key=_known_sector_type_keys)
+    @settings(max_examples=100)
+    def test_known_keys_return_correct_label(self, key: str):
+        """已知键返回对应的中文标签"""
+        from app.core.schemas import SECTOR_TYPE_LABEL_MAP, get_sector_type_label
+        expected = SECTOR_TYPE_LABEL_MAP[key]
+        result = get_sector_type_label(key)
+        assert result == expected, (
+            f"键 '{key}' 的标签应为 '{expected}'，实际为 '{result}'"
+        )
+
+    def test_none_returns_unclassified(self):
+        """None 返回 '未分类'"""
+        from app.core.schemas import get_sector_type_label
+        assert get_sector_type_label(None) == "未分类"
+
+    @given(s=_not_in_label_map())
+    @settings(max_examples=100)
+    def test_unknown_string_returns_itself(self, s: str):
+        """不在映射表中的字符串返回原始值（回退）"""
+        from app.core.schemas import get_sector_type_label
+        result = get_sector_type_label(s)
+        assert result == s, (
+            f"未知字符串 '{s}' 应返回自身，实际为 '{result}'"
+        )

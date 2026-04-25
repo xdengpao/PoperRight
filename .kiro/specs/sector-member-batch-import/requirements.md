@@ -1,0 +1,123 @@
+# 需求文档：板块成分数据全量导入（按板块代码遍历）
+
+## 简介
+
+当前系统导入板块成分数据时，因为没有遍历所有板块代码，导致五个数据源的成分股覆盖率极低：
+
+| 数据源 | 板块总数 | 有成分股的板块 | 覆盖股票数 |
+|--------|---------|--------------|-----------|
+| DC（东方财富） | 1020 | 1 | 449 |
+| THS（同花顺） | 1724 | 2 | 5469 |
+| TDX（通达信） | 481 | 20 | 3000 |
+| TI（申万行业） | 359 | 27 | 3 |
+| CI（中信行业） | 0 | 0 | 0 |
+
+根本原因：`ths_member`、`dc_member`、`tdx_member` 三个接口需要传入具体的板块代码（`ts_code`）才能返回该板块的成分股，不传时 Tushare 只返回默认的极少数板块。`index_member_all`（TI）和 `ci_index_member`（CI）虽然可以一次性返回全量，但之前存在 `data_source` 字段未注入的 bug（已修复），需要重新导入。
+
+本需求定义新增"按板块代码遍历"导入模式，使五个数据源均能获取完整的板块成分数据，支撑板块涨幅排名和板块趋势因子的正常运作。
+
+## 术语表
+
+- **sector_info**：板块信息表，存储板块代码、名称、类型、数据来源
+- **sector_constituent**：板块成分表，存储板块代码与股票代码的映射关系
+- **batch_by_sector**：按板块代码遍历的新分批模式，区别于现有的 `batch_by_code`（按股票代码）和 `batch_by_date`（按日期）
+- **成分股覆盖率**：有成分股数据的板块数 / 板块总数
+
+## 需求
+
+---
+
+### 需求 1：新增 batch_by_sector 分批模式
+
+**用户故事：** 作为量化交易者，我希望导入系统能够自动遍历 `sector_info` 表中所有板块代码，逐个调用 Tushare 成分股接口，以便获取完整的板块成分数据。
+
+#### 验收标准
+
+1. THE `ApiEntry` 数据类 SHALL 新增 `batch_by_sector: bool = False` 字段，标识该接口是否需要按板块代码遍历导入
+2. WHEN `batch_by_sector=True` 时，THE 导入任务 SHALL 在执行前先查询 `sector_info` 表，获取该接口对应 `data_source` 下的所有板块代码列表
+3. THE 导入任务 SHALL 对每个板块代码逐一调用 Tushare API，将 `ts_code` 参数设为当前板块代码
+4. WHEN 某个板块代码调用失败时，THE 导入任务 SHALL 记录 WARNING 日志并继续处理下一个板块，不中断整体导入
+5. THE 导入任务 SHALL 在每个板块代码调用之间遵守该接口的频率限制（`rate_limit_group`）
+6. THE 导入进度 SHALL 实时更新，格式为"正在导入板块 {当前序号}/{总数}: {板块代码} ({板块名称})"
+7. THE 导入任务 SHALL 支持停止信号，收到停止信号后在当前板块处理完成后退出，不强制中断
+
+---
+
+### 需求 2：ths_member 启用 batch_by_sector 模式
+
+**用户故事：** 作为量化交易者，我希望同花顺 THS 的 1724 个板块全部导入成分股数据，以便板块因子能够覆盖全市场股票。
+
+#### 验收标准
+
+1. THE `ths_member` 接口注册配置 SHALL 设置 `batch_by_sector=True`
+2. WHEN 导入 `ths_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='THS'` 获取所有 THS 板块代码
+3. THE 导入任务 SHALL 对每个 THS 板块代码调用 `ths_member` 接口，传入 `ts_code` 参数
+4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='THS'` 的板块数 SHALL 接近 1724（允许部分板块无成分股数据）
+5. THE 导入任务 SHALL 使用 `inject_fields={'data_source': 'THS', 'trade_date': '19000101'}` 注入固定字段
+
+---
+
+### 需求 3：dc_member 启用 batch_by_sector 模式
+
+**用户故事：** 作为量化交易者，我希望东方财富 DC 的 1020 个板块全部导入成分股数据。
+
+#### 验收标准
+
+1. THE `dc_member` 接口注册配置 SHALL 设置 `batch_by_sector=True`
+2. WHEN 导入 `dc_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='DC'` 获取所有 DC 板块代码
+3. THE 导入任务 SHALL 对每个 DC 板块代码调用 `dc_member` 接口，传入 `ts_code` 参数
+4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='DC'` 的板块数 SHALL 接近 1020
+
+---
+
+### 需求 4：tdx_member 启用 batch_by_sector 模式
+
+**用户故事：** 作为量化交易者，我希望通达信 TDX 的 481 个板块全部导入成分股数据。
+
+#### 验收标准
+
+1. THE `tdx_member` 接口注册配置 SHALL 设置 `batch_by_sector=True`
+2. WHEN 导入 `tdx_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='TDX'` 获取所有 TDX 板块代码
+3. THE 导入任务 SHALL 对每个 TDX 板块代码调用 `tdx_member` 接口，传入 `ts_code` 参数
+4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='TDX'` 的板块数 SHALL 接近 481
+
+---
+
+### 需求 5：index_member_all（TI）和 ci_index_member（CI）重新导入
+
+**用户故事：** 作为量化交易者，我希望申万行业 TI 和中信行业 CI 的成分股数据能够正确导入，以便使用行业分类进行板块筛选。
+
+#### 验收标准
+
+1. THE `index_member_all` 接口 SHALL 使用 `inject_fields={'data_source': 'TI'}` 注入 `data_source` 字段（已修复，需验证）
+2. THE `ci_index_member` 接口 SHALL 使用 `inject_fields={'data_source': 'CI'}` 注入 `data_source` 字段（已修复，需验证）
+3. WHEN 重新导入 `index_member_all` 后，THE `sector_constituent` 表中 `data_source='TI'` 的记录数 SHALL 大于 5000
+4. WHEN 重新导入 `ci_index_member` 后，THE `sector_constituent` 表中 `data_source='CI'` 的记录数 SHALL 大于 3000
+5. THE 两个接口 SHALL 不需要 `batch_by_sector` 模式（它们一次性返回全量数据，按 `l1_code` 字段映射到 `sector_code`）
+
+---
+
+### 需求 6：导入进度与错误处理
+
+**用户故事：** 作为量化交易者，我希望在导入大量板块成分数据时能够看到实时进度，并且单个板块失败不影响整体导入。
+
+#### 验收标准
+
+1. THE 导入进度 SHALL 通过 Redis 实时更新，包含：当前板块序号、总板块数、当前板块代码、当前板块名称、已成功写入记录数、失败板块数
+2. WHEN 某个板块的 Tushare API 返回空数据时，THE 导入任务 SHALL 跳过该板块并继续，不计为失败
+3. WHEN 某个板块的 Tushare API 返回错误（非空数据但 code != 0）时，THE 导入任务 SHALL 记录 WARNING 日志，将该板块计为失败，并继续处理下一个板块
+4. THE 导入完成后，THE 导入日志 SHALL 记录：总板块数、成功板块数、失败板块数、总写入记录数
+5. THE 前端导入进度显示 SHALL 展示"正在导入板块 {n}/{total}: {sector_code}"格式的当前状态
+
+---
+
+### 需求 7：正确性属性
+
+**用户故事：** 作为量化交易者，我希望导入的成分股数据满足基本的正确性约束，确保数据质量。
+
+#### 验收标准
+
+1. THE `sector_constituent` 表中每条记录的 `(trade_date, sector_code, data_source, symbol)` 组合 SHALL 唯一（ON CONFLICT DO NOTHING 保证）
+2. THE 导入的 `sector_code` SHALL 来自 `sector_info` 表中已存在的板块代码，不应写入不存在的板块代码
+3. THE 导入的 `symbol` SHALL 为 6 位数字格式（经过代码格式转换）
+4. WHEN `batch_by_sector` 模式下某板块返回的成分股数量达到 `max_rows` 上限时，THE 导入任务 SHALL 记录 WARNING 日志提示数据可能被截断

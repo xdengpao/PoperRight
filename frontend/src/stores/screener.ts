@@ -37,8 +37,22 @@ export interface FactorMeta {
 
 export interface SectorScreenConfig {
   sector_data_source: string
+  sector_type?: string | null
   sector_period: number
   sector_top_n: number
+}
+
+export interface SectorTypeOption {
+  sector_type: string | null
+  label: string
+  count: number
+}
+
+export interface TypeBreakdownItem {
+  sector_type: string | null
+  label: string
+  sector_count: number
+  stock_count: number
 }
 
 export interface CoverageSourceStats {
@@ -47,6 +61,7 @@ export interface CoverageSourceStats {
   sectors_with_constituents: number
   total_stocks: number
   coverage_ratio: number
+  type_breakdown: TypeBreakdownItem[]
 }
 
 export interface StrategyExample {
@@ -73,6 +88,7 @@ export const useScreenerStore = defineStore('screener', () => {
   const factorRegistry = ref<Record<string, FactorMeta[]>>({})
   const strategyExamples = ref<StrategyExample[]>([])
   const sectorCoverage = ref<CoverageSourceStats[]>([])
+  const sectorTypes = ref<SectorTypeOption[]>([])
 
   /** 选股执行中标志，持久化在 store 中以跨组件生命周期保持状态 */
   const running = ref(false)
@@ -141,6 +157,18 @@ export const useScreenerStore = defineStore('screener', () => {
     sectorCoverage.value = res.data.sources
   }
 
+  async function fetchSectorTypes(dataSource: string) {
+    try {
+      const res = await apiClient.get<SectorTypeOption[]>(
+        '/sector/types',
+        { params: { data_source: dataSource } }
+      )
+      sectorTypes.value = res.data
+    } catch {
+      sectorTypes.value = []
+    }
+  }
+
   return {
     results,
     strategies,
@@ -157,6 +185,8 @@ export const useScreenerStore = defineStore('screener', () => {
     fetchStrategyExamples,
     sectorCoverage,
     fetchSectorCoverage,
+    sectorTypes,
+    fetchSectorTypes,
     runScreen,
   }
 })

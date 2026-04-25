@@ -116,6 +116,8 @@ export interface ChartDataResponse {
   chart_type: 'candlestick' | 'line' | 'bar' | null
   columns: ColumnInfo[]
   total_available: number
+  available_codes: string[]
+  selected_code: string | null
 }
 
 // ─── 纯函数（导出供属性测试使用） ─────────────────────────────────────────────
@@ -417,11 +419,12 @@ export const useTusharePreviewStore = defineStore('tusharePreview', () => {
   }
 
   /** 获取图表数据（独立于表格分页） */
-  async function fetchChartData(apiName: string, limit?: number) {
+  async function fetchChartData(apiName: string, limit?: number, code?: string) {
     chartDataLoading.value = true
     try {
       const params: Record<string, unknown> = {}
       if (limit != null) params.limit = limit
+      if (code) params.code = code
 
       const res = await apiClient.get<ChartDataResponse>(
         `/data/tushare/preview/${encodeURIComponent(apiName)}/chart-data`,

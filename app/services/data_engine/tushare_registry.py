@@ -117,6 +117,7 @@ class ApiEntry:
     rate_limit_group: RateLimitGroup = RateLimitGroup.KLINE
     batch_by_code: bool = False  # 是否需要按代码分批
     batch_by_date: bool = False  # 是否需要按日期自动分批
+    batch_by_sector: bool = False  # 是否按板块代码遍历导入（需求 1.1）
     date_chunk_days: int = 30  # 日期分批步长（天数）
     extra_config: dict = field(default_factory=dict)  # 额外配置（如 freq 映射）
     vip_variant: str | None = None  # VIP 批量接口变体名（如 "income_vip"）
@@ -463,12 +464,15 @@ register(ApiEntry(
     code_format=CodeFormat.STOCK_SYMBOL,
     conflict_columns=["symbol"],
     conflict_action="do_update",
-    update_columns=["turnover_rate", "pe_ttm", "pb", "total_mv", "float_mv", "updated_at"],
+    update_columns=["pe_ttm", "pb", "market_cap", "updated_at"],
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    field_mappings=[
+        FieldMapping(source="total_mv", target="market_cap"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1831,6 +1835,12 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=2,
     extra_config={"data_source": "THS", "max_rows": 3000, "estimated_daily_rows": 500},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="vol", target="volume"),
+        FieldMapping(source="turnover_rate", target="turnover"),
+        FieldMapping(source="pct_change", target="change_pct"),
+    ],
 ))
 
 register(ApiEntry(
@@ -1870,7 +1880,7 @@ register(ApiEntry(
     extra_config={"inject_fields": {"data_source": "DC"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
-        FieldMapping(source="type", target="sector_type"),
+        FieldMapping(source="idx_type", target="sector_type"),
     ],
 ))
 
@@ -1912,6 +1922,12 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=2,
     extra_config={"data_source": "DC", "max_rows": 3000, "estimated_daily_rows": 500},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="vol", target="volume"),
+        FieldMapping(source="turnover_rate", target="turnover"),
+        FieldMapping(source="pct_change", target="change_pct"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2028,7 +2044,7 @@ register(ApiEntry(
     extra_config={"inject_fields": {"data_source": "TDX"}},
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
-        FieldMapping(source="type", target="sector_type"),
+        FieldMapping(source="idx_type", target="sector_type"),
         FieldMapping(source="idx_count", target="constituent_count"),
     ],
 ))
@@ -2071,6 +2087,12 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=2,
     extra_config={"data_source": "TDX", "max_rows": 3000, "estimated_daily_rows": 200},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="vol", target="volume"),
+        FieldMapping(source="turnover_rate", target="turnover"),
+        FieldMapping(source="pct_change", target="change_pct"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2327,14 +2349,13 @@ register(ApiEntry(
     code_format=CodeFormat.NONE,
     conflict_columns=["sector_code", "data_source"],
     conflict_action="do_update",
-    update_columns=["sector_name", "sector_type"],
+    update_columns=["name", "sector_type"],
     rate_limit_group=RateLimitGroup.KLINE,
-    extra_config={"data_source": "TI"},
+    extra_config={"inject_fields": {"data_source": "TI"}},
     field_mappings=[
         FieldMapping(source="index_code", target="sector_code"),
         FieldMapping(source="industry_name", target="name"),
         FieldMapping(source="level", target="sector_type"),
-        FieldMapping(source="src", target="data_source"),
     ],
 ))
 
@@ -2351,11 +2372,12 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "TI", "max_rows": 2000},
+    extra_config={"inject_fields": {"data_source": "TI"}, "max_rows": 2000},
     field_mappings=[
         FieldMapping(source="ts_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
         FieldMapping(source="l1_code", target="sector_code"),
+        FieldMapping(source="in_date", target="trade_date"),
     ],
 ))
 
@@ -2375,6 +2397,12 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=10,
     extra_config={"data_source": "TI", "max_rows": 4000, "estimated_daily_rows": 200},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="vol", target="volume"),
+        FieldMapping(source="turnover_rate", target="turnover"),
+        FieldMapping(source="pct_change", target="change_pct"),
+    ],
 ))
 
 register(ApiEntry(
@@ -2410,11 +2438,12 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"data_source": "CI", "max_rows": 5000},
+    extra_config={"inject_fields": {"data_source": "CI"}, "max_rows": 5000},
     field_mappings=[
         FieldMapping(source="ts_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
         FieldMapping(source="l1_code", target="sector_code"),
+        FieldMapping(source="in_date", target="trade_date"),
     ],
 ))
 
@@ -2434,6 +2463,12 @@ register(ApiEntry(
     batch_by_date=True,
     date_chunk_days=10,
     extra_config={"data_source": "CI", "max_rows": 4000, "estimated_daily_rows": 300},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="sector_code"),
+        FieldMapping(source="vol", target="volume"),
+        FieldMapping(source="turnover_rate", target="turnover"),
+        FieldMapping(source="pct_change", target="change_pct"),
+    ],
 ))
 
 # ===========================================================================
@@ -2480,8 +2515,8 @@ register(ApiEntry(
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
-    date_chunk_days=120,
-    extra_config={"max_rows": 8000, "estimated_daily_rows": 50},
+    date_chunk_days=1,
+    extra_config={"max_rows": 8000, "estimated_daily_rows": 50, "use_trade_date_loop": True},
 ))
 
 # ===========================================================================

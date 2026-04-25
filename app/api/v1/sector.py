@@ -21,6 +21,7 @@
 
 覆盖率统计：
 - GET  /sector/coverage             — 数据源覆盖率统计（需求 16.2）
+- GET  /sector/types                — 板块类型列表（需求 22.8）
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_pg_session
 from app.core.redis_client import cache_delete, cache_get
+from app.core.schemas import get_sector_type_label
 from app.models.sector import DataSource, SectorConstituent, SectorInfo, SectorType
 from app.services.data_engine.sector_import import SectorImportService
 from app.services.data_engine.sector_repository import SectorRepository
@@ -156,6 +158,15 @@ class KlineBrowseItem(BaseModel):
     change_pct: float | None = None
 
 
+class TypeBreakdownItem(BaseModel):
+    """按板块类型分组的统计项（需求 22.10）"""
+
+    sector_type: str | None  # 原始 sector_type 值
+    label: str  # 中文标签
+    sector_count: int  # 该类型下的板块数量
+    stock_count: int  # 该类型下的不同股票数量
+
+
 class CoverageSourceStats(BaseModel):
     """单个数据源的覆盖率统计"""
 
@@ -164,6 +175,7 @@ class CoverageSourceStats(BaseModel):
     sectors_with_constituents: int  # 有成分股数据的板块数
     total_stocks: int  # 成分股覆盖的不同股票数
     coverage_ratio: float  # sectors_with_constituents / total_sectors
+    type_breakdown: list[TypeBreakdownItem] = []  # 按板块类型分组的统计（需求 22.10）
 
 
 class CoverageResponse(BaseModel):
@@ -187,7 +199,7 @@ async def get_sector_coverage(
     对应需求 16.2。
     """
     sources = []
-    for ds in ["DC", "TI", "TDX"]:
+    for ds in ["DC", "THS", "TDX", "TI", "CI"]:
         # 查询该数据源的板块总数
         total_stmt = (
             select(func.count())
@@ -233,6 +245,63 @@ async def get_sector_coverage(
             sectors_with / total_sectors if total_sectors > 0 else 0.0
         )
 
+        # 按 sector_type 分组统计板块数量（需求 22.10）
+        type_sector_count_stmt = (
+            select(
+                SectorInfo.sector_type,
+                func.count().label("sector_count"),
+            )
+            .where(SectorInfo.data_source == ds)
+            .group_by(SectorInfo.sector_type)
+        )
+        type_sector_rows = (
+            await pg_session.execute(type_sector_count_stmt)
+        ).all()
+
+        # 按 sector_type 分组统计不同股票数量（需求 22.10）
+        # 通过 sector_constituent 关联 sector_info 获取 sector_type
+        type_stock_count_stmt = (
+            select(
+                SectorInfo.sector_type,
+                func.count(func.distinct(SectorConstituent.symbol)).label(
+                    "stock_count"
+                ),
+            )
+            .select_from(SectorConstituent)
+            .join(
+                SectorInfo,
+                (SectorConstituent.sector_code == SectorInfo.sector_code)
+                & (SectorConstituent.data_source == SectorInfo.data_source),
+            )
+            .where(SectorConstituent.data_source == ds)
+        )
+        if latest_date:
+            type_stock_count_stmt = type_stock_count_stmt.where(
+                SectorConstituent.trade_date == latest_date
+            )
+        type_stock_count_stmt = type_stock_count_stmt.group_by(
+            SectorInfo.sector_type
+        )
+        type_stock_rows = (
+            await pg_session.execute(type_stock_count_stmt)
+        ).all()
+
+        # 构建 sector_type → stock_count 映射
+        stock_count_map: dict[str | None, int] = {
+            row.sector_type: row.stock_count for row in type_stock_rows
+        }
+
+        # 组装 type_breakdown 列表
+        type_breakdown = [
+            TypeBreakdownItem(
+                sector_type=row.sector_type,
+                label=get_sector_type_label(row.sector_type),
+                sector_count=row.sector_count,
+                stock_count=stock_count_map.get(row.sector_type, 0),
+            )
+            for row in type_sector_rows
+        ]
+
         sources.append(
             CoverageSourceStats(
                 data_source=ds,
@@ -240,10 +309,51 @@ async def get_sector_coverage(
                 sectors_with_constituents=sectors_with,
                 total_stocks=total_stocks,
                 coverage_ratio=round(coverage_ratio, 4),
+                type_breakdown=type_breakdown,
             )
         )
 
     return CoverageResponse(sources=sources)
+
+
+# ---------------------------------------------------------------------------
+# 板块类型查询端点（需求 22.8）
+# ---------------------------------------------------------------------------
+
+
+@router.get("/types")
+async def get_sector_types(
+    data_source: str = Query(..., description="数据来源：DC/THS/TDX/TI/CI"),
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> list[dict]:
+    """
+    返回指定数据来源下所有不重复的 sector_type 值列表。
+
+    每个值附带中文名称（label）和该类型下的板块数量（count）。
+    按数量降序排列。
+
+    对应需求 22.8。
+    """
+    # 查询该数据来源下所有不重复的 sector_type 及其板块数量
+    stmt = (
+        select(
+            SectorInfo.sector_type,
+            func.count().label("count"),
+        )
+        .where(SectorInfo.data_source == data_source)
+        .group_by(SectorInfo.sector_type)
+        .order_by(func.count().desc())
+    )
+    rows = (await pg_session.execute(stmt)).all()
+    # 构造响应，附带中文标签
+    return [
+        {
+            "sector_type": row.sector_type,
+            "label": get_sector_type_label(row.sector_type),
+            "count": row.count,
+        }
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
