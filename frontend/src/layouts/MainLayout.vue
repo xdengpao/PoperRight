@@ -164,7 +164,9 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 // --- Offline detection ---
-const isOffline = ref(!navigator.onLine)
+// 注意：navigator.onLine 在某些情况下可能不可靠（如 VPN、代理、浏览器差异）
+// 初始值设为 false（假设网络正常），仅在实际检测到断开时才显示提示
+const isOffline = ref(false)
 
 function handleOnline() { isOffline.value = false }
 function handleOffline() { isOffline.value = true }
@@ -635,10 +637,10 @@ function handleLogout() {
   min-width: 1080px;
 }
 
-/* Offline bar */
+/* Offline bar - 显示在底部，不遮挡顶部导航 */
 .offline-bar {
   position: fixed;
-  top: 0;
+  bottom: 0;
   left: 0;
   right: 0;
   z-index: 10000;
@@ -656,7 +658,7 @@ function handleLogout() {
 }
 .offline-bar-enter-from,
 .offline-bar-leave-to {
-  transform: translateY(-100%);
+  transform: translateY(100%);
   opacity: 0;
 }
 </style>

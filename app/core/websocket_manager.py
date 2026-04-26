@@ -3,6 +3,7 @@ WebSocket 连接管理器
 
 支持：
 - 按用户 ID 管理多个 WebSocket 连接
+- 按频道管理匿名连接（公开大盘数据等）
 - 广播消息到所有连接
 - 单播消息到指定用户
 - asyncio.Lock 保证线程安全
@@ -23,6 +24,8 @@ class WebSocketManager:
     def __init__(self) -> None:
         # user_id -> set of WebSocket connections
         self._connections: dict[str, set[WebSocket]] = defaultdict(set)
+        # channel -> set of anonymous WebSocket connections
+        self._anonymous_connections: dict[str, set[WebSocket]] = defaultdict(set)
         self._lock = asyncio.Lock()
 
     async def connect(self, user_id: str, websocket: WebSocket) -> None:
@@ -39,6 +42,20 @@ class WebSocketManager:
             if not self._connections[user_id]:
                 del self._connections[user_id]
         logger.info("WebSocket disconnected: user_id=%s", user_id)
+
+    async def connect_anonymous(self, websocket: WebSocket, channel: str) -> None:
+        """注册一个匿名 WebSocket 连接到指定频道"""
+        async with self._lock:
+            self._anonymous_connections[channel].add(websocket)
+        logger.info("Anonymous WebSocket connected to channel: %s", channel)
+
+    async def disconnect_anonymous(self, websocket: WebSocket, channel: str) -> None:
+        """注销一个匿名 WebSocket 连接"""
+        async with self._lock:
+            self._anonymous_connections[channel].discard(websocket)
+            if not self._anonymous_connections[channel]:
+                del self._anonymous_connections[channel]
+        logger.info("Anonymous WebSocket disconnected from channel: %s", channel)
 
     async def send_to_user(self, user_id: str, message: str) -> None:
         """向指定用户的所有连接发送消息（单播）"""
@@ -83,6 +100,26 @@ class WebSocketManager:
                     self._connections[user_id].discard(ws)
                     if not self._connections.get(user_id):
                         self._connections.pop(user_id, None)
+
+    async def broadcast_to_channel(self, channel: str, message: str) -> None:
+        """向指定频道的所有匿名连接广播消息"""
+        async with self._lock:
+            sockets = set(self._anonymous_connections.get(channel, set()))
+
+        dead: list[WebSocket] = []
+        for ws in sockets:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                logger.warning("Broadcast to channel %s failed, marking connection dead", channel)
+                dead.append(ws)
+
+        if dead:
+            async with self._lock:
+                for ws in dead:
+                    self._anonymous_connections[channel].discard(ws)
+                if not self._anonymous_connections.get(channel):
+                    self._anonymous_connections.pop(channel, None)
 
     @property
     def active_user_count(self) -> int:

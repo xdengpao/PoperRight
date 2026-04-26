@@ -63,3 +63,54 @@
   - [x] 8.3 测试 `ths_member` 的 `inject_fields` 不包含 `trade_date` 硬编码
   - [x] 8.4 测试 trade_date 动态注入逻辑：模拟 API 不返回 trade_date 时注入当前日期
   - [ ] 8.5 验证修复后导入的数据：`tdx_member` 和 `dc_member` 的 trade_date 应为真实日期而非 `1900-01-01`
+
+---
+
+## 新增任务：TI batch_by_sector 与 trade_date 统一（高优先级）
+
+- [x] 9. index_member_all（TI）启用 batch_by_sector 模式
+  - [x] 9.1 修改 `index_member_all` 注册配置：添加 `batch_by_sector=True`
+  - [x] 9.2 验证 `index_member_all` 的 `field_mappings` 保留 `in_date` → `trade_date` 映射
+  - [x] 9.3 修改 `index_member_all` 注册配置：提高 `max_rows` 到 5000
+  - [x] 9.4 验证 `index_member_all` 的 `inject_fields` 包含 `data_source: "TI"`
+  - [x] 9.5 测试 `index_member_all` 的 `batch_by_sector=True` 配置
+
+- [x] 10. ci_index_member（CI）验证配置
+  - [x] 10.1 验证 `ci_index_member` 的 `field_mappings` 保留 `in_date` → `trade_date` 映射
+  - [x] 10.2 验证 `ci_index_member` 的 `inject_fields` 包含 `data_source: "CI"`
+
+- [x] 11. ths_member 使用导入日期作为纳入日期
+  - [x] 11.1 验证 `ths_member` 的 `field_mappings` 不包含 `trade_date` 映射
+  - [x] 11.2 验证 `_process_batched_by_sector` 动态注入当前日期作为 `trade_date`
+  - [x] 11.3 测试 THS 的 trade_date 动态注入逻辑
+
+- [x] 12. TDX/DC 保留调入日期
+  - [x] 12.1 验证 `tdx_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 12.2 验证 `dc_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 12.3 验证 `inject_fields` 移除硬编码的 `trade_date`
+
+- [ ] 13. 导入验证
+  - [ ] 13.1 重新导入 `index_member_all`，验证 `data_source='TI'` 的板块数接近 359
+  - [ ] 13.2 重新导入 `ci_index_member`，验证 `data_source='CI'` 的记录数大于 3000
+  - [ ] 13.3 验证 TI/CI 的 `trade_date` 为 API 返回的 `in_date`
+  - [ ] 13.4 验证 TDX/DC 的 `trade_date` 为 API 返回的调入日期
+  - [ ] 13.5 验证 THS 的 `trade_date` 为导入当天日期
+
+---
+
+## 新增任务：单元测试更新
+
+- [x] 14. 注册表配置测试更新
+  - [x] 14.1 测试 `index_member_all` 的 `batch_by_sector=True`
+  - [x] 14.2 测试 `index_member_all` 的 `field_mappings` 包含 `in_date` → `trade_date`
+  - [x] 14.3 测试 `ci_index_member` 的 `field_mappings` 包含 `in_date` → `trade_date`
+  - [x] 14.4 测试 `tdx_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 14.5 测试 `dc_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 14.6 测试 `ths_member` 的 `field_mappings` 不包含 `trade_date` 映射
+
+- [x] 15. trade_date 处理测试
+  - [x] 15.1 测试 TI 的 trade_date：应为 API 返回的 `in_date`
+  - [x] 15.2 测试 CI 的 trade_date：应为 API 返回的 `in_date`
+  - [x] 15.3 测试 TDX 的 trade_date：应为 API 返回的 `trade_date`
+  - [x] 15.4 测试 DC 的 trade_date：应为 API 返回的 `trade_date`
+  - [x] 15.5 测试 THS 的 trade_date：应为导入当天日期

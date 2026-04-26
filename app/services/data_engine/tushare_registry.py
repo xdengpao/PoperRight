@@ -2378,12 +2378,15 @@ register(ApiEntry(
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.FUNDAMENTALS,
-    extra_config={"inject_fields": {"data_source": "TI"}, "max_rows": 2000},
+    # 注意：index_member_all API 不支持按 l1_code 参数查询（带参数返回空）
+    # 必须不带参数调用，一次性获取所有数据
+    batch_by_sector=False,
+    extra_config={"inject_fields": {"data_source": "TI"}, "max_rows": 5000},
     field_mappings=[
         FieldMapping(source="ts_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
         FieldMapping(source="l1_code", target="sector_code"),
-        FieldMapping(source="in_date", target="trade_date"),
+        FieldMapping(source="in_date", target="trade_date"),  # 保留 API 返回的纳入日期
     ],
 ))
 

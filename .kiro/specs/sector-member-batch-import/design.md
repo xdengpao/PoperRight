@@ -2,18 +2,26 @@
 
 ## 概述
 
-在现有导入框架（`app/tasks/tushare_import.py`）中新增 `batch_by_sector` 分批模式，使 `ths_member`、`dc_member`、`tdx_member` 三个接口能够自动遍历 `sector_info` 表中所有板块代码逐个调用 Tushare API，获取完整的板块成分数据。`index_member_all`（TI）和 `ci_index_member`（CI）已修复 `inject_fields`，仅需重新导入验证。
+在现有导入框架（`app/tasks/tushare_import.py`）中新增 `batch_by_sector` 分批模式，使 `ths_member`、`dc_member`、`tdx_member`、`index_member_all` 四个接口能够自动遍历 `sector_info` 表中所有板块代码逐个调用 Tushare API，获取完整的板块成分数据。
 
 ### 设计决策
 
 1. **复用现有框架**：`batch_by_sector` 作为 `ApiEntry` 的新字段，与 `batch_by_code`/`batch_by_date` 平级，通过 `determine_batch_strategy` 路由分发，最大程度复用现有的进度更新、停止信号、错误处理机制。
+
 2. **板块代码来源**：从 `sector_info` 表按 `data_source` 过滤获取（`data_source` 从 `inject_fields` 中提取），而非硬编码，确保新增板块自动纳入遍历范围。
+
 3. **容错优先**：单个板块失败不中断整体导入，空数据跳过不计失败，与现有 `_process_batched_index` 的错误处理模式一致。
+
 4. **`batch_by_sector` 优先级最高**：在 `determine_batch_strategy` 中排在所有现有策略之前，避免被 `batch_by_code` 或 `batch_by_date` 误路由。
-5. **symbol 格式统一**：将 `ths_member`/`dc_member`/`tdx_member` 的 `code_format` 改为 `STOCK_SYMBOL`，确保 `symbol` 字段为 6 位纯数字，与 `stock_info.symbol` 格式一致，支持板块因子计算时的 JOIN 操作。
-6. **trade_date 字段正确处理**：
-   - `tdx_member` 和 `dc_member`：API 返回 `trade_date` 字段，通过 `FieldMapping` 映射到目标字段，移除 `inject_fields` 中的硬编码日期
-   - `ths_member`：API 不返回 `trade_date` 字段，在 `_process_batched_by_sector` 中动态注入当前日期作为快照日期
+
+5. **symbol 格式统一**：将所有板块成分接口的 `code_format` 改为 `STOCK_SYMBOL`，确保 `symbol` 字段为 6 位纯数字，与 `stock_info.symbol` 格式一致，支持板块因子计算时的 JOIN 操作。
+
+6. **trade_date 字段语义统一为"纳入日期"**：
+   - `trade_date` 字段统一表示"股票加入板块的日期"（纳入日期）
+   - TI/CI：保留 API 返回的 `in_date`（纳入日期）
+   - TDX/DC：保留 API 返回的 `trade_date`（调入日期）
+   - THS：API 不返回日期字段，使用导入当天日期作为纳入日期
+   - 不引入"快照日期"概念，减少数据冗余
 
 ## 架构
 
@@ -176,9 +184,9 @@ if len(rows) >= max_rows:
 - API 返回空数据 → 跳过，`empty_count` +1，不计为失败
 - DB 写入异常 → ERROR 日志，`failed_count` +1，继续
 
-**trade_date 动态注入逻辑**（需求 2.6、7.5、7.6）：
+**trade_date 动态注入逻辑**（仅针对 THS）：
 
-对于 `ths_member` 等 API 不返回 `trade_date` 字段的接口，在 `inject_fields` 处理后检查目标字段是否缺失 `trade_date`，若缺失则注入当前日期：
+对于 `ths_member` API 不返回 `trade_date` 字段的情况，在 `inject_fields` 处理后检查目标字段是否缺失 `trade_date`，若缺失则注入当前日期作为纳入日期：
 
 ```python
 from datetime import date
@@ -188,8 +196,8 @@ if inject_fields:
     for row in rows:
         row.update(inject_fields)
 
-# 检查是否需要动态注入 trade_date（针对 ths_member 等 API 不返回日期的接口）
-# 条件：目标字段中没有 trade_date，且 inject_fields 中也没有
+# 检查是否需要动态注入 trade_date（仅针对 ths_member）
+# 条件：字段映射中没有 trade_date，且 inject_fields 中也没有
 has_trade_date_in_mapping = any(
     fm.target == "trade_date" for fm in entry.field_mappings
 )
@@ -198,6 +206,10 @@ if not has_trade_date_in_mapping and "trade_date" not in inject_fields:
     for row in rows:
         row["trade_date"] = current_date
 ```
+
+**其他数据源保留 API 返回的日期**：
+- TI/CI：`field_mappings` 包含 `FieldMapping(source="in_date", target="trade_date")`
+- TDX/DC：`field_mappings` 包含 `FieldMapping(source="trade_date", target="trade_date")`
 
 **返回值**：
 
@@ -227,7 +239,7 @@ elif strategy == "by_sector":
 
 ### 5. 注册表配置变更
 
-**`ths_member`**（需求 2）：
+**`ths_member`**（需求 2、7）：
 
 ```python
 register(ApiEntry(
@@ -238,14 +250,14 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.STOCK_SYMBOL,  # 改为 STOCK_SYMBOL，确保 symbol 为 6 位数字
+    code_format=CodeFormat.STOCK_SYMBOL,  # 确保 symbol 为 6 位数字
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "THS"},  # 移除 trade_date 硬编码，由导入逻辑动态注入当前日期
+        "inject_fields": {"data_source": "THS"},  # 不注入 trade_date，由导入逻辑动态注入当前日期
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
@@ -256,7 +268,7 @@ register(ApiEntry(
 ))
 ```
 
-**`dc_member`**（需求 3）：
+**`dc_member`**（需求 3、8）：
 
 ```python
 register(ApiEntry(
@@ -267,25 +279,25 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.STOCK_SYMBOL,  # 改为 STOCK_SYMBOL
+    code_format=CodeFormat.STOCK_SYMBOL,  # 确保 symbol 为 6 位数字
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "DC"},  # 移除 trade_date 硬编码
+        "inject_fields": {"data_source": "DC"},  # 不注入 trade_date
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
-        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的日期
+        FieldMapping(source="trade_date", target="trade_date"),  # 保留 API 返回的调入日期
     ],
 ))
 ```
 
-**`tdx_member`**（需求 4）：
+**`tdx_member`**（需求 4、8）：
 
 ```python
 register(ApiEntry(
@@ -296,25 +308,76 @@ register(ApiEntry(
     token_tier=TokenTier.ADVANCED,
     target_table="sector_constituent",
     storage_engine=StorageEngine.PG,
-    code_format=CodeFormat.STOCK_SYMBOL,  # 改为 STOCK_SYMBOL
+    code_format=CodeFormat.STOCK_SYMBOL,  # 确保 symbol 为 6 位数字
     conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
     conflict_action="do_nothing",
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "TDX"},  # 移除 trade_date 硬编码
+        "inject_fields": {"data_source": "TDX"},  # 不注入 trade_date
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="con_name", target="stock_name"),
-        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的日期
+        FieldMapping(source="trade_date", target="trade_date"),  # 保留 API 返回的调入日期
     ],
 ))
 ```
 
-**`index_member_all` / `ci_index_member`**（需求 5）：不需要 `batch_by_sector`，`inject_fields` 已修复，仅需重新导入验证。
+**`index_member_all`（TI）**（需求 5）：
+
+```python
+register(ApiEntry(
+    api_name="index_member_all",
+    label="申万行业成分（分级）",
+    category="index_data",
+    subcategory="申万行业数据（分类/成分/日线行情/实时行情）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    batch_by_sector=True,  # 新增
+    extra_config={"inject_fields": {"data_source": "TI"}, "max_rows": 5000},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="symbol"),
+        FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="l1_code", target="sector_code"),
+        FieldMapping(source="in_date", target="trade_date"),  # 保留 API 返回的纳入日期
+    ],
+))
+```
+
+**`ci_index_member`（CI）**（需求 6）：
+
+```python
+register(ApiEntry(
+    api_name="ci_index_member",
+    label="中信行业成分",
+    category="index_data",
+    subcategory="中信行业数据（成分/日线行情）",
+    token_tier=TokenTier.ADVANCED,
+    target_table="sector_constituent",
+    storage_engine=StorageEngine.PG,
+    code_format=CodeFormat.NONE,
+    conflict_columns=["trade_date", "sector_code", "data_source", "symbol"],
+    conflict_action="do_nothing",
+    optional_params=[ParamType.SECTOR_CODE, ParamType.STOCK_CODE],
+    rate_limit_group=RateLimitGroup.FUNDAMENTALS,
+    extra_config={"inject_fields": {"data_source": "CI"}, "max_rows": 5000},
+    field_mappings=[
+        FieldMapping(source="ts_code", target="symbol"),
+        FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="l1_code", target="sector_code"),
+        FieldMapping(source="in_date", target="trade_date"),  # 保留 API 返回的纳入日期
+    ],
+))
+```
 
 ### 6. 前端进度展示适配
 
@@ -437,11 +500,14 @@ register(ApiEntry(
 | 测试 | 覆盖范围 |
 |------|----------|
 | `determine_batch_strategy` 返回 `"by_sector"` | `batch_by_sector=True` 时路由正确，优先于其他策略 |
-| 注册表配置验证 | `ths_member`/`dc_member`/`tdx_member` 的 `batch_by_sector=True` |
-| 注册表配置验证 | `ths_member`/`dc_member`/`tdx_member` 的 `code_format=STOCK_SYMBOL` |
-| 注册表配置验证 | 三个接口的 `inject_fields` 包含 `data_source` 和 `trade_date` |
-| 注册表配置验证 | `index_member_all`/`ci_index_member` 的 `inject_fields` 包含正确 `data_source` |
+| 注册表配置验证 | `ths_member`/`dc_member`/`tdx_member`/`index_member_all` 的 `batch_by_sector=True` |
+| 注册表配置验证 | 所有接口的 `code_format=STOCK_SYMBOL`（TI/CI 除外） |
+| 注册表配置验证 | `ths_member` 的 `field_mappings` 不包含 `trade_date` 映射 |
+| 注册表配置验证 | `dc_member`/`tdx_member` 的 `field_mappings` 包含 `trade_date` 映射 |
+| 注册表配置验证 | `index_member_all`/`ci_index_member` 的 `field_mappings` 包含 `in_date` → `trade_date` 映射 |
+| 注册表配置验证 | 所有接口的 `inject_fields` 包含正确的 `data_source` |
 | `_process_batched_by_sector` mock 测试 | 遍历逻辑、进度更新、错误处理 |
 | 空板块列表处理 | 返回 `completed` + `record_count=0`，日志级别为 WARNING |
 | 截断检测 | 返回行数 ≥ `max_rows` 时记录 WARNING |
 | `inject_fields` 缺少 `data_source` | 返回 `failed` 状态 |
+| trade_date 处理验证 | THS 动态注入当前日期，其他数据源保留 API 返回日期 |

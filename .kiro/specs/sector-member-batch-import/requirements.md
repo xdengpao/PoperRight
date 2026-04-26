@@ -30,7 +30,31 @@
 
 由于 `sector_constituent` 表有唯一约束 `UNIQUE(trade_date, sector_code, data_source, symbol)`，当 trade_date 都被硬编码为 `1900-01-01` 时，同一板块的同一股票多次导入会被去重，导致大量数据丢失。
 
-本需求定义新增"按板块代码遍历"导入模式，并修复 trade_date 字段映射问题，使五个数据源均能获取完整的板块成分数据。
+### 问题三：TI/CI 的 trade_date 字段语义需统一
+
+经进一步分析，TI（申万行业）和 CI（中信行业）的 `in_date` 字段含义清晰，应保留：
+
+| 数据源 | API 字段 | 含义 | 建议处理 |
+|--------|----------|------|----------|
+| TI | `in_date` | 股票纳入该行业的日期 | 保留，映射到 `trade_date` |
+| CI | `in_date` | 股票纳入该行业的日期 | 保留，映射到 `trade_date` |
+| TDX | `trade_date` | 股票调入板块的日期 | 保留，映射到 `trade_date` |
+| DC | `trade_date` | 股票调入板块的日期 | 保留，映射到 `trade_date` |
+| THS | 无 | API 不返回日期 | 使用导入当天日期作为纳入日期 |
+
+**设计决策**：
+- `trade_date` 字段语义统一为"纳入日期"（股票加入板块的日期）
+- 不引入"快照日期"概念，减少数据冗余
+- THS 因 API 不返回日期，使用导入当天日期作为纳入日期
+
+### 问题四：TI 板块覆盖率低
+
+TI（申万行业）有 359 个板块，但只有 27 个有成分股数据。原因：
+- `index_member_all` 接口没有配置 `batch_by_sector=True`
+- `max_rows=2000` 可能导致数据截断
+- 没有按板块遍历，无法确保所有板块都被覆盖
+
+本需求定义新增"按板块代码遍历"导入模式，并统一 trade_date 字段语义，使五个数据源均能获取完整的板块成分数据。
 
 ## 术语表
 
@@ -70,7 +94,7 @@
 3. THE 导入任务 SHALL 对每个 THS 板块代码调用 `ths_member` 接口，传入 `ts_code` 参数
 4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='THS'` 的板块数 SHALL 接近 1724（允许部分板块无成分股数据）
 5. THE 导入任务 SHALL 使用 `inject_fields={'data_source': 'THS'}` 注入数据来源字段
-6. WHEN API 未返回 `trade_date` 字段时，THE 导入任务 SHALL 使用当前日期作为快照日期（`date.today()`）
+6. WHEN API 未返回 `trade_date` 字段时，THE 导入任务 SHALL 使用当前日期作为纳入日期（`date.today()`）
 
 ---
 
@@ -104,21 +128,65 @@
 
 ---
 
-### 需求 5：index_member_all（TI）和 ci_index_member（CI）重新导入
+### 需求 5：index_member_all（TI）启用 batch_by_sector 模式
 
-**用户故事：** 作为量化交易者，我希望申万行业 TI 和中信行业 CI 的成分股数据能够正确导入，以便使用行业分类进行板块筛选。
+**优先级：高**
+
+**用户故事：** 作为量化交易者，我希望申万行业 TI 的 359 个板块全部导入成分股数据，且 trade_date 保留 API 返回的纳入日期。
 
 #### 验收标准
 
-1. THE `index_member_all` 接口 SHALL 使用 `inject_fields={'data_source': 'TI'}` 注入 `data_source` 字段（已修复，需验证）
-2. THE `ci_index_member` 接口 SHALL 使用 `inject_fields={'data_source': 'CI'}` 注入 `data_source` 字段（已修复，需验证）
-3. WHEN 重新导入 `index_member_all` 后，THE `sector_constituent` 表中 `data_source='TI'` 的记录数 SHALL 大于 5000
-4. WHEN 重新导入 `ci_index_member` 后，THE `sector_constituent` 表中 `data_source='CI'` 的记录数 SHALL 大于 3000
-5. THE 两个接口 SHALL 不需要 `batch_by_sector` 模式（它们一次性返回全量数据，按 `l1_code` 字段映射到 `sector_code`）
+1. THE `index_member_all` 接口注册配置 SHALL 设置 `batch_by_sector=True`
+2. WHEN 导入 `index_member_all` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='TI'` 获取所有 TI 板块代码
+3. THE 导入任务 SHALL 对每个 TI 板块代码调用 `index_member_all` 接口，传入 `ts_code` 参数
+4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='TI'` 的板块数 SHALL 接近 359（允许部分板块无成分股数据）
+5. THE 注册表配置 SHALL 保留 `in_date` → `trade_date` 的字段映射，使用 API 返回的纳入日期
+6. THE `max_rows` 配置 SHALL 提高到 5000 或更高，避免截断
 
 ---
 
-### 需求 6：导入进度与错误处理
+### 需求 6：ci_index_member（CI）保留纳入日期
+
+**优先级：高**
+
+**用户故事：** 作为量化交易者，我希望中信行业 CI 的成分股数据保留 API 返回的纳入日期。
+
+#### 验收标准
+
+1. THE 注册表配置 SHALL 保留 `in_date` → `trade_date` 的字段映射，使用 API 返回的纳入日期
+2. WHEN 重新导入 `ci_index_member` 后，THE `sector_constituent` 表中 `data_source='CI'` 的记录数 SHALL 大于 3000
+3. THE `ci_index_member` 接口 SHALL 保持 `inject_fields={'data_source': 'CI'}` 注入数据来源字段
+
+---
+
+### 需求 7：ths_member 使用导入日期作为纳入日期
+
+**优先级：高**
+
+**用户故事：** 作为量化交易者，我希望同花顺 THS 的成分股数据使用导入当天日期作为纳入日期，因为 API 不返回日期字段。
+
+#### 验收标准
+
+1. THE `ths_member` 接口注册配置 SHALL 设置 `batch_by_sector=True`
+2. WHEN API 未返回 `trade_date` 字段时，THE 导入任务 SHALL 使用当前日期作为纳入日期（`date.today()`）
+3. THE 注册表配置 SHALL 不包含 `trade_date` 的字段映射，由导入逻辑动态注入当前日期
+
+---
+
+### 需求 8：TDX/DC 保留调入日期
+
+**优先级：中**
+
+**用户故事：** 作为量化交易者，我希望通达信 TDX 和东方财富 DC 的成分股数据保留 API 返回的调入日期。
+
+#### 验收标准
+
+1. THE 注册表配置 SHALL 保留 `trade_date` 字段映射，使用 API 返回的调入日期
+2. THE `inject_fields` SHALL 移除硬编码的 `trade_date` 字段，仅保留 `{"data_source": "TDX/DC"}`
+
+---
+
+### 需求 9：导入进度与错误处理
 
 **用户故事：** 作为量化交易者，我希望在导入大量板块成分数据时能够看到实时进度，并且单个板块失败不影响整体导入。
 
@@ -132,7 +200,7 @@
 
 ---
 
-### 需求 7：正确性属性
+### 需求 10：正确性属性
 
 **用户故事：** 作为量化交易者，我希望导入的成分股数据满足基本的正确性约束，确保数据质量。
 
@@ -142,5 +210,7 @@
 2. THE 导入的 `sector_code` SHALL 来自 `sector_info` 表中已存在的板块代码，不应写入不存在的板块代码
 3. THE 导入的 `symbol` SHALL 为 6 位数字格式（经过代码格式转换）
 4. WHEN `batch_by_sector` 模式下某板块返回的成分股数量达到 `max_rows` 上限时，THE 导入任务 SHALL 记录 WARNING 日志提示数据可能被截断
-5. THE `tdx_member` 和 `dc_member` 导入的 `trade_date` SHALL 使用 API 返回的真实日期字段，而非硬编码值
-6. THE `ths_member` 导入的 `trade_date` SHALL 使用导入当天的日期作为快照日期
+5. THE `trade_date` 字段语义 SHALL 统一为"纳入日期"（股票加入板块的日期）：
+   - TI/CI：使用 API 返回的 `in_date`
+   - TDX/DC：使用 API 返回的 `trade_date`
+   - THS：使用导入当天日期（因 API 不返回日期）
