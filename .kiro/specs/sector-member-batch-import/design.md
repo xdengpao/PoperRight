@@ -11,6 +11,9 @@
 3. **容错优先**：单个板块失败不中断整体导入，空数据跳过不计失败，与现有 `_process_batched_index` 的错误处理模式一致。
 4. **`batch_by_sector` 优先级最高**：在 `determine_batch_strategy` 中排在所有现有策略之前，避免被 `batch_by_code` 或 `batch_by_date` 误路由。
 5. **symbol 格式统一**：将 `ths_member`/`dc_member`/`tdx_member` 的 `code_format` 改为 `STOCK_SYMBOL`，确保 `symbol` 字段为 6 位纯数字，与 `stock_info.symbol` 格式一致，支持板块因子计算时的 JOIN 操作。
+6. **trade_date 字段正确处理**：
+   - `tdx_member` 和 `dc_member`：API 返回 `trade_date` 字段，通过 `FieldMapping` 映射到目标字段，移除 `inject_fields` 中的硬编码日期
+   - `ths_member`：API 不返回 `trade_date` 字段，在 `_process_batched_by_sector` 中动态注入当前日期作为快照日期
 
 ## 架构
 
@@ -173,6 +176,29 @@ if len(rows) >= max_rows:
 - API 返回空数据 → 跳过，`empty_count` +1，不计为失败
 - DB 写入异常 → ERROR 日志，`failed_count` +1，继续
 
+**trade_date 动态注入逻辑**（需求 2.6、7.5、7.6）：
+
+对于 `ths_member` 等 API 不返回 `trade_date` 字段的接口，在 `inject_fields` 处理后检查目标字段是否缺失 `trade_date`，若缺失则注入当前日期：
+
+```python
+from datetime import date
+
+# 在 inject_fields 处理后，检查是否需要动态注入 trade_date
+if inject_fields:
+    for row in rows:
+        row.update(inject_fields)
+
+# 检查是否需要动态注入 trade_date（针对 ths_member 等 API 不返回日期的接口）
+# 条件：目标字段中没有 trade_date，且 inject_fields 中也没有
+has_trade_date_in_mapping = any(
+    fm.target == "trade_date" for fm in entry.field_mappings
+)
+if not has_trade_date_in_mapping and "trade_date" not in inject_fields:
+    current_date = date.today().strftime("%Y%m%d")
+    for row in rows:
+        row["trade_date"] = current_date
+```
+
 **返回值**：
 
 ```python
@@ -219,12 +245,13 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "THS", "trade_date": "19000101"},
+        "inject_fields": {"data_source": "THS"},  # 移除 trade_date 硬编码，由导入逻辑动态注入当前日期
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),  # 会被 _convert_codes 处理为 6 位
         FieldMapping(source="con_name", target="stock_name"),
+        # 注意：ths_member API 不返回 trade_date，由 _process_batched_by_sector 动态注入当前日期
     ],
 ))
 ```
@@ -247,12 +274,13 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "DC", "trade_date": "19000101"},  # 添加 trade_date
+        "inject_fields": {"data_source": "DC"},  # 移除 trade_date 硬编码
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的日期
     ],
 ))
 ```
@@ -275,12 +303,13 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,  # 新增
     extra_config={
-        "inject_fields": {"data_source": "TDX", "trade_date": "19000101"},  # 添加 trade_date
+        "inject_fields": {"data_source": "TDX"},  # 移除 trade_date 硬编码
     },
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="con_name", target="stock_name"),
+        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的日期
     ],
 ))
 ```

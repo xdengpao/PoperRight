@@ -217,8 +217,8 @@ async def _redis_delete(key: str) -> None:
     name="app.tasks.tushare_import.run_import",
     bind=True,
     queue="data_sync",
-    soft_time_limit=7200,
-    time_limit=10800,
+    soft_time_limit=28800,  # 8 小时，支持 batch_by_sector 模式的大量板块遍历
+    time_limit=32400,      # 9 小时（硬限制）
     autoretry_for=(),  # 禁用自动重试，_process_import 内部已有完整的错误处理
     max_retries=0,
 )
@@ -1566,6 +1566,17 @@ async def _process_batched_by_sector(
                 if inject_fields:
                     for row in rows:
                         row.update(inject_fields)
+
+                # 动态注入 trade_date（针对 ths_member 等 API 不返回日期的接口）
+                # 条件：字段映射中没有 trade_date，且 inject_fields 中也没有
+                has_trade_date_in_mapping = any(
+                    fm.target == "trade_date" for fm in entry.field_mappings
+                )
+                if not has_trade_date_in_mapping and "trade_date" not in inject_fields:
+                    from datetime import date
+                    current_date = date.today().strftime("%Y%m%d")
+                    for row in rows:
+                        row["trade_date"] = current_date
 
                 # 字段映射 + 代码转换
                 mapped_rows = _apply_field_mappings(rows, entry)

@@ -2,7 +2,11 @@
 
 ## 简介
 
-当前系统导入板块成分数据时，因为没有遍历所有板块代码，导致五个数据源的成分股覆盖率极低：
+当前系统导入板块成分数据时存在两个问题：
+
+### 问题一：板块覆盖率低
+
+因为没有遍历所有板块代码，导致五个数据源的成分股覆盖率极低：
 
 | 数据源 | 板块总数 | 有成分股的板块 | 覆盖股票数 |
 |--------|---------|--------------|-----------|
@@ -12,9 +16,21 @@
 | TI（申万行业） | 359 | 27 | 3 |
 | CI（中信行业） | 0 | 0 | 0 |
 
-根本原因：`ths_member`、`dc_member`、`tdx_member` 三个接口需要传入具体的板块代码（`ts_code`）才能返回该板块的成分股，不传时 Tushare 只返回默认的极少数板块。`index_member_all`（TI）和 `ci_index_member`（CI）虽然可以一次性返回全量，但之前存在 `data_source` 字段未注入的 bug（已修复），需要重新导入。
+根本原因：`ths_member`、`dc_member`、`tdx_member` 三个接口需要传入具体的板块代码（`ts_code`）才能返回该板块的成分股，不传时 Tushare 只返回默认的极少数板块。
 
-本需求定义新增"按板块代码遍历"导入模式，使五个数据源均能获取完整的板块成分数据，支撑板块涨幅排名和板块趋势因子的正常运作。
+### 问题二：trade_date 字段处理错误导致数据去重
+
+导入显示成功 1,430,805 条，但数据库实际只存储 78,657 条。经分析：
+
+| 数据源 | API 返回 trade_date | 注册表配置 | 问题 |
+|--------|---------------------|------------|------|
+| TDX | ✅ 有（如 `20250328`） | 硬编码 `19000101` | 未映射 API 返回的日期字段 |
+| DC | ✅ 有（如 `20260425`） | 硬编码 `19000101` | 未映射 API 返回的日期字段 |
+| THS | ❌ 无 | 硬编码 `19000101` | API 无日期，需使用快照日期 |
+
+由于 `sector_constituent` 表有唯一约束 `UNIQUE(trade_date, sector_code, data_source, symbol)`，当 trade_date 都被硬编码为 `1900-01-01` 时，同一板块的同一股票多次导入会被去重，导致大量数据丢失。
+
+本需求定义新增"按板块代码遍历"导入模式，并修复 trade_date 字段映射问题，使五个数据源均能获取完整的板块成分数据。
 
 ## 术语表
 
@@ -53,13 +69,14 @@
 2. WHEN 导入 `ths_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='THS'` 获取所有 THS 板块代码
 3. THE 导入任务 SHALL 对每个 THS 板块代码调用 `ths_member` 接口，传入 `ts_code` 参数
 4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='THS'` 的板块数 SHALL 接近 1724（允许部分板块无成分股数据）
-5. THE 导入任务 SHALL 使用 `inject_fields={'data_source': 'THS', 'trade_date': '19000101'}` 注入固定字段
+5. THE 导入任务 SHALL 使用 `inject_fields={'data_source': 'THS'}` 注入数据来源字段
+6. WHEN API 未返回 `trade_date` 字段时，THE 导入任务 SHALL 使用当前日期作为快照日期（`date.today()`）
 
 ---
 
-### 需求 3：dc_member 启用 batch_by_sector 模式
+### 需求 3：dc_member 启用 batch_by_sector 模式并修复 trade_date 映射
 
-**用户故事：** 作为量化交易者，我希望东方财富 DC 的 1020 个板块全部导入成分股数据。
+**用户故事：** 作为量化交易者，我希望东方财富 DC 的 1020 个板块全部导入成分股数据，且 trade_date 使用 API 返回的真实日期。
 
 #### 验收标准
 
@@ -67,12 +84,14 @@
 2. WHEN 导入 `dc_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='DC'` 获取所有 DC 板块代码
 3. THE 导入任务 SHALL 对每个 DC 板块代码调用 `dc_member` 接口，传入 `ts_code` 参数
 4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='DC'` 的板块数 SHALL 接近 1020
+5. THE 注册表配置 SHALL 添加字段映射 `FieldMapping(source="trade_date", target="trade_date")`，使用 API 返回的日期
+6. THE `inject_fields` SHALL 移除硬编码的 `trade_date` 字段，仅保留 `{"data_source": "DC"}`
 
 ---
 
-### 需求 4：tdx_member 启用 batch_by_sector 模式
+### 需求 4：tdx_member 启用 batch_by_sector 模式并修复 trade_date 映射
 
-**用户故事：** 作为量化交易者，我希望通达信 TDX 的 481 个板块全部导入成分股数据。
+**用户故事：** 作为量化交易者，我希望通达信 TDX 的 481 个板块全部导入成分股数据，且 trade_date 使用 API 返回的真实日期。
 
 #### 验收标准
 
@@ -80,6 +99,8 @@
 2. WHEN 导入 `tdx_member` 时，THE 导入任务 SHALL 查询 `sector_info WHERE data_source='TDX'` 获取所有 TDX 板块代码
 3. THE 导入任务 SHALL 对每个 TDX 板块代码调用 `tdx_member` 接口，传入 `ts_code` 参数
 4. WHEN 导入完成后，THE `sector_constituent` 表中 `data_source='TDX'` 的板块数 SHALL 接近 481
+5. THE 注册表配置 SHALL 添加字段映射 `FieldMapping(source="trade_date", target="trade_date")`，使用 API 返回的日期
+6. THE `inject_fields` SHALL 移除硬编码的 `trade_date` 字段，仅保留 `{"data_source": "TDX"}`
 
 ---
 
@@ -121,3 +142,5 @@
 2. THE 导入的 `sector_code` SHALL 来自 `sector_info` 表中已存在的板块代码，不应写入不存在的板块代码
 3. THE 导入的 `symbol` SHALL 为 6 位数字格式（经过代码格式转换）
 4. WHEN `batch_by_sector` 模式下某板块返回的成分股数量达到 `max_rows` 上限时，THE 导入任务 SHALL 记录 WARNING 日志提示数据可能被截断
+5. THE `tdx_member` 和 `dc_member` 导入的 `trade_date` SHALL 使用 API 返回的真实日期字段，而非硬编码值
+6. THE `ths_member` 导入的 `trade_date` SHALL 使用导入当天的日期作为快照日期

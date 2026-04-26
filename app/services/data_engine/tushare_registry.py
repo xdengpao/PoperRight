@@ -1857,11 +1857,12 @@ register(ApiEntry(
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.TIER_60,
     batch_by_sector=True,  # 按板块代码遍历导入
-    extra_config={"inject_fields": {"data_source": "THS", "trade_date": "19000101"}},
+    extra_config={"inject_fields": {"data_source": "THS"}},  # 移除 trade_date 硬编码，由导入逻辑动态注入当前日期
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="con_name", target="stock_name"),
+        # 注意：ths_member API 不返回 trade_date，由 _process_batched_by_sector 动态注入当前日期
     ],
 ))
 
@@ -1899,11 +1900,12 @@ register(ApiEntry(
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,  # 按板块代码遍历导入
-    extra_config={"inject_fields": {"data_source": "DC", "trade_date": "19000101"}},
+    extra_config={"inject_fields": {"data_source": "DC"}},  # 移除 trade_date 硬编码
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="name", target="stock_name"),
+        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的调入日期
     ],
 ))
 
@@ -2065,11 +2067,12 @@ register(ApiEntry(
     optional_params=[ParamType.SECTOR_CODE],
     rate_limit_group=RateLimitGroup.LIMIT_UP,
     batch_by_sector=True,
-    extra_config={"inject_fields": {"data_source": "TDX", "trade_date": "19000101"}},
+    extra_config={"inject_fields": {"data_source": "TDX"}},  # 移除 trade_date 硬编码
     field_mappings=[
         FieldMapping(source="ts_code", target="sector_code"),
         FieldMapping(source="con_code", target="symbol"),
         FieldMapping(source="con_name", target="stock_name"),
+        FieldMapping(source="trade_date", target="trade_date"),  # 新增：映射 API 返回的调入日期
     ],
 ))
 

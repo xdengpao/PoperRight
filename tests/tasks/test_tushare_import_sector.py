@@ -159,12 +159,12 @@ class TestRegistryConfiguration:
         )
 
     def test_ths_member_inject_fields_has_trade_date(self):
-        """ths_member 的 inject_fields 应包含 trade_date"""
+        """ths_member 的 inject_fields 不应包含 trade_date（由导入逻辑动态注入）"""
         entry = get_entry("ths_member")
         assert entry is not None
         inject_fields = entry.extra_config.get("inject_fields", {})
-        assert "trade_date" in inject_fields, (
-            "ths_member.inject_fields 应包含 trade_date"
+        assert "trade_date" not in inject_fields, (
+            "ths_member.inject_fields 不应包含 trade_date，应由导入逻辑动态注入当前日期"
         )
 
     def test_dc_member_inject_fields_has_data_source(self):
@@ -176,13 +176,25 @@ class TestRegistryConfiguration:
             f"dc_member.inject_fields.data_source 应为 'DC'，实际为 {inject_fields.get('data_source')}"
         )
 
-    def test_dc_member_inject_fields_has_trade_date(self):
-        """dc_member 的 inject_fields 应包含 trade_date"""
+    def test_dc_member_inject_fields_no_trade_date(self):
+        """dc_member 的 inject_fields 不应包含 trade_date（由 API 返回）"""
         entry = get_entry("dc_member")
         assert entry is not None
         inject_fields = entry.extra_config.get("inject_fields", {})
-        assert "trade_date" in inject_fields, (
-            "dc_member.inject_fields 应包含 trade_date"
+        assert "trade_date" not in inject_fields, (
+            "dc_member.inject_fields 不应包含 trade_date，应由 API 返回的字段映射处理"
+        )
+
+    def test_dc_member_field_mappings_has_trade_date(self):
+        """dc_member 的 field_mappings 应包含 trade_date 映射"""
+        entry = get_entry("dc_member")
+        assert entry is not None
+        trade_date_mappings = [fm for fm in entry.field_mappings if fm.target == "trade_date"]
+        assert len(trade_date_mappings) > 0, (
+            "dc_member.field_mappings 应包含 trade_date 字段映射"
+        )
+        assert trade_date_mappings[0].source == "trade_date", (
+            f"dc_member 的 trade_date 映射源应为 'trade_date'，实际为 {trade_date_mappings[0].source}"
         )
 
     def test_tdx_member_inject_fields_has_data_source(self):
@@ -194,13 +206,25 @@ class TestRegistryConfiguration:
             f"tdx_member.inject_fields.data_source 应为 'TDX'，实际为 {inject_fields.get('data_source')}"
         )
 
-    def test_tdx_member_inject_fields_has_trade_date(self):
-        """tdx_member 的 inject_fields 应包含 trade_date"""
+    def test_tdx_member_inject_fields_no_trade_date(self):
+        """tdx_member 的 inject_fields 不应包含 trade_date（由 API 返回）"""
         entry = get_entry("tdx_member")
         assert entry is not None
         inject_fields = entry.extra_config.get("inject_fields", {})
-        assert "trade_date" in inject_fields, (
-            "tdx_member.inject_fields 应包含 trade_date"
+        assert "trade_date" not in inject_fields, (
+            "tdx_member.inject_fields 不应包含 trade_date，应由 API 返回的字段映射处理"
+        )
+
+    def test_tdx_member_field_mappings_has_trade_date(self):
+        """tdx_member 的 field_mappings 应包含 trade_date 映射"""
+        entry = get_entry("tdx_member")
+        assert entry is not None
+        trade_date_mappings = [fm for fm in entry.field_mappings if fm.target == "trade_date"]
+        assert len(trade_date_mappings) > 0, (
+            "tdx_member.field_mappings 应包含 trade_date 字段映射"
+        )
+        assert trade_date_mappings[0].source == "trade_date", (
+            f"tdx_member 的 trade_date 映射源应为 'trade_date'，实际为 {trade_date_mappings[0].source}"
         )
 
 

@@ -24,6 +24,7 @@
   - [x] 3.10 实现错误处理：Token 无效抛出、其他 API 错误继续、空数据跳过、DB 写入失败继续
   - [x] 3.11 实现截断检测：返回行数 ≥ `max_rows` 时记录 WARNING
   - [x] 3.12 实现返回值 `batch_stats`（`total_sectors`、`success_sectors`、`failed_sectors`、`empty_sectors`）
+  - [x] 3.13 实现 trade_date 动态注入逻辑：当 API 不返回 trade_date 且字段映射中无 trade_date 时，注入当前日期
 
 - [x] 4. _process_import 路由集成
   - [x] 4.1 在 `app/tasks/tushare_import.py` 的 `_process_import` 函数中新增 `elif strategy == "by_sector"` 分支
@@ -31,10 +32,13 @@
 
 - [x] 5. 注册表配置变更
   - [x] 5.1 修改 `ths_member` 注册配置：添加 `batch_by_sector=True`，`code_format=CodeFormat.STOCK_SYMBOL`
-  - [x] 5.2 修改 `dc_member` 注册配置：添加 `batch_by_sector=True`，`code_format=CodeFormat.STOCK_SYMBOL`，`inject_fields` 添加 `trade_date`
-  - [x] 5.3 修改 `tdx_member` 注册配置：添加 `batch_by_sector=True`，`code_format=CodeFormat.STOCK_SYMBOL`，`inject_fields` 添加 `trade_date`
+  - [x] 5.2 修改 `dc_member` 注册配置：添加 `batch_by_sector=True`，`code_format=CodeFormat.STOCK_SYMBOL`
+  - [x] 5.3 修改 `tdx_member` 注册配置：添加 `batch_by_sector=True`，`code_format=CodeFormat.STOCK_SYMBOL`
   - [x] 5.4 验证 `index_member_all` 的 `inject_fields` 包含 `data_source: "TI"`
   - [x] 5.5 验证 `ci_index_member` 的 `inject_fields` 包含 `data_source: "CI"`
+  - [x] 5.6 修复 `dc_member` 的 trade_date 映射：添加 `FieldMapping(source="trade_date", target="trade_date")`，移除 `inject_fields` 中的 `trade_date` 硬编码
+  - [x] 5.7 修复 `tdx_member` 的 trade_date 映射：添加 `FieldMapping(source="trade_date", target="trade_date")`，移除 `inject_fields` 中的 `trade_date` 硬编码
+  - [x] 5.8 修复 `ths_member` 的 trade_date 处理：移除 `inject_fields` 中的 `trade_date` 硬编码，由导入逻辑动态注入当前日期
 
 - [x] 6. 属性测试
   - [x] 6.1 创建 `tests/properties/test_sector_member_batch_props.py` 测试文件
@@ -52,3 +56,10 @@
   - [x] 7.5 测试注册表配置：验证三个接口的 `inject_fields` 包含 `data_source` 和 `trade_date`
   - [x] 7.6 测试空板块列表处理：返回 `completed` + `record_count=0`
   - [x] 7.7 测试 `inject_fields` 缺少 `data_source`：返回 `failed` 状态
+
+- [x] 8. trade_date 字段映射修复验证
+  - [x] 8.1 测试 `dc_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 8.2 测试 `tdx_member` 的 `field_mappings` 包含 `trade_date` 映射
+  - [x] 8.3 测试 `ths_member` 的 `inject_fields` 不包含 `trade_date` 硬编码
+  - [x] 8.4 测试 trade_date 动态注入逻辑：模拟 API 不返回 trade_date 时注入当前日期
+  - [ ] 8.5 验证修复后导入的数据：`tdx_member` 和 `dc_member` 的 trade_date 应为真实日期而非 `1900-01-01`
