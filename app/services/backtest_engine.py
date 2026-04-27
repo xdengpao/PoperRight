@@ -245,76 +245,32 @@ def _precompute_indicators(
             from app.services.screener.ma_trend import (
                 calculate_multi_ma, _calc_slope, _SLOPE_LOOKBACK,
                 _WEIGHT_ALIGNMENT, _WEIGHT_SLOPE, _WEIGHT_DISTANCE,
+                score_ma_trend as _score_ma_trend_fn,
             )
             full_ma_dict = calculate_multi_ma(closes, ma_periods)
             sorted_ma_periods = sorted(ma_periods)
 
-        # MA trend scores — single-pass using pre-computed MA series
+        # MA trend scores — 直接调用 score_ma_trend 确保与实时选股一致
         if "ma_trend" in required_factors:
+            _slope_thr = 0.0
+            if hasattr(strategy_config, 'ma_trend'):
+                _slope_thr = float(getattr(strategy_config.ma_trend, 'slope_threshold', 0.0))
+            elif isinstance(strategy_config, dict):
+                _mt = strategy_config.get("ma_trend", {})
+                _slope_thr = float(_mt.get("slope_threshold", 0.0)) if isinstance(_mt, dict) else 0.0
+
             scores: list[float] = []
+            min_period = max(sorted_ma_periods) if sorted_ma_periods else 1
             for i in range(n):
-                # --- alignment score ---
-                latest_ma: dict[int, float] = {}
-                for p in sorted_ma_periods:
-                    vals = full_ma_dict.get(p, [])
-                    if i < len(vals) and not math.isnan(vals[i]):
-                        latest_ma[p] = vals[i]
-
-                avail_p = [p for p in sorted_ma_periods if p in latest_ma]
-                total_pairs = max(len(avail_p) - 1, 0)
-                aligned_pairs = 0
-                for j in range(len(avail_p) - 1):
-                    if latest_ma[avail_p[j]] > latest_ma[avail_p[j + 1]]:
-                        aligned_pairs += 1
-                alignment_score = (aligned_pairs / total_pairs * 100.0) if total_pairs > 0 else 0.0
-
-                # --- slope score ---
-                # Compute slopes for ALL periods (matching original behavior)
-                slope_values = []
-                for p in sorted_ma_periods:
-                    vals = full_ma_dict.get(p, [])
-                    # Compute slope from vals up to index i (last _SLOPE_LOOKBACK values)
-                    valid = []
-                    for k in range(i, -1, -1):
-                        if k >= len(vals) or math.isnan(vals[k]):
-                            break
-                        valid.append(vals[k])
-                        if len(valid) >= _SLOPE_LOOKBACK:
-                            break
-                    valid.reverse()
-                    if len(valid) >= 2:
-                        vn = len(valid)
-                        x_mean = (vn - 1) / 2.0
-                        y_mean = sum(valid) / vn
-                        num = sum((xi - x_mean) * (y - y_mean) for xi, y in enumerate(valid))
-                        den = sum((xi - x_mean) ** 2 for xi in range(vn))
-                        s = (num / den / y_mean * 100.0) if den > 0 and y_mean > 0 else 0.0
-                    else:
-                        s = 0.0
-                    slope_values.append(s)
-
-                if slope_values:
-                    filtered = [max(sv, 0.0) for sv in slope_values]
-                    avg_slope = sum(filtered) / len(filtered)
-                    slope_score = min(avg_slope * 100.0, 100.0)
-                else:
-                    slope_score = 0.0
-
-                # --- distance score ---
-                dist_scores = []
-                current_price = closes[i]
-                for p in sorted_ma_periods:
-                    vals = full_ma_dict.get(p, [])
-                    if i < len(vals) and not math.isnan(vals[i]) and vals[i] > 0:
-                        pct_above = ((current_price - vals[i]) / vals[i]) * 100.0
-                        ds = max(0.0, min(100.0, 50.0 + pct_above * 10.0))
-                        dist_scores.append(ds)
-                distance_score = (sum(dist_scores) / len(dist_scores)) if dist_scores else 0.0
-
-                raw = (alignment_score * _WEIGHT_ALIGNMENT
-                       + slope_score * _WEIGHT_SLOPE
-                       + distance_score * _WEIGHT_DISTANCE)
-                scores.append(max(0.0, min(100.0, raw)))
+                if i < min_period - 1:
+                    scores.append(0.0)
+                    continue
+                result = _score_ma_trend_fn(
+                    closes[:i + 1],
+                    periods=sorted_ma_periods,
+                    slope_threshold=_slope_thr,
+                )
+                scores.append(result.score)
             ic.ma_trend_scores = scores
 
         # MA support flags — single-pass using pre-computed MA series
@@ -1030,6 +986,14 @@ class BacktestEngine:
         kline_data: dict[str, list[KlineBar]] | None = None,
         index_data: dict[str, list[KlineBar]] | None = None,
         minute_kline_data: dict[str, dict[str, list[KlineBar]]] | None = None,
+        # 新增因子数据参数（全部默认 None，向后兼容）
+        fundamental_data: dict[str, dict] | None = None,
+        money_flow_data: dict[str, dict[str, dict]] | None = None,
+        tushare_factor_data: dict[str, dict[str, dict]] | None = None,
+        sector_kline_data: list[dict] | None = None,
+        stock_sector_map: dict[str, list[str]] | None = None,
+        industry_map: dict[str, str] | None = None,
+        sector_info_map: dict[str, str] | None = None,
     ) -> BacktestResult:
         """
         执行回测。
@@ -1059,6 +1023,14 @@ class BacktestEngine:
         """
         # 策略驱动路径
         if kline_data is not None:
+            # 存储因子数据引用供 _generate_buy_signals* 使用
+            self._fundamental_data = fundamental_data
+            self._money_flow_data = money_flow_data
+            self._tushare_factor_data = tushare_factor_data
+            self._sector_kline_data = sector_kline_data
+            self._stock_sector_map = stock_sector_map
+            self._industry_map = industry_map
+            self._sector_info_map = sector_info_map
             return self._run_backtest_strategy_driven(
                 config, kline_data, index_data, minute_kline_data,
             )
@@ -1262,10 +1234,17 @@ class BacktestEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _calc_limit_prices(prev_close: Decimal) -> tuple[Decimal, Decimal]:
-        """计算涨跌停价格（主板与创业板统一 ±10%）"""
-        limit_up = (prev_close * Decimal("1.10")).quantize(Decimal("0.01"))
-        limit_down = (prev_close * Decimal("0.90")).quantize(Decimal("0.01"))
+    def _calc_limit_prices(prev_close: Decimal, symbol: str = "") -> tuple[Decimal, Decimal]:
+        """根据股票代码前缀计算涨跌停价格。"""
+        bare = symbol.split(".")[0] if "." in symbol else symbol
+        if bare.startswith("300") or bare.startswith("688"):
+            pct = Decimal("0.20")
+        elif bare.startswith("8") or bare.startswith("4"):
+            pct = Decimal("0.30")
+        else:
+            pct = Decimal("0.10")
+        limit_up = (prev_close * (1 + pct)).quantize(Decimal("0.01"))
+        limit_down = (prev_close * (1 - pct)).quantize(Decimal("0.01"))
         return limit_up, limit_down
 
     # ------------------------------------------------------------------
@@ -1339,8 +1318,6 @@ class BacktestEngine:
         使用 ScreenExecutor 执行盘后选股，根据大盘风控状态过滤。
         从 K 线数据实时计算各项技术指标，确保不同策略产生差异化筛选结果。
         """
-        if market_risk_state == "DANGER":
-            return []
 
         from app.services.screener.ma_trend import score_ma_trend, detect_ma_support
         from app.services.screener.indicators import (
@@ -1386,7 +1363,8 @@ class BacktestEngine:
             lows_f = [float(l) for l in lows_dec]
 
             # ── 均线趋势评分 ──
-            ma_result = score_ma_trend(closes_f, ma_periods)
+            _slope_thr = float(getattr(config.strategy_config.ma_trend, 'slope_threshold', 0.0)) if hasattr(config.strategy_config, 'ma_trend') else 0.0
+            ma_result = score_ma_trend(closes_f, ma_periods, slope_threshold=_slope_thr)
             ma_trend_score = ma_result.score
 
             # ── 均线支撑 ──
@@ -1483,6 +1461,23 @@ class BacktestEngine:
         if not stocks_data:
             return []
 
+        # 丰富因子字典（基本面、资金面、Tushare因子、百分位、行业相对值、板块）
+        from app.services.backtest_factor_provider import enrich_factor_dicts as _enrich
+        _enrich(
+            stocks_data=stocks_data,
+            trade_date=trade_date,
+            enable_fundamental=config.enable_fundamental_data,
+            enable_money_flow=config.enable_money_flow_data,
+            enable_tushare=config.enable_tushare_factors,
+            fundamental_data=getattr(self, '_fundamental_data', None),
+            money_flow_data=getattr(self, '_money_flow_data', None),
+            tushare_factor_data=getattr(self, '_tushare_factor_data', None),
+            sector_kline_data=getattr(self, '_sector_kline_data', None),
+            stock_sector_map=getattr(self, '_stock_sector_map', None),
+            industry_map=getattr(self, '_industry_map', None),
+            sector_info_map=getattr(self, '_sector_info_map', None),
+        )
+
         # 执行选股
         try:
             executor = ScreenExecutor(
@@ -1551,8 +1546,6 @@ class BacktestEngine:
 
         Requirements: 2.1, 3.3, 4.5, 5.1
         """
-        if market_risk_state == "DANGER":
-            return []
 
         ma_periods = config.strategy_config.ma_periods or [5, 10, 20, 60, 120]
         raw_ind = config.strategy_config.indicator_params
@@ -1645,6 +1638,23 @@ class BacktestEngine:
 
         if not stocks_data:
             return []
+
+        # 丰富因子字典（基本面、资金面、Tushare因子、百分位、行业相对值、板块）
+        from app.services.backtest_factor_provider import enrich_factor_dicts as _enrich
+        _enrich(
+            stocks_data=stocks_data,
+            trade_date=trade_date,
+            enable_fundamental=config.enable_fundamental_data,
+            enable_money_flow=config.enable_money_flow_data,
+            enable_tushare=config.enable_tushare_factors,
+            fundamental_data=getattr(self, '_fundamental_data', None),
+            money_flow_data=getattr(self, '_money_flow_data', None),
+            tushare_factor_data=getattr(self, '_tushare_factor_data', None),
+            sector_kline_data=getattr(self, '_sector_kline_data', None),
+            stock_sector_map=getattr(self, '_stock_sector_map', None),
+            industry_map=getattr(self, '_industry_map', None),
+            sector_info_map=getattr(self, '_sector_info_map', None),
+        )
 
         # 执行选股（ScreenExecutor 调用逻辑不变）
         try:
@@ -1745,7 +1755,7 @@ class BacktestEngine:
         # 更新最高收盘价（涨停日不计入）
         if len(day_bars) >= 2:
             prev_close = day_bars[-2].close
-            limit_up, _ = self._calc_limit_prices(prev_close)
+            limit_up, _ = self._calc_limit_prices(prev_close, position.symbol)
             if close > position.highest_close and close < limit_up:
                 position.highest_close = close
         elif close > position.highest_close:
@@ -2024,7 +2034,7 @@ class BacktestEngine:
                 prev_close = day_bars[-1].close
 
             open_price = next_day_bar.open
-            limit_up, _ = self._calc_limit_prices(prev_close)
+            limit_up, _ = self._calc_limit_prices(prev_close, symbol)
 
             # 涨停无法买入
             if open_price >= limit_up:
@@ -2064,7 +2074,7 @@ class BacktestEngine:
                 quantity=shares,
                 cost_price=open_price,
                 buy_date=next_day_bar.time.date(),
-                buy_trade_day_index=state.trade_day_index,
+                buy_trade_day_index=state.trade_day_index + 1,  # 实际买入执行日（T+1）
                 highest_close=open_price,
                 lowest_close=open_price,
                 sector=sector,
@@ -2148,7 +2158,7 @@ class BacktestEngine:
                 prev_close = day_bars[-1].close
 
             open_price = next_day_bar.open
-            _, limit_down = self._calc_limit_prices(prev_close)
+            _, limit_down = self._calc_limit_prices(prev_close, symbol)
 
             # 跌停无法卖出，延迟
             if open_price <= limit_down:

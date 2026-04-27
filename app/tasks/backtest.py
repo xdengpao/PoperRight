@@ -102,6 +102,9 @@ def run_backtest_task(
     enable_market_risk: bool = True,
     trend_stop_ma: int = 20,
     exit_conditions: dict | None = None,
+    enable_fundamental_data: bool = False,
+    enable_money_flow_data: bool = False,
+    enable_tushare_factors: bool = False,
 ) -> dict:
     """执行回测 Celery 任务（同步数据库访问）。"""
     logger.info("回测任务启动 run_id=%s strategy_id=%s", run_id, strategy_id)
@@ -343,13 +346,51 @@ def run_backtest_task(
             except Exception as exc:
                 logger.warning("分钟K线数据加载失败: %s", exc)
 
-        # ── 3. 执行回测 ──
+        # ── 3. 加载新增因子数据源 ──
+        fundamental_data = None
+        money_flow_data = None
+        tushare_factor_data = None
+        sector_kline_data_list = None
+        stock_sector_map = None
+        industry_map = None
+        sector_info_map = None
+
+        if enable_fundamental_data or enable_money_flow_data or enable_tushare_factors:
+            try:
+                from app.services.backtest_factor_data_loader import load_factor_data
+                factor_data = load_factor_data(
+                    enable_fundamental=enable_fundamental_data,
+                    enable_money_flow=enable_money_flow_data,
+                    enable_tushare=enable_tushare_factors,
+                    symbols=list(kline_data.keys()),
+                    start_date=warmup_date if 'warmup_date' in dir() else sd,
+                    end_date=ed,
+                    strategy_config=config.strategy_config,
+                )
+                fundamental_data = factor_data.get("fundamental")
+                money_flow_data = factor_data.get("money_flow")
+                tushare_factor_data = factor_data.get("tushare_factors")
+                sector_kline_data_list = factor_data.get("sector_kline")
+                stock_sector_map = factor_data.get("stock_sector_map")
+                industry_map = factor_data.get("industry_map")
+                sector_info_map = factor_data.get("sector_info_map")
+            except Exception as exc:
+                logger.warning("因子数据加载失败，使用默认值继续: %s", exc)
+
+        # ── 4. 执行回测 ──
         engine = BacktestEngine()
         result = engine.run_backtest(
             config=config,
             kline_data=kline_data,
             index_data=index_data if enable_market_risk else None,
             minute_kline_data=minute_kline_data if minute_kline_data else None,
+            fundamental_data=fundamental_data,
+            money_flow_data=money_flow_data,
+            tushare_factor_data=tushare_factor_data,
+            sector_kline_data=sector_kline_data_list,
+            stock_sector_map=stock_sector_map,
+            industry_map=industry_map,
+            sector_info_map=sector_info_map,
         )
 
         logger.info("回测完成 run_id=%s trades=%d return=%.4f",

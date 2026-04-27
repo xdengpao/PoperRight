@@ -327,16 +327,16 @@ def _serialize_factor_dict(factor_dict: dict[str, Any]) -> dict[str, Any]:
     """
     将因子字典中的不可 JSON 序列化类型转为可序列化格式。
 
-    Decimal → str，list[Decimal] → list[str]
+    Decimal → float，list[Decimal] → list[float]
     """
     from decimal import Decimal as Dec
 
     result: dict[str, Any] = {}
     for key, value in factor_dict.items():
         if isinstance(value, Dec):
-            result[key] = str(value)
+            result[key] = float(value)
         elif isinstance(value, list) and value and isinstance(value[0], Dec):
-            result[key] = [str(v) for v in value]
+            result[key] = [float(v) for v in value]
         else:
             result[key] = value
     return result

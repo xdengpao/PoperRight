@@ -10,10 +10,19 @@
 4. **缺少行业相对值字段**：未计算 `_ind_rel` 后缀字段（如 `pe_ind_rel`、`pb_ind_rel`）
 5. **缺少板块强势数据**：未加载 `SectorKline` / `SectorConstituent` 数据，`sector_rank` 和 `sector_trend` 字段缺失
 6. **缺少利润增长率和营收增长率**：`profit_growth` 和 `revenue_growth` 字段未从外部数据源加载
+7. **缺少 Tushare 导入的 33 个因子**：stk_factor 表因子（KDJ/CCI/WR/TRIX/BIAS）、筹码因子（cyq_perf）、两融因子（margin_detail）、增强资金流因子（moneyflow_ths/dc）、打板因子（limit_list/step/top_list）、指数因子（index_dailybasic/tech/weight）、本地计算因子（PSY/OBV）全部缺失
+8. **缺少信号增强字段**：`macd_strength`、`macd_signal_type`、`boll_near_upper_band`、`boll_hold_days`、`rsi_current`、`rsi_consecutive_rising`、`daily_change_pct`、`change_pct_3d`、`breakout_list` 等字段缺失，导致信号质量元数据降级
+9. **涨跌停价格计算错误**：创业板（300xxx）和科创板（688xxx）股票应使用 ±20% 涨跌停限制，当前统一使用 ±10%
+10. **持仓天数计算偏差**：`buy_trade_day_index` 记录的是信号日而非实际买入日，导致持仓天数多算 1 天
+11. **DANGER 风控行为不一致**：回测在 DANGER 状态下完全阻断买入，但实时选股允许 trend_score >= 95 的强势股通过
+12. **优化路径趋势评分算法偏差（严重）**：`_precompute_indicators` 中的距离评分使用简单线性公式（`50 + pct_above * 10`），而 `score_ma_trend` 使用钟形曲线（`_bell_curve_distance_score`），两者在相同输入下产生显著不同的分数（如 pct_above=0% 时分别得 50 分和 100 分）
+13. **优化路径斜率评分算法偏差（严重）**：`_precompute_indicators` 对所有均线周期使用等权平均且忽略 `slope_threshold`，而 `score_ma_trend` 对短期均线（5/10 日）使用 2 倍权重并支持 `slope_threshold` 过滤
+14. **实时选股忽略策略自定义指标参数**：`ScreenDataProvider._build_factor_dict()` 调用 `detect_macd_signal(closes_float)` 等函数时使用默认参数，忽略策略配置中的自定义参数（如 `macd_fast=8`），导致实时选股与回测对非默认参数策略产生不同信号
+15. **非优化路径缺少 slope_threshold 传递**：`_generate_buy_signals` 调用 `score_ma_trend(closes_f, ma_periods)` 时未传递 `slope_threshold` 参数
 
-这导致 `factor-editor-optimization` 功能中定义的 12 个策略示例在回测时无法正确执行——所有使用 percentile、industry_relative 或 sector 类型因子的策略，其 `FactorEvaluator` 会因数据缺失而将这些因子标记为"不通过"，产生错误的回测结果。
+这导致 `factor-editor-optimization` 功能中定义的策略示例在回测时无法正确执行——52 个注册因子中仅有 7 个技术面因子（ma_trend/ma_support/macd/boll/rsi/dma/breakout）能在回测中获得正确数据，其余 45 个因子全部缺失或硬编码。更严重的是，生产环境使用的优化路径（`_generate_buy_signals_optimized`）的趋势评分算法与标准库函数 `score_ma_trend` 存在系统性偏差，导致回测结果与实时选股产生不可预期的差异。
 
-本功能将对回测引擎进行因子数据对齐优化，使回测环境中的因子字典与实时选股环境（`ScreenDataProvider`）保持一致，确保所有因子类型在回测中都能获得正确的数据支撑。
+本功能将对回测引擎进行全面的因子数据对齐和算法一致性优化，使回测环境中的因子字典和评分算法与实时选股环境（`ScreenDataProvider`）保持完全一致。
 
 ## 术语表
 
@@ -30,6 +39,13 @@
 - **BacktestTask（回测任务）**：Celery 异步任务，使用同步数据库访问执行回测
 - **PercentileRank（百分位排名）**：将因子原始值转换为 0-100 的排名值，用于 percentile 类型阈值比较
 - **IndustryRelativeValue（行业相对值）**：将因子原始值除以行业中位数，用于 industry_relative 类型阈值比较
+- **StkFactor（技术面因子表）**：Tushare 导入的 PostgreSQL 表 `stk_factor`，存储 KDJ/CCI/WR/TRIX/BIAS 等预计算技术因子，使用 `ts_code` 字段（带后缀格式如 `"000001.SZ"`）
+- **CyqPerf（筹码数据表）**：Tushare 导入的 PostgreSQL 表 `cyq_perf`，存储筹码集中度和获利比例数据
+- **MarginDetail（两融数据表）**：Tushare 导入的 PostgreSQL 表 `margin_detail`，存储融资融券交易明细
+- **MoneyflowThs/MoneyflowDc（增强资金流表）**：Tushare 导入的 PostgreSQL 表，存储按订单大小分类的多维度资金流数据
+- **LimitList/LimitStep/TopList（打板数据表）**：Tushare 导入的 PostgreSQL 表，存储涨跌停和龙虎榜数据
+- **IndexDailybasic/IndexTech/IndexWeight（指数数据表）**：Tushare 导入的 PostgreSQL 表，存储指数每日指标、技术因子和成分权重
+- **_strip_market_suffix**：代码格式转换辅助函数，将 Tushare `ts_code`（如 `"000001.SZ"`）转换为纯数字格式（`"000001"`），已在 `screener-data-alignment-fix` 中实现
 
 ## 需求
 
@@ -164,3 +180,107 @@
 3. THE BacktestEngine SHALL 将板块行情数据按交易日分组预处理，避免在每个交易日重复计算板块排名
 4. WHEN 百分位排名计算涉及排序操作时，THE BacktestEngine SHALL 对每个因子仅执行一次排序（O(N log N)），而非对每只股票逐一计算排名
 
+### 需求 11：Tushare 导入因子数据加载（可选）
+
+**用户故事：** 作为量化交易员，我希望回测引擎能加载已导入的 Tushare 因子数据（技术面专业因子、筹码、两融、增强资金流、打板、指数），以便使用这些因子的策略在回测中能获得正确的评估结果。
+
+#### 验收标准
+
+1. THE BacktestConfig SHALL 新增 `enable_tushare_factors` 布尔字段，默认值为 False，用于控制是否在回测中加载 Tushare 导入的因子数据
+2. WHEN `enable_tushare_factors` 为 True 时，THE BacktestTask SHALL 从以下 PostgreSQL 表批量查询回测日期范围内的数据：
+   - `stk_factor` 表：KDJ（kdj_k/kdj_d/kdj_j）、CCI、WR、TRIX、BIAS
+   - `cyq_perf` 表：chip_winner_rate、chip_cost_5pct/15pct/50pct、chip_weight_avg
+   - `margin_detail` 表：rzye_change、rqye_ratio、rzrq_balance_trend、margin_net_buy
+   - `moneyflow_ths`/`moneyflow_dc` 表：super_large_net_inflow、large_net_inflow、small_net_outflow、money_flow_strength、net_inflow_rate
+   - `limit_list`/`limit_step`/`top_list` 表：limit_up_count、limit_up_streak、limit_up_open_pct、dragon_tiger_net_buy、first_limit_up
+   - `index_dailybasic`/`index_tech`/`index_weight` 表：index_pe、index_turnover、index_ma_trend、index_vol_ratio
+3. THE BacktestTask SHALL 在构建 Tushare 因子数据映射时，使用 `_strip_market_suffix()` 将 `ts_code` 转换为纯数字格式，确保与回测引擎的 symbol 格式一致
+4. WHEN `enable_tushare_factors` 为 False 时，THE BacktestEngine SHALL 将所有 Tushare 因子字段设为 None
+5. THE BacktestFactorProvider SHALL 新增 `_fill_tushare_factor_fields()` 方法，从预加载的数据映射中按交易日和股票代码填充因子字典
+6. THE BacktestFactorProvider SHALL 同时计算 PSY 和 OBV 因子（基于 K 线数据本地计算，不依赖 Tushare 数据），复用 `indicators.py` 中的 `calculate_psy()` 和 `calculate_obv_signal()` 函数
+
+### 需求 12：信号增强字段补全
+
+**用户故事：** 作为量化交易员，我希望回测引擎构建的因子字典包含与实时选股一致的信号增强字段，以便回测中的信号质量评估、趋势评分计算和信号描述与实时选股保持一致。
+
+#### 验收标准
+
+1. THE BacktestEngine 构建的因子字典 SHALL 包含以下信号增强字段：
+   - `macd_strength`：MACD 信号强度（SignalStrength 枚举），从 `detect_macd_signal()` 返回的 `MACDSignalResult.strength` 获取
+   - `macd_signal_type`：MACD 信号类型（`"above_zero"` / `"below_zero_second"` / `"none"`），从 `MACDSignalResult.signal_type` 获取
+   - `boll_near_upper_band`：布林带接近上轨风险标志（bool），从 `detect_boll_signal()` 返回的 `BOLLSignalResult.near_upper_band` 获取
+   - `boll_hold_days`：布林带连续站稳中轨天数（int），从 `BOLLSignalResult.hold_days` 获取
+   - `rsi_current`：当前 RSI 数值（float），从 `detect_rsi_signal()` 返回的 `RSISignalResult.current_rsi` 获取
+   - `rsi_consecutive_rising`：RSI 连续上升天数（int），从 `RSISignalResult.consecutive_rising` 获取
+2. THE BacktestEngine 构建的因子字典 SHALL 包含 `daily_change_pct` 和 `change_pct_3d` 字段，计算逻辑与 `ScreenDataProvider._build_factor_dict()` 一致
+3. THE BacktestEngine 构建的因子字典 SHALL 包含 `breakout_list` 字段（所有突破信号列表），使用与 `ScreenDataProvider._detect_all_breakouts()` 相同的数据窗口前移方式进行假突破检测
+4. THE `_generate_buy_signals` 和 `_generate_buy_signals_optimized` 两条路径 SHALL 同时更新，确保信号增强字段一致
+
+### 需求 13：涨跌停价格计算修正
+
+**用户故事：** 作为量化交易员，我希望回测引擎能正确计算创业板和科创板股票的涨跌停价格，以便回测中的买入跳过和卖出延迟逻辑对这些股票产生正确的判断。
+
+#### 验收标准
+
+1. THE BacktestEngine `_calc_limit_prices()` 方法 SHALL 接受 `symbol` 参数，根据股票代码前缀判断涨跌停幅度：
+   - 创业板（symbol 以 `"300"` 开头）：±20%
+   - 科创板（symbol 以 `"688"` 开头）：±20%
+   - 北交所（symbol 以 `"8"` 或 `"4"` 开头）：±30%
+   - 其他（主板）：±10%
+2. WHEN 判断买入是否因涨停而跳过时（`open_price >= limit_up`），THE BacktestEngine SHALL 使用正确的涨跌停幅度
+3. WHEN 判断卖出是否因跌停而延迟时（`open_price <= limit_down`），THE BacktestEngine SHALL 使用正确的涨跌停幅度
+4. WHEN 跟踪持仓最高收盘价时（`close < limit_up` 条件），THE BacktestEngine SHALL 使用正确的涨跌停幅度
+
+### 需求 14：持仓天数计算修正
+
+**用户故事：** 作为量化交易员，我希望回测引擎的持仓天数计算从实际买入执行日开始计算，以便最大持仓天数限制与预期一致。
+
+#### 验收标准
+
+1. THE BacktestEngine SHALL 将 `_BacktestPosition.buy_trade_day_index` 设置为实际买入执行日的交易日序号（即信号日的下一个交易日），而非信号生成日的序号
+2. WHEN 检查最大持仓天数时（`state_trade_day_index - position.buy_trade_day_index > config.max_holding_days`），THE BacktestEngine SHALL 基于实际买入日计算持仓天数，确保持仓恰好 `max_holding_days` 个交易日后触发强制卖出
+3. THE BacktestEngine SHALL 同步修正 `HoldingContext.entry_bar_index` 的赋值，使用实际买入执行日的序号
+
+### 需求 15：DANGER 风控行为对齐
+
+**用户故事：** 作为量化交易员，我希望回测引擎在 DANGER 大盘风控状态下的行为与实时选股一致，以便回测结果能准确反映实盘表现。
+
+#### 验收标准
+
+1. WHEN 大盘风险等级为 DANGER 时，THE BacktestEngine SHALL 不再完全阻断买入信号，而是将信号传递给 ScreenExecutor，由 ScreenExecutor 的 `_apply_risk_filters_pure()` 方法按 `trend_score >= 95` 的阈值过滤
+2. THE BacktestEngine SHALL 将 `index_closes` 参数传递给 `ScreenExecutor.run_eod_screen()`，使 ScreenExecutor 内部的大盘风控逻辑能正确执行
+3. THE BacktestEngine SHALL 移除 `_generate_buy_signals` 和 `_generate_buy_signals_optimized` 方法开头的 `if market_risk_state == "DANGER": return []` 逻辑，改为在 ScreenExecutor 内部统一处理
+
+### 需求 16：优化路径趋势评分算法修正（严重）
+
+**用户故事：** 作为量化交易员，我希望回测引擎的优化路径（`_precompute_indicators`）使用与标准库函数 `score_ma_trend` 完全一致的评分算法，以便回测结果与实时选股产生一致的趋势评分。
+
+#### 验收标准
+
+1. THE BacktestEngine `_precompute_indicators` 方法的距离评分计算 SHALL 使用 `ma_trend.py` 中的 `_bell_curve_distance_score()` 函数替代当前的线性公式（`50 + pct_above * 10`），确保距离评分与 `score_ma_trend` 完全一致
+2. THE BacktestEngine `_precompute_indicators` 方法的斜率评分计算 SHALL 使用与 `score_ma_trend` 相同的加权策略：短期均线（5 日、10 日）使用 `_SHORT_TERM_SLOPE_WEIGHT = 2.0` 权重，长期均线使用 `_LONG_TERM_SLOPE_WEIGHT = 1.0` 权重，替代当前的等权平均
+3. THE BacktestEngine `_precompute_indicators` 方法 SHALL 支持 `slope_threshold` 参数，从 `StrategyConfig.ma_trend.slope_threshold` 读取，低于阈值的斜率在评分中视为 0，与 `score_ma_trend` 的行为一致
+4. WHEN 优化路径和非优化路径使用相同的 K 线数据和策略配置时，两条路径生成的 `ma_trend` 评分 SHALL 完全一致（数值误差不超过 0.01）
+5. THE BacktestEngine 优化路径 SHALL 直接调用 `score_ma_trend` 函数进行逐日评分（通过预计算 MA 序列后逐日切片调用），而非内联重新实现评分逻辑，从根本上消除算法偏差的可能性
+
+### 需求 17：实时选股指标参数一致性修复
+
+**用户故事：** 作为量化交易员，我希望实时选股和回测在计算技术指标时使用相同的参数来源（策略配置中的自定义参数），以便策略参数调优在两个环境中产生一致的效果。
+
+#### 验收标准
+
+1. THE ScreenDataProvider `_build_factor_dict()` 方法 SHALL 从 `strategy_config` 中读取 `indicator_params` 配置，将自定义参数传递给 `detect_macd_signal()`、`detect_boll_signal()`、`detect_rsi_signal()` 和 `calculate_dma()` 函数，替代当前使用默认参数的行为
+2. WHEN 策略配置中 `indicator_params.macd_fast = 8` 时，THE ScreenDataProvider SHALL 调用 `detect_macd_signal(closes_float, fast_period=8, ...)`，而非 `detect_macd_signal(closes_float)`
+3. THE BacktestEngine `_generate_buy_signals` 方法 SHALL 保持现有的自定义参数传递行为不变（已正确实现）
+4. THE BacktestEngine `_generate_buy_signals` 方法 SHALL 将 `slope_threshold` 参数从 `config.strategy_config.ma_trend.slope_threshold` 传递给 `score_ma_trend()` 函数
+
+### 需求 18：回测 API 层扩展
+
+**用户故事：** 作为量化交易员，我希望通过回测 API 和前端界面控制是否加载基本面、资金面和 Tushare 因子数据，以便灵活选择回测的数据丰富度。
+
+#### 验收标准
+
+1. THE `BacktestRunRequest` Pydantic 模型 SHALL 新增三个可选布尔字段：`enable_fundamental_data`（默认 False）、`enable_money_flow_data`（默认 False）、`enable_tushare_factors`（默认 False）
+2. THE `POST /api/v1/backtest/run` 接口 SHALL 将这三个字段传递给 Celery 任务参数
+3. THE BacktestView.vue SHALL 在回测参数配置区域新增"数据源选项"折叠面板，包含三个开关控件：基本面数据、资金流向数据、Tushare 因子数据，默认关闭
+4. THE BacktestView.vue SHALL 在开关旁显示提示文本说明各数据源的用途和对回测速度的影响

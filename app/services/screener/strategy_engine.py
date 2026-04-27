@@ -109,6 +109,7 @@ class FactorEvalResult:
     passed: bool
     value: float | None = None      # 因子实际值
     weight: float = 1.0             # 因子权重
+    normalized_score: float = 0.0   # 归一化分数 [0, 100]
 
 
 @dataclass
@@ -219,10 +220,10 @@ class FactorEvaluator:
                 passed=False,
                 value=None,
                 weight=weight,
+                normalized_score=0.0,
             )
 
         # 5. RANGE 类型：检查值是否在 [threshold_low, threshold_high] 区间内
-        #    (必须在 BOOLEAN/None 检查之前，因为 RANGE 条件的 threshold 通常为 None)
         if threshold_type == ThresholdType.RANGE:
             low = condition.params.get("threshold_low")
             high = condition.params.get("threshold_high")
@@ -232,14 +233,25 @@ class FactorEvaluator:
                     passed=False,
                     value=float(value),
                     weight=weight,
+                    normalized_score=0.0,
                 )
             numeric_value = float(value)
             passed = low <= numeric_value <= high
+            if passed:
+                ns = 100.0
+            else:
+                span = high - low
+                if span > 0:
+                    dist = min(abs(numeric_value - low), abs(numeric_value - high))
+                    ns = max(0.0, 100.0 - (dist / span) * 100.0)
+                else:
+                    ns = 0.0
             return FactorEvalResult(
                 factor_name=factor_name,
                 passed=passed,
                 value=numeric_value,
                 weight=weight,
+                normalized_score=ns,
             )
 
         # 6. BOOLEAN 类型（threshold 为 None）
@@ -250,26 +262,39 @@ class FactorEvaluator:
                 passed=passed,
                 value=1.0 if passed else 0.0,
                 weight=weight,
+                normalized_score=100.0 if passed else 0.0,
             )
 
         # 7. ABSOLUTE / PERCENTILE / INDUSTRY_RELATIVE — 标准比较运算符
         numeric_value = float(value)
         operator_fn = cls._OPERATORS.get(condition.operator)
         if operator_fn is None:
-            # 不支持的运算符 → 不通过
             return FactorEvalResult(
                 factor_name=factor_name,
                 passed=False,
                 value=numeric_value,
                 weight=weight,
+                normalized_score=0.0,
             )
 
         passed = operator_fn(numeric_value, condition.threshold)
+
+        # 归一化：PERCENTILE 直接使用百分位值；其他类型基于阈值距离映射
+        if threshold_type == ThresholdType.PERCENTILE:
+            ns = min(100.0, max(0.0, numeric_value))
+        elif threshold_type == ThresholdType.INDUSTRY_RELATIVE:
+            ns = min(100.0, max(0.0, numeric_value * 50.0))
+        else:
+            thr = abs(condition.threshold) if condition.threshold != 0 else 1.0
+            ratio = min(abs(numeric_value - condition.threshold) / thr, 1.0)
+            ns = 60.0 + 40.0 * ratio if passed else 60.0 * (1.0 - ratio)
+
         return FactorEvalResult(
             factor_name=factor_name,
             passed=passed,
             value=numeric_value,
             weight=weight,
+            normalized_score=min(100.0, max(0.0, ns)),
         )
 
 
@@ -323,11 +348,11 @@ class StrategyEngine:
             factor_results.append(result)
 
             total_weight += weight
-            if result.passed and result.value is not None:
-                weighted_sum += result.value * weight
+            weighted_sum += result.normalized_score * weight
 
-        # 计算加权得分（归一化到 0-100）
+        # 加权得分：使用归一化分数，结果自然在 [0, 100]
         weighted_score = (weighted_sum / total_weight) if total_weight > 0 else 0.0
+        weighted_score = max(0.0, min(100.0, weighted_score))
 
         # AND/OR 逻辑判定
         if config.logic == "AND":

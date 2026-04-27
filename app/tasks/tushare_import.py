@@ -464,6 +464,7 @@ async def _process_single(
             row.update(inject_fields)
 
     mapped_rows = _apply_field_mappings(rows, entry)
+    mapped_rows = _expand_rows(mapped_rows, entry)
     converted_rows = _convert_codes(mapped_rows, entry)
 
     # 写入数据库
@@ -732,6 +733,7 @@ async def _write_chunk_rows(
             row.update(inject_fields)
 
     mapped_rows = _apply_field_mappings(rows, entry)
+    mapped_rows = _expand_rows(mapped_rows, entry)
     converted_rows = _convert_codes(mapped_rows, entry)
 
     if entry.storage_engine == StorageEngine.TS:
@@ -1085,6 +1087,7 @@ async def _process_batched(
                                     row.update(inject_fields)
 
                             mapped_rows = _apply_field_mappings(rows, entry)
+                            mapped_rows = _expand_rows(mapped_rows, entry)
                             converted_rows = _convert_codes(mapped_rows, entry)
 
                             try:
@@ -1153,6 +1156,7 @@ async def _process_batched(
                                 row.update(inject_fields)
 
                         mapped_rows = _apply_field_mappings(rows, entry)
+                        mapped_rows = _expand_rows(mapped_rows, entry)
                         converted_rows = _convert_codes(mapped_rows, entry)
 
                         try:
@@ -1296,6 +1300,31 @@ def _apply_field_mappings(rows: list[dict], entry: ApiEntry) -> list[dict]:
     return result
 
 
+def _expand_rows(rows: list[dict], entry: ApiEntry) -> list[dict]:
+    """根据 expand_fields 配置将一条记录展开为多条记录。
+
+    expand_fields 格式: {"target_field": ["source_field_1", "source_field_2", ...]}
+    对每条输入记录，为每个非空的 source_field 生成一条输出记录，
+    将 source_field 的值写入 target_field。
+
+    无 expand_fields 配置时原样返回（向后兼容）。
+    """
+    expand_config = entry.extra_config.get("expand_fields")
+    if not expand_config:
+        return rows
+
+    expanded: list[dict] = []
+    for row in rows:
+        for target_field, source_fields in expand_config.items():
+            for src in source_fields:
+                val = row.get(src)
+                if val is not None and str(val).strip() != "":
+                    new_row = dict(row)
+                    new_row[target_field] = val
+                    expanded.append(new_row)
+    return expanded
+
+
 # ---------------------------------------------------------------------------
 # 代码格式转换
 # ---------------------------------------------------------------------------
@@ -1432,6 +1461,7 @@ async def _process_batched_index(
                         row.update(inject_fields)
 
                 mapped_rows = _apply_field_mappings(rows, entry)
+                mapped_rows = _expand_rows(mapped_rows, entry)
                 converted_rows = _convert_codes(mapped_rows, entry)
 
                 try:
@@ -1580,6 +1610,7 @@ async def _process_batched_by_sector(
 
                 # 字段映射 + 代码转换
                 mapped_rows = _apply_field_mappings(rows, entry)
+                mapped_rows = _expand_rows(mapped_rows, entry)
                 converted_rows = _convert_codes(mapped_rows, entry)
 
                 try:

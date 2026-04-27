@@ -125,7 +125,7 @@ class SectorRepository:
                 and_(
                     SectorConstituent.sector_code == sector_code,
                     SectorConstituent.data_source == data_source.value,
-                    SectorConstituent.trade_date == trade_date,
+                    SectorConstituent.trade_date <= trade_date if data_source.value in ("DC", "TDX", "TI", "CI") else SectorConstituent.trade_date == trade_date,
                 )
             )
             .order_by(SectorConstituent.symbol)
@@ -166,12 +166,19 @@ class SectorRepository:
             if trade_date is None:
                 return []
 
+        # symbol 格式适配：纯数字格式需匹配带后缀格式
+        if "." not in symbol:
+            symbol_variants = [f"{symbol}.SH", f"{symbol}.SZ", f"{symbol}.BJ"]
+            symbol_cond = SectorConstituent.symbol.in_(symbol_variants)
+        else:
+            symbol_cond = SectorConstituent.symbol == symbol
+
         stmt = (
             select(SectorConstituent)
             .where(
                 and_(
-                    SectorConstituent.symbol == symbol,
-                    SectorConstituent.trade_date == trade_date,
+                    symbol_cond,
+                    SectorConstituent.trade_date <= trade_date,
                 )
             )
             .order_by(SectorConstituent.sector_code)
@@ -615,7 +622,7 @@ class SectorRepository:
         # 构建 WHERE 条件
         conditions: list = [
             SectorConstituent.data_source == data_source.value,
-            SectorConstituent.trade_date == trade_date,
+            SectorConstituent.trade_date <= trade_date if data_source.value in ("DC", "TDX", "TI", "CI") else SectorConstituent.trade_date == trade_date,
         ]
         if sector_code is not None:
             conditions.append(SectorConstituent.sector_code == sector_code)

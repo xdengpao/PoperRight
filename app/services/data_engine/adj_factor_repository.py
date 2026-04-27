@@ -172,6 +172,8 @@ class AdjFactorRepository:
         if not symbols:
             return {}
 
+        symbols = [s.split(".")[0] if "." in s else s for s in symbols]
+
         stmt = (
             select(AdjustmentFactor)
             .where(

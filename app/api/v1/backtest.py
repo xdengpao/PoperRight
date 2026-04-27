@@ -121,6 +121,9 @@ class BacktestRunRequest(BaseModel):
     enable_market_risk: bool = True
     trend_stop_ma: int = 20
     exit_conditions: ExitConditionsSchema | None = None
+    enable_fundamental_data: bool = False
+    enable_money_flow_data: bool = False
+    enable_tushare_factors: bool = False
 
 
 class OptimizeRequest(BaseModel):
@@ -160,6 +163,9 @@ async def run_backtest(body: BacktestRunRequest) -> dict:
         enable_market_risk=body.enable_market_risk,
         trend_stop_ma=body.trend_stop_ma,
         exit_conditions=body.exit_conditions.model_dump() if body.exit_conditions else None,
+        enable_fundamental_data=body.enable_fundamental_data,
+        enable_money_flow_data=body.enable_money_flow_data,
+        enable_tushare_factors=body.enable_tushare_factors,
     )
     return {
         "id": run_id,

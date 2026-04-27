@@ -6,10 +6,13 @@
 
 本功能通过以下核心改动实现因子对齐：
 
-1. **BacktestConfig 扩展**：新增 `enable_fundamental_data` 和 `enable_money_flow_data` 两个可选布尔开关
-2. **BacktestTask 数据加载扩展**：根据开关批量加载基本面、资金流向数据；始终加载板块行情和成分股数据
-3. **BacktestFactorProvider 新模块**：封装回测环境中的因子数据加载、百分位排名、行业相对值和板块强势计算逻辑
-4. **BacktestEngine 因子字典对齐**：两条路径（`_generate_buy_signals` 和 `_generate_buy_signals_optimized`）同时更新，复用 `ScreenDataProvider` 的纯函数逻辑
+1. **BacktestConfig 扩展**：新增 `enable_fundamental_data`、`enable_money_flow_data` 和 `enable_tushare_factors` 三个可选布尔开关
+2. **BacktestTask 数据加载扩展**：根据开关批量加载基本面、资金流向、Tushare 因子数据；始终加载板块行情和成分股数据
+3. **BacktestFactorProvider 新模块**：封装回测环境中的因子数据加载、百分位排名、行业相对值、板块强势和 Tushare 因子计算逻辑
+4. **BacktestEngine 因子字典对齐**：两条路径（`_generate_buy_signals` 和 `_generate_buy_signals_optimized`）同时更新，补全信号增强字段，复用 `ScreenDataProvider` 的纯函数逻辑
+5. **涨跌停价格修正**：`_calc_limit_prices()` 按股票代码前缀区分涨跌停幅度（主板 10%、创业板/科创板 20%、北交所 30%）
+6. **持仓天数修正**：`buy_trade_day_index` 改为记录实际买入执行日
+7. **DANGER 风控对齐**：移除回测中的 DANGER 完全阻断逻辑，改为传递 `index_closes` 给 ScreenExecutor 统一处理
 
 ### 设计原则
 
@@ -105,6 +108,7 @@ class BacktestConfig:
     # ... 现有字段 ...
     enable_fundamental_data: bool = False   # 是否加载基本面数据（PE/PB/ROE/市值）
     enable_money_flow_data: bool = False    # 是否加载资金流向数据（主力资金/大单）
+    enable_tushare_factors: bool = False    # 是否加载 Tushare 导入的因子数据（KDJ/CCI/WR/筹码/两融/增强资金流/打板/指数）
 ```
 
 ### 2. BacktestFactorProvider（新增模块 `app/services/backtest_factor_provider.py`）
@@ -534,6 +538,36 @@ result = engine.run_backtest(
 | `sector_rank` | `int \| None` | 计算 | 始终计算 |
 | `sector_trend` | `bool` | 计算 | 始终计算 |
 | `sector_name` | `str \| None` | sector_info | 始终计算 |
+| `kdj_k` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `kdj_d` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `kdj_j` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `cci` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `wr` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `trix` | `bool \| None` | stk_factor | `enable_tushare_factors=True` |
+| `bias` | `float \| None` | stk_factor | `enable_tushare_factors=True` |
+| `psy` | `float \| None` | K 线计算 | 始终计算 |
+| `obv_signal` | `bool \| None` | K 线计算 | 始终计算 |
+| `chip_winner_rate` | `float \| None` | cyq_perf | `enable_tushare_factors=True` |
+| `chip_concentration` | `float \| None` | 计算 | `enable_tushare_factors=True` |
+| `rzye_change` | `float \| None` | margin_detail | `enable_tushare_factors=True` |
+| `margin_net_buy` | `float \| None` | margin_detail | `enable_tushare_factors=True` |
+| `super_large_net_inflow` | `float \| None` | moneyflow_ths/dc | `enable_tushare_factors=True` |
+| `large_net_inflow` | `float \| None` | moneyflow_ths/dc | `enable_tushare_factors=True` |
+| `money_flow_strength` | `float \| None` | 计算 | `enable_tushare_factors=True` |
+| `limit_up_count` | `int` | limit_list | `enable_tushare_factors=True` |
+| `limit_up_streak` | `int` | limit_step | `enable_tushare_factors=True` |
+| `dragon_tiger_net_buy` | `bool` | top_list | `enable_tushare_factors=True` |
+| `index_pe` | `float \| None` | index_dailybasic | `enable_tushare_factors=True` |
+| `index_ma_trend` | `bool \| None` | index_tech | `enable_tushare_factors=True` |
+| `macd_strength` | `SignalStrength \| None` | K 线计算 | 始终计算 |
+| `macd_signal_type` | `str` | K 线计算 | 始终计算 |
+| `boll_near_upper_band` | `bool` | K 线计算 | 始终计算 |
+| `boll_hold_days` | `int` | K 线计算 | 始终计算 |
+| `rsi_current` | `float` | K 线计算 | 始终计算 |
+| `rsi_consecutive_rising` | `int` | K 线计算 | 始终计算 |
+| `daily_change_pct` | `float` | K 线计算 | 始终计算 |
+| `change_pct_3d` | `float` | K 线计算 | 始终计算 |
+| `breakout_list` | `list[dict]` | K 线计算 | 始终计算 |
 
 ### 数据库表（已有，无需新增迁移）
 
@@ -544,6 +578,204 @@ result = engine.run_backtest(
 | `sector_kline` | TimescaleDB | 板块指数日K线行情 |
 | `sector_constituent` | PostgreSQL | 板块成分股快照 |
 | `sector_info` | PostgreSQL | 板块元数据（名称、类型） |
+| `stk_factor` | PostgreSQL | Tushare 技术面因子（KDJ/CCI/WR/TRIX/BIAS） |
+| `cyq_perf` | PostgreSQL | 筹码及胜率数据 |
+| `margin_detail` | PostgreSQL | 融资融券交易明细 |
+| `moneyflow_ths` | PostgreSQL | 同花顺个股资金流向 |
+| `moneyflow_dc` | PostgreSQL | 东方财富个股资金流向 |
+| `limit_list` | PostgreSQL | 涨跌停和炸板数据 |
+| `limit_step` | PostgreSQL | 涨停股连板天梯 |
+| `top_list` | PostgreSQL | 龙虎榜每日统计 |
+| `index_dailybasic` | PostgreSQL | 大盘指数每日指标 |
+| `index_tech` | PostgreSQL | 指数技术面因子 |
+| `index_weight` | PostgreSQL | 指数成分权重 |
+
+### 5. 涨跌停价格修正（`app/services/backtest_engine.py`，需求 13）
+
+```python
+@staticmethod
+def _calc_limit_prices(prev_close: Decimal, symbol: str = "") -> tuple[Decimal, Decimal]:
+    """根据股票代码前缀计算涨跌停价格。"""
+    if symbol.startswith("300") or symbol.startswith("688"):
+        pct = Decimal("0.20")  # 创业板/科创板 ±20%
+    elif symbol.startswith("8") or symbol.startswith("4"):
+        pct = Decimal("0.30")  # 北交所 ±30%
+    else:
+        pct = Decimal("0.10")  # 主板 ±10%
+    limit_up = (prev_close * (1 + pct)).quantize(Decimal("0.01"))
+    limit_down = (prev_close * (1 - pct)).quantize(Decimal("0.01"))
+    return limit_up, limit_down
+```
+
+所有调用 `_calc_limit_prices` 的位置需同步传入 `symbol` 参数。
+
+### 6. 持仓天数修正（`app/services/backtest_engine.py`，需求 14）
+
+```python
+# 修改前（信号日序号）
+state.positions[symbol] = _BacktestPosition(
+    buy_trade_day_index=state.trade_day_index,  # 信号日
+    ...
+)
+
+# 修改后（实际买入执行日序号 = 信号日 + 1）
+state.positions[symbol] = _BacktestPosition(
+    buy_trade_day_index=state.trade_day_index + 1,  # 实际买入执行日
+    ...
+)
+```
+
+### 7. DANGER 风控对齐（`app/services/backtest_engine.py`，需求 15）
+
+```python
+# 修改前
+if market_risk_state == "DANGER":
+    return []  # 完全阻断
+
+# 修改后：移除此逻辑，改为将 index_closes 传递给 ScreenExecutor
+result = self._screen_executor.run_eod_screen(
+    stocks_data,
+    index_closes=index_closes,  # 新增：传递指数数据
+)
+# ScreenExecutor 内部按 trend_score >= 95 过滤 DANGER 状态
+```
+
+### 8. 优化路径趋势评分算法修正（`app/services/backtest_engine.py`，需求 16）
+
+#### 问题分析
+
+当前 `_precompute_indicators` 中的趋势评分存在两处系统性偏差：
+
+**距离评分偏差**：
+```python
+# 当前实现（线性公式）
+ds = max(0.0, min(100.0, 50.0 + pct_above * 10.0))
+# pct_above=0% → 50分, pct_above=3% → 80分, pct_above=5% → 100分
+
+# 标准实现（_bell_curve_distance_score）
+# pct_above=0% → 100分, pct_above=3% → 100分, pct_above=5% → 60分
+```
+
+**斜率评分偏差**：
+```python
+# 当前实现（等权平均，无 slope_threshold）
+filtered = [max(sv, 0.0) for sv in slope_values]
+avg_slope = sum(filtered) / len(filtered)
+
+# 标准实现（短期 2 倍权重，支持 slope_threshold）
+w = _SHORT_TERM_SLOPE_WEIGHT if p in _SHORT_TERM_PERIODS else _LONG_TERM_SLOPE_WEIGHT
+filtered_slope = max(raw_slope - slope_threshold, 0.0) if raw_slope > slope_threshold else 0.0
+```
+
+#### 解决方案
+
+**方案 A（推荐）：优化路径直接调用 `score_ma_trend` 函数**
+
+将 `_precompute_indicators` 中的内联趋势评分逻辑替换为对 `score_ma_trend` 的逐日调用。预计算 MA 序列后，对每个 bar 位置切片调用 `score_ma_trend(closes[:i+1], periods, slope_threshold=slope_threshold)`。
+
+优点：从根本上消除算法偏差，未来 `score_ma_trend` 的任何改进自动同步到回测。
+缺点：逐日调用有一定性能开销，但 `score_ma_trend` 本身是纯函数且计算量不大。
+
+```python
+# 替换 _precompute_indicators 中的趋势评分逻辑
+from app.services.screener.ma_trend import score_ma_trend
+
+slope_threshold = float(strategy_config.get("ma_trend", {}).get("slope_threshold", 0.0))
+
+for i in range(n):
+    if i < max(sorted_ma_periods) - 1:
+        scores.append(0.0)
+        continue
+    result = score_ma_trend(
+        closes[:i+1],
+        periods=sorted_ma_periods,
+        slope_threshold=slope_threshold,
+    )
+    scores.append(result.score)
+ic.ma_trend_scores = scores
+```
+
+**方案 B：修复内联实现使其与 `score_ma_trend` 一致**
+
+逐一修复距离评分（改用 `_bell_curve_distance_score`）、斜率评分（改用加权平均 + `slope_threshold`）。
+缺点：维护两份实现，未来容易再次偏差。
+
+选择方案 A。
+
+### 9. 实时选股指标参数一致性修复（`app/services/screener/screen_data_provider.py`，需求 17）
+
+#### 详细设计
+
+修改 `_build_factor_dict()` 方法，从 `strategy_config` 中提取 `indicator_params` 并传递给各检测函数：
+
+```python
+# 从策略配置中提取指标参数
+_cfg = strategy_config or {}
+ip_cfg = _cfg.get("indicator_params", {})
+if isinstance(ip_cfg, dict):
+    # 支持 IndicatorParamsConfig 对象和 dict 两种格式
+    macd_fast = ip_cfg.get("macd_fast", 12) if isinstance(ip_cfg, dict) else getattr(ip_cfg, "macd_fast", 12)
+    # ... 其他参数类似
+
+# 调用时传递自定义参数
+macd_result = detect_macd_signal(
+    closes_float,
+    fast_period=macd_fast,
+    slow_period=macd_slow,
+    signal_period=macd_signal,
+)
+```
+
+同时修复非优化路径 `_generate_buy_signals` 中 `score_ma_trend` 的 `slope_threshold` 传递：
+
+```python
+# 修改前
+ma_result = score_ma_trend(closes_f, ma_periods)
+
+# 修改后
+slope_threshold = float(config.strategy_config.ma_trend.slope_threshold)
+ma_result = score_ma_trend(closes_f, ma_periods, slope_threshold=slope_threshold)
+```
+
+### 10. 回测 API 层扩展（`app/api/v1/backtest.py` + `frontend/src/views/BacktestView.vue`，需求 18）
+
+#### 后端
+
+在 `BacktestRunRequest` 中新增字段：
+
+```python
+class BacktestRunRequest(BaseModel):
+    # ... 现有字段 ...
+    enable_fundamental_data: bool = False
+    enable_money_flow_data: bool = False
+    enable_tushare_factors: bool = False
+```
+
+在 `run_backtest` 端点中传递给 Celery 任务：
+
+```python
+task = run_backtest_task.delay(
+    run_id=run_id,
+    # ... 现有参数 ...
+    enable_fundamental_data=body.enable_fundamental_data,
+    enable_money_flow_data=body.enable_money_flow_data,
+    enable_tushare_factors=body.enable_tushare_factors,
+)
+```
+
+#### 前端
+
+在 BacktestView.vue 的参数配置区域新增折叠面板：
+
+```html
+<details class="data-source-options">
+  <summary>数据源选项（可选）</summary>
+  <label><input type="checkbox" v-model="enableFundamental"> 加载基本面数据（PE/PB/ROE/市值）</label>
+  <label><input type="checkbox" v-model="enableMoneyFlow"> 加载资金流向数据（主力资金/大单）</label>
+  <label><input type="checkbox" v-model="enableTushareFactors"> 加载 Tushare 因子数据（KDJ/筹码/两融/打板等）</label>
+  <p class="hint">启用更多数据源可提高回测精度，但会增加回测耗时</p>
+</details>
+```
 
 
 ## 正确性属性

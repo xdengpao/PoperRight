@@ -216,11 +216,14 @@ async def get_sector_coverage(
         latest_date = (await pg_session.execute(latest_date_stmt)).scalar()
 
         if latest_date:
+            _is_incremental = ds in ("DC", "TDX", "TI", "CI")
+            _date_cond = SectorConstituent.trade_date <= latest_date if _is_incremental else SectorConstituent.trade_date == latest_date
+
             sectors_with_stmt = (
                 select(func.count(func.distinct(SectorConstituent.sector_code)))
                 .where(
                     SectorConstituent.data_source == ds,
-                    SectorConstituent.trade_date == latest_date,
+                    _date_cond,
                 )
             )
             sectors_with = (
@@ -231,7 +234,7 @@ async def get_sector_coverage(
                 select(func.count(func.distinct(SectorConstituent.symbol)))
                 .where(
                     SectorConstituent.data_source == ds,
-                    SectorConstituent.trade_date == latest_date,
+                    _date_cond,
                 )
             )
             total_stocks = (
@@ -277,7 +280,7 @@ async def get_sector_coverage(
         )
         if latest_date:
             type_stock_count_stmt = type_stock_count_stmt.where(
-                SectorConstituent.trade_date == latest_date
+                SectorConstituent.trade_date <= latest_date if _is_incremental else SectorConstituent.trade_date == latest_date
             )
         type_stock_count_stmt = type_stock_count_stmt.group_by(
             SectorInfo.sector_type

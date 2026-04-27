@@ -37,6 +37,12 @@ from app.models.sector import (
 
 logger = logging.getLogger(__name__)
 
+# 增量数据源：trade_date 记录股票调入板块的日期，需用 <= 累积查询
+_INCREMENTAL_SOURCES: set[str] = {"DC", "TDX", "TI", "CI"}
+
+# 快照数据源：trade_date 记录导入日期，用 = 精确查询
+_SNAPSHOT_SOURCES: set[str] = {"THS"}
+
 
 # ---------------------------------------------------------------------------
 # 数据类
@@ -244,22 +250,44 @@ class SectorStrengthFilter:
                 )
                 return {}
 
-            # 查询成分股数据
-            stmt = (
-                select(SectorConstituent)
-                .where(
-                    SectorConstituent.data_source == data_source,
-                    SectorConstituent.trade_date == trade_date,
-                    SectorConstituent.sector_code.in_(valid_sector_codes),
-                )
-            )
-            result = await pg_session.execute(stmt)
-            constituents = list(result.scalars().all())
+            # 查询成分股数据（根据数据源模式选择查询方式）
+            from app.services.screener.screen_data_provider import _strip_market_suffix
 
-            # 构建 symbol → [sector_code] 映射
+            if data_source in _INCREMENTAL_SOURCES:
+                # 增量数据源：累积查询截至目标日期的全部成分股
+                stmt = (
+                    select(
+                        SectorConstituent.symbol,
+                        SectorConstituent.sector_code,
+                    ).distinct()
+                    .where(
+                        SectorConstituent.data_source == data_source,
+                        SectorConstituent.trade_date <= trade_date,
+                        SectorConstituent.sector_code.in_(valid_sector_codes),
+                    )
+                )
+            else:
+                # 快照数据源：精确匹配最新日期
+                stmt = (
+                    select(
+                        SectorConstituent.symbol,
+                        SectorConstituent.sector_code,
+                    ).distinct()
+                    .where(
+                        SectorConstituent.data_source == data_source,
+                        SectorConstituent.trade_date == trade_date,
+                        SectorConstituent.sector_code.in_(valid_sector_codes),
+                    )
+                )
+            result = await pg_session.execute(stmt)
+            rows = result.all()
+
+            # 构建 symbol → [sector_code] 映射（symbol 转为纯数字格式）
             mapping: dict[str, list[str]] = defaultdict(list)
-            for c in constituents:
-                mapping[c.symbol].append(c.sector_code)
+            for row in rows:
+                bare = _strip_market_suffix(row[0])
+                if row[1] not in mapping[bare]:
+                    mapping[bare].append(row[1])
 
             logger.debug(
                 "构建成分股映射 data_source=%s sector_type=%s date=%s "

@@ -235,53 +235,6 @@ class FactorCondition:
     params: dict = field(default_factory=dict)  # 因子专属参数
 
 
-@dataclass
-class StrategyConfig:
-    """选股策略配置"""
-    factors: list[FactorCondition] = field(default_factory=list)
-    logic: Literal["AND", "OR"] = "AND"         # 因子间逻辑运算
-    weights: dict[str, float] = field(default_factory=dict)  # 因子权重
-    ma_periods: list[int] = field(default_factory=lambda: [5, 10, 20, 60, 120, 250])
-    indicator_params: dict = field(default_factory=dict)     # 指标参数（MACD/BOLL/RSI 等）
-
-    def to_dict(self) -> dict:
-        """序列化为可 JSON 存储的字典"""
-        return {
-            "factors": [
-                {
-                    "factor_name": f.factor_name,
-                    "operator": f.operator,
-                    "threshold": f.threshold,
-                    "params": f.params,
-                }
-                for f in self.factors
-            ],
-            "logic": self.logic,
-            "weights": self.weights,
-            "ma_periods": self.ma_periods,
-            "indicator_params": self.indicator_params,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "StrategyConfig":
-        """从字典反序列化"""
-        factors = [
-            FactorCondition(
-                factor_name=f["factor_name"],
-                operator=f["operator"],
-                threshold=f.get("threshold"),
-                params=f.get("params", {}),
-            )
-            for f in data.get("factors", [])
-        ]
-        return cls(
-            factors=factors,
-            logic=data.get("logic", "AND"),
-            weights=data.get("weights", {}),
-            ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120, 250]),
-            indicator_params=data.get("indicator_params", {}),
-        )
-
 
 @dataclass
 class MaTrendConfig:
@@ -339,6 +292,25 @@ class IndicatorParamsConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "IndicatorParamsConfig":
+        # 检测嵌套格式（前端 API 层发送的结构）
+        if isinstance(data.get("macd"), dict):
+            macd = data.get("macd", {})
+            boll = data.get("boll", {})
+            rsi = data.get("rsi", {})
+            dma = data.get("dma", {})
+            return cls(
+                macd_fast=macd.get("fast_period", 12),
+                macd_slow=macd.get("slow_period", 26),
+                macd_signal=macd.get("signal_period", 9),
+                boll_period=boll.get("period", 20),
+                boll_std_dev=boll.get("std_dev", 2.0),
+                rsi_period=rsi.get("period", 14),
+                rsi_lower=rsi.get("lower_bound", 55),
+                rsi_upper=rsi.get("upper_bound", 75),
+                dma_short=dma.get("short_period", 10),
+                dma_long=dma.get("long_period", 50),
+            )
+        # 扁平格式（原有逻辑）
         return cls(
             macd_fast=data.get("macd_fast", 12),
             macd_slow=data.get("macd_slow", 26),
@@ -624,6 +596,9 @@ class BacktestConfig:
     enabled_modules: list[str] | None = None        # 启用的选股模块列表
     raw_config: dict = field(default_factory=dict)  # 原始策略配置字典（含模块参数）
     exit_conditions: ExitConditionConfig | None = None  # 自定义平仓条件配置
+    enable_fundamental_data: bool = False            # 是否加载基本面数据
+    enable_money_flow_data: bool = False             # 是否加载资金流向数据
+    enable_tushare_factors: bool = False             # 是否加载 Tushare 因子数据
 
 
 @dataclass

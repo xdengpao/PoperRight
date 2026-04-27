@@ -2,13 +2,27 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { apiClient } from '@/api'
 
+export interface SignalDetail {
+  category: string
+  label: string
+  strength: 'STRONG' | 'MEDIUM' | 'WEAK' | null
+  description: string
+  freshness: 'NEW' | 'CONTINUING' | null
+  is_fake_breakout: boolean
+  breakout_type?: string | null
+  signal_type?: string | null
+}
+
 export interface ScreenItem {
   symbol: string
   name: string
   ref_buy_price: number
   trend_score: number
   risk_level: 'LOW' | 'MEDIUM' | 'HIGH'
-  signals: Record<string, unknown>
+  signals: SignalDetail[]
+  has_fake_breakout?: boolean
+  has_new_signal?: boolean
+  market_risk_level?: string
 }
 
 export interface StrategyTemplate {
@@ -121,8 +135,9 @@ export const useScreenerStore = defineStore('screener', () => {
   async function fetchResults() {
     loading.value = true
     try {
-      const res = await apiClient.get<ScreenItem[]>('/screen/results')
-      results.value = res.data
+      const res = await apiClient.get('/screen/results')
+      const data = res.data
+      results.value = Array.isArray(data) ? data : (data.items ?? [])
       lastUpdated.value = new Date()
     } finally {
       loading.value = false

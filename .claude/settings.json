@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker exec quant-postgres psql -U postgres -d quant_db -c ' *)",
+      "Bash(docker exec *)",
+      "Bash(python -c ' *)",
+      "Bash(curl -s \"http://localhost:8000/api/v1/data/tushare/status/ff3b80fe-7642-44eb-92a6-1d2a5533df70\")",
+      "Bash(python3 -m json.tool)"
+    ]
+  }
+}

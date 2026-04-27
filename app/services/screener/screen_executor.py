@@ -785,7 +785,17 @@ class ScreenExecutor:
                 )
                 continue
 
-            # 5. 剔除黑名单股票
+            # 剔除连续 3 日累计涨幅 > 20% 的股票
+            change_3d = float(stock_data.get("change_pct_3d", 0.0))
+            if change_3d > 20.0:
+                logger.debug(
+                    "股票 %s 近3日累计涨幅 %.2f%% > 20%%，剔除",
+                    item.symbol,
+                    change_3d,
+                )
+                continue
+
+            # 剔除黑名单股票
             if blacklist_manager.is_blacklisted(item.symbol):
                 logger.debug("股票 %s 在黑名单中，剔除", item.symbol)
                 continue
@@ -1017,6 +1027,16 @@ class ScreenExecutor:
             # 当仅启用非 factor_editor 模块时，过滤无信号的股票
             if not use_factor_editor and not signals:
                 continue
+
+            # 信号去重：以 (category, label) 为键，优先保留非 factor_editor 路径的信号
+            seen_keys: set[tuple] = set()
+            deduped: list[SignalDetail] = []
+            for sig in signals:
+                key = (sig.category, sig.label)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    deduped.append(sig)
+            signals = deduped
 
             # 信号强度分级（需求 7）：为每个信号计算强度等级
             # 趋势加速信号的强度已在生成时显式设为 STRONG（需求 10.4），跳过重新计算

@@ -49,6 +49,8 @@ from app.services.screener.breakout import (
 )
 from app.services.screener.indicators import (
     calculate_dma,
+    calculate_obv_signal,
+    calculate_psy,
     detect_boll_signal,
     detect_macd_signal,
     detect_rsi_signal,
@@ -62,6 +64,11 @@ from app.services.screener.volume_price import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_market_suffix(ts_code: str) -> str:
+    """将 Tushare ts_code 格式（如 '000001.SZ'）转换为纯数字格式（'000001'）。"""
+    return ts_code.split(".")[0] if "." in ts_code else ts_code
 
 # 默认回溯天数（覆盖 MA250 所需的最少交易日）
 DEFAULT_LOOKBACK_DAYS = 365
@@ -313,7 +320,7 @@ class ScreenDataProvider:
             )
             for fd in result.values():
                 fd.setdefault(
-                    "sector_classifications", {"DC": [], "TI": [], "TDX": []}
+                    "sector_classifications", {"DC": [], "THS": [], "TDX": [], "TI": []}
                 )
 
         logger.info(
@@ -411,28 +418,26 @@ class ScreenDataProvider:
 
             # 提取当日大单成交占比（最后一条记录）
             latest_row = rows[-1]
-            latest_large_order_ratio = (
+            raw_ratio = (
                 float(latest_row.large_order_ratio)
                 if latest_row.large_order_ratio is not None
                 else 0.0
             )
+            # 量纲转换：数据库存储比率格式（0-1），阈值使用百分比格式（0-100）
+            latest_large_order_ratio = raw_ratio * 100.0 if raw_ratio <= 1.0 else raw_ratio
 
             # 计算 large_order 信号
             lo_result = check_large_order_signal(latest_large_order_ratio)
             factor_dict["large_order"] = lo_result.signal
 
-            # 写入原始数值以便百分位排名计算（需求 1.4）
+            # 写入原始数值以便百分位排名计算（需求 1.4）— 使用百分比格式
             latest_inflow = (
                 float(latest_row.main_net_inflow)
                 if latest_row.main_net_inflow is not None
                 else None
             )
             factor_dict["main_net_inflow"] = latest_inflow
-            factor_dict["large_order_ratio"] = (
-                float(latest_row.large_order_ratio)
-                if latest_row.large_order_ratio is not None
-                else None
-            )
+            factor_dict["large_order_ratio"] = latest_large_order_ratio if raw_ratio != 0.0 else None
 
         except Exception:
             # 异常时降级
@@ -544,6 +549,16 @@ class ScreenDataProvider:
         lows_float = [float(lo) for lo in stock_data["lows"]]
         volumes_int = [int(v) for v in stock_data["volumes"]]
 
+        # 涨跌幅因子
+        if len(closes_float) >= 2 and closes_float[-2] > 0:
+            stock_data["daily_change_pct"] = (closes_float[-1] - closes_float[-2]) / closes_float[-2] * 100.0
+        else:
+            stock_data["daily_change_pct"] = 0.0
+        if len(closes_float) >= 4 and closes_float[-4] > 0:
+            stock_data["change_pct_3d"] = (closes_float[-1] - closes_float[-4]) / closes_float[-4] * 100.0
+        else:
+            stock_data["change_pct_3d"] = 0.0
+
         # 从策略配置中提取均线参数
         _cfg = strategy_config or {}
         ma_cfg = _cfg.get("ma_trend", {}) if isinstance(_cfg.get("ma_trend"), dict) else {}
@@ -571,11 +586,29 @@ class ScreenDataProvider:
             stock_data["ma_support"] = False
 
         # 技术指标模块
-        # 适配结构化返回值（需求 1.4, 2.4, 3.4）：
-        # 各检测函数返回 MACDSignalResult / BOLLSignalResult / RSISignalResult，
-        # 将 signal 及附加字段写入 stock_data 供 ScreenExecutor 使用。
+        # 从策略配置中提取指标参数
+        ip_cfg = _cfg.get("indicator_params", {}) if isinstance(_cfg.get("indicator_params"), dict) else {}
+        if hasattr(ip_cfg, "macd_fast"):
+            _macd_fast = ip_cfg.macd_fast
+            _macd_slow = ip_cfg.macd_slow
+            _macd_signal = ip_cfg.macd_signal
+            _boll_period = ip_cfg.boll_period
+            _boll_std = ip_cfg.boll_std_dev
+            _rsi_period = ip_cfg.rsi_period
+            _dma_short = ip_cfg.dma_short
+            _dma_long = ip_cfg.dma_long
+        else:
+            _macd_fast = int(ip_cfg.get("macd_fast", 12))
+            _macd_slow = int(ip_cfg.get("macd_slow", 26))
+            _macd_signal = int(ip_cfg.get("macd_signal", 9))
+            _boll_period = int(ip_cfg.get("boll_period", 20))
+            _boll_std = float(ip_cfg.get("boll_std_dev", 2.0))
+            _rsi_period = int(ip_cfg.get("rsi_period", 14))
+            _dma_short = int(ip_cfg.get("dma_short", 10))
+            _dma_long = int(ip_cfg.get("dma_long", 50))
+
         try:
-            macd_result = detect_macd_signal(closes_float)
+            macd_result = detect_macd_signal(closes_float, _macd_fast, _macd_slow, _macd_signal)
             stock_data["macd"] = macd_result.signal
             stock_data["macd_strength"] = macd_result.strength
             stock_data["macd_signal_type"] = macd_result.signal_type
@@ -586,7 +619,7 @@ class ScreenDataProvider:
             stock_data["macd_signal_type"] = "none"
 
         try:
-            boll_result = detect_boll_signal(closes_float)
+            boll_result = detect_boll_signal(closes_float, _boll_period, _boll_std)
             stock_data["boll"] = boll_result.signal
             stock_data["boll_near_upper_band"] = boll_result.near_upper_band
             stock_data["boll_hold_days"] = boll_result.hold_days
@@ -597,7 +630,7 @@ class ScreenDataProvider:
             stock_data["boll_hold_days"] = 0
 
         try:
-            rsi_result = detect_rsi_signal(closes_float)
+            rsi_result = detect_rsi_signal(closes_float, _rsi_period)
             stock_data["rsi"] = rsi_result.signal
             stock_data["rsi_current"] = rsi_result.current_rsi
             stock_data["rsi_consecutive_rising"] = rsi_result.consecutive_rising
@@ -608,7 +641,7 @@ class ScreenDataProvider:
             stock_data["rsi_consecutive_rising"] = 0
 
         try:
-            dma_result = calculate_dma(closes_float)
+            dma_result = calculate_dma(closes_float, _dma_short, _dma_long)
             stock_data["dma"] = {"dma": dma_result.dma, "ama": dma_result.ama}
         except Exception:
             logger.debug("计算 dma 失败", exc_info=True)
@@ -639,6 +672,20 @@ class ScreenDataProvider:
         # money_flow 和 large_order 依赖额外数据源，使用安全默认值
         stock_data["money_flow"] = False
         stock_data["large_order"] = False
+
+        # PSY 心理线
+        try:
+            stock_data["psy"] = calculate_psy(closes_float)
+        except Exception:
+            logger.debug("计算 psy 失败", exc_info=True)
+            stock_data["psy"] = None
+
+        # OBV 能量潮信号
+        try:
+            stock_data["obv_signal"] = calculate_obv_signal(closes_float, volumes_int)
+        except Exception:
+            logger.debug("计算 obv_signal 失败", exc_info=True)
+            stock_data["obv_signal"] = None
 
         return stock_data
 
@@ -682,6 +729,16 @@ class ScreenDataProvider:
 
         breakout_list: list[dict[str, Any]] = []
 
+        # 数据窗口前移：用 [:-1] 做突破检测，[-1] 做确认日
+        if len(closes) < 2:
+            return breakout_list
+
+        detect_closes = closes[:-1]
+        detect_highs = highs[:-1]
+        detect_lows = lows[:-1]
+        detect_volumes = volumes[:-1]
+        confirm_close = closes[-1]
+
         def _signal_to_dict(signal) -> dict[str, Any]:
             """将 BreakoutSignal 转换为字典。"""
             return {
@@ -693,40 +750,39 @@ class ScreenDataProvider:
                 "generates_buy_signal": signal.generates_buy_signal,
             }
 
+        from app.services.screener.breakout import check_false_breakout
+
         # 箱体突破
         if enable_box:
             box = detect_box_breakout(
-                closes, highs, lows, volumes,
+                detect_closes, detect_highs, detect_lows, detect_volumes,
                 volume_multiplier=vol_threshold,
             )
             if box is not None:
-                if confirm_days > 0 and len(closes) > 1:
-                    from app.services.screener.breakout import check_false_breakout
-                    box = check_false_breakout(box, closes[-1], hold_days=confirm_days)
+                if confirm_days > 0:
+                    box = check_false_breakout(box, confirm_close, hold_days=confirm_days)
                 breakout_list.append(_signal_to_dict(box))
 
         # 前期高点突破
         if enable_high:
             prev_high = detect_previous_high_breakout(
-                closes, volumes,
+                detect_closes, detect_volumes,
                 volume_multiplier=vol_threshold,
             )
             if prev_high is not None:
-                if confirm_days > 0 and len(closes) > 1:
-                    from app.services.screener.breakout import check_false_breakout
-                    prev_high = check_false_breakout(prev_high, closes[-1], hold_days=confirm_days)
+                if confirm_days > 0:
+                    prev_high = check_false_breakout(prev_high, confirm_close, hold_days=confirm_days)
                 breakout_list.append(_signal_to_dict(prev_high))
 
         # 下降趋势线突破
         if enable_trendline:
             trendline = detect_descending_trendline_breakout(
-                closes, highs, volumes,
+                detect_closes, detect_highs, detect_volumes,
                 volume_multiplier=vol_threshold,
             )
             if trendline is not None:
-                if confirm_days > 0 and len(closes) > 1:
-                    from app.services.screener.breakout import check_false_breakout
-                    trendline = check_false_breakout(trendline, closes[-1], hold_days=confirm_days)
+                if confirm_days > 0:
+                    trendline = check_false_breakout(trendline, confirm_close, hold_days=confirm_days)
                 breakout_list.append(_signal_to_dict(trendline))
 
         return breakout_list
@@ -879,23 +935,42 @@ class ScreenDataProvider:
                 logger.warning("未找到 INDUSTRY 成分股交易日数据")
                 return {}
 
-            # 查询成分股数据
-            stmt = (
-                select(SectorConstituent)
-                .where(
-                    SectorConstituent.data_source == data_source,
-                    SectorConstituent.trade_date == latest_date,
-                    SectorConstituent.sector_code.in_(valid_sector_codes),
-                )
-            )
-            result = await pg_session.execute(stmt)
-            constituents = list(result.scalars().all())
+            # 查询成分股数据（根据数据源模式选择查询方式）
+            from app.services.screener.sector_strength import _INCREMENTAL_SOURCES
 
-            # 构建 symbol → sector_code 映射（如果一只股票属于多个行业，取第一个）
+            if data_source in _INCREMENTAL_SOURCES:
+                stmt = (
+                    select(
+                        SectorConstituent.symbol,
+                        SectorConstituent.sector_code,
+                    ).distinct()
+                    .where(
+                        SectorConstituent.data_source == data_source,
+                        SectorConstituent.trade_date <= latest_date,
+                        SectorConstituent.sector_code.in_(valid_sector_codes),
+                    )
+                )
+            else:
+                stmt = (
+                    select(
+                        SectorConstituent.symbol,
+                        SectorConstituent.sector_code,
+                    ).distinct()
+                    .where(
+                        SectorConstituent.data_source == data_source,
+                        SectorConstituent.trade_date == latest_date,
+                        SectorConstituent.sector_code.in_(valid_sector_codes),
+                    )
+                )
+            result = await pg_session.execute(stmt)
+            rows = result.all()
+
+            # 构建 symbol → sector_code 映射（symbol 转为纯数字格式）
             mapping: dict[str, str] = {}
-            for c in constituents:
-                if c.symbol not in mapping:
-                    mapping[c.symbol] = c.sector_code
+            for row in rows:
+                bare = _strip_market_suffix(row[0])
+                if bare not in mapping:
+                    mapping[bare] = row[1]
 
             logger.debug(
                 "构建行业映射 data_source=%s date=%s 股票数=%d",
@@ -1039,8 +1114,9 @@ class ScreenDataProvider:
             else:
                 rows = await self._query_stk_factor(pg, screen_date_str)
 
-            row_map: dict[str, StkFactor] = {r.ts_code: r for r in rows}
+            row_map: dict[str, StkFactor] = {_strip_market_suffix(r.ts_code): r for r in rows}
 
+            matched = 0
             for symbol, fd in stocks_data.items():
                 row = row_map.get(symbol)
                 if row is None:
@@ -1056,9 +1132,11 @@ class ScreenDataProvider:
                 # trix: 正值视为多头信号（需求 12.1）
                 fd["trix"] = (row.trix is not None and row.trix > 0) if row.trix is not None else None
                 fd["bias"] = row.bias
-                # psy / obv_signal 不在 stk_factor 表中，降级为 None
-                fd["psy"] = None
-                fd["obv_signal"] = None
+                # psy / obv_signal 由 _build_factor_dict 计算，此处保留已有值
+                fd.setdefault("psy", None)
+                fd.setdefault("obv_signal", None)
+                matched += 1
+            logger.info("stk_factor 匹配 %d/%d 只股票", matched, len(stocks_data))
         except Exception:
             logger.warning("批量加载 stk_factor 数据失败，技术面专业因子降级为 None", exc_info=True)
             for fd in stocks_data.values():
@@ -1102,7 +1180,7 @@ class ScreenDataProvider:
             else:
                 rows = await self._query_cyq_perf(pg, screen_date_str)
 
-            row_map: dict[str, CyqPerf] = {r.ts_code: r for r in rows}
+            row_map: dict[str, CyqPerf] = {_strip_market_suffix(r.ts_code): r for r in rows}
 
             for symbol, fd in stocks_data.items():
                 row = row_map.get(symbol)
@@ -1166,7 +1244,7 @@ class ScreenDataProvider:
             from collections import defaultdict
             grouped: dict[str, list[MarginDetail]] = defaultdict(list)
             for r in rows:
-                grouped[r.ts_code].append(r)
+                grouped[_strip_market_suffix(r.ts_code)].append(r)
             for v in grouped.values():
                 v.sort(key=lambda x: x.trade_date)
 
@@ -1246,13 +1324,13 @@ class ScreenDataProvider:
                 ths_rows = await self._query_moneyflow_ths(pg, screen_date_str)
                 dc_rows = await self._query_moneyflow_dc(pg, screen_date_str) if not ths_rows else []
 
-            # 构建 ts_code → row 映射（优先 THS，回退 DC）
+            # 构建 symbol → row 映射（优先 THS，回退 DC）
             row_map: dict[str, MoneyflowThs | MoneyflowDc] = {}
             for r in ths_rows:
-                row_map[r.ts_code] = r
+                row_map[_strip_market_suffix(r.ts_code)] = r
             if not ths_rows:
                 for r in dc_rows:
-                    row_map[r.ts_code] = r
+                    row_map[_strip_market_suffix(r.ts_code)] = r
 
             for symbol, fd in stocks_data.items():
                 row = row_map.get(symbol)
@@ -1359,19 +1437,19 @@ class ScreenDataProvider:
                 step_rows = await self._query_limit_step(pg, screen_date_str)
                 top_rows = await self._query_top_list(pg, dt_start_str, screen_date_str)
 
-            # limit_list: 按 ts_code 分组
+            # limit_list: 按 symbol 分组
             from collections import defaultdict
             limit_grouped: dict[str, list[LimitList]] = defaultdict(list)
             for r in limit_rows:
-                limit_grouped[r.ts_code].append(r)
+                limit_grouped[_strip_market_suffix(r.ts_code)].append(r)
 
-            # limit_step: ts_code → LimitStep
-            step_map: dict[str, LimitStep] = {r.ts_code: r for r in step_rows}
+            # limit_step: symbol → LimitStep
+            step_map: dict[str, LimitStep] = {_strip_market_suffix(r.ts_code): r for r in step_rows}
 
-            # top_list: 按 ts_code 分组
+            # top_list: 按 symbol 分组
             top_grouped: dict[str, list[TopList]] = defaultdict(list)
             for r in top_rows:
-                top_grouped[r.ts_code].append(r)
+                top_grouped[_strip_market_suffix(r.ts_code)].append(r)
 
             for symbol, fd in stocks_data.items():
                 # 涨停次数（需求 16.4）
@@ -1481,8 +1559,9 @@ class ScreenDataProvider:
             stock_index_map: dict[str, str] = {}
             for idx_code, constituents in weight_map.items():
                 for con_code in constituents:
-                    if con_code not in stock_index_map:
-                        stock_index_map[con_code] = idx_code
+                    bare = _strip_market_suffix(con_code)
+                    if bare not in stock_index_map:
+                        stock_index_map[bare] = idx_code
 
             for symbol, fd in stocks_data.items():
                 idx_code = stock_index_map.get(symbol)
@@ -1558,93 +1637,108 @@ class ScreenDataProvider:
         trade_date: date | None = None,
     ) -> dict[str, dict[str, list[str]]]:
         """
-        批量加载所有股票在三个数据源（DC/TI/TDX）的板块分类信息。
+        批量加载所有股票在多个数据源的板块分类信息。
 
-        一次查询 SectorConstituent 表获取所有目标股票的成分股记录，
-        再批量查询 SectorInfo 表将 sector_code 转换为人类可读的板块名称，
-        避免 N+1 查询。
-
-        Args:
-            pg_session: PostgreSQL 异步会话
-            symbols: 股票代码列表
-            trade_date: 交易日期（可选，默认使用表中最新交易日）
-
-        Returns:
-            {symbol: {"DC": [板块名, ...], "TI": [...], "TDX": [...]}} 映射
+        按数据源分别查询，增量数据源用 <= 累积查询，快照数据源用 = 精确查询。
+        symbol 格式转换为纯数字格式后与 symbols 列表匹配。
         """
-        _DATA_SOURCES = ["DC", "TI", "TDX"]
+        from app.services.screener.sector_strength import _INCREMENTAL_SOURCES
+
+        _DATA_SOURCES = ["DC", "THS", "TDX", "TI"]
 
         if not symbols:
             return {}
 
-        # 若 trade_date 为 None，查询最新交易日
-        if trade_date is None:
-            latest_date_stmt = select(
-                func.max(SectorConstituent.trade_date)
-            ).where(
-                SectorConstituent.data_source.in_(_DATA_SOURCES),
-            )
-            date_result = await pg_session.execute(latest_date_stmt)
-            trade_date = date_result.scalar_one_or_none()
-            if trade_date is None:
-                logger.warning("SectorConstituent 表中无交易日数据，返回空分类")
-                return {}
+        # 生成带后缀的 symbol 变体用于数据库端过滤
+        symbols_set = set(symbols)
+        suffixed: list[str] = []
+        for s in symbols:
+            if "." not in s:
+                suffixed.extend([f"{s}.SH", f"{s}.SZ", f"{s}.BJ"])
+            else:
+                suffixed.append(s)
 
-        # 1. 批量查询成分股记录
-        constituents_stmt = (
-            select(SectorConstituent)
-            .where(
-                SectorConstituent.symbol.in_(symbols),
-                SectorConstituent.trade_date == trade_date,
-                SectorConstituent.data_source.in_(_DATA_SOURCES),
-            )
-        )
-        result = await pg_session.execute(constituents_stmt)
-        constituents = list(result.scalars().all())
+        # 按数据源分别查询
+        all_constituents: list[tuple[str, str, str]] = []  # (symbol, sector_code, data_source)
+        for ds in _DATA_SOURCES:
+            try:
+                # 查询该数据源的最新日期
+                ds_date_stmt = select(
+                    func.max(SectorConstituent.trade_date)
+                ).where(SectorConstituent.data_source == ds)
+                ds_date = (await pg_session.execute(ds_date_stmt)).scalar_one_or_none()
+                if ds_date is None:
+                    continue
 
-        if not constituents:
+                target_date = trade_date if trade_date is not None else ds_date
+
+                if ds in _INCREMENTAL_SOURCES:
+                    stmt = (
+                        select(
+                            SectorConstituent.symbol,
+                            SectorConstituent.sector_code,
+                            SectorConstituent.data_source,
+                        ).distinct()
+                        .where(
+                            SectorConstituent.data_source == ds,
+                            SectorConstituent.trade_date <= target_date,
+                            SectorConstituent.symbol.in_(suffixed),
+                        )
+                    )
+                else:
+                    stmt = (
+                        select(
+                            SectorConstituent.symbol,
+                            SectorConstituent.sector_code,
+                            SectorConstituent.data_source,
+                        )
+                        .where(
+                            SectorConstituent.data_source == ds,
+                            SectorConstituent.trade_date == ds_date,
+                            SectorConstituent.symbol.in_(suffixed),
+                        )
+                    )
+                result = await pg_session.execute(stmt)
+                for row in result.all():
+                    all_constituents.append((row[0], row[1], row[2]))
+            except Exception:
+                logger.warning("加载 %s 板块分类数据失败", ds, exc_info=True)
+
+        if not all_constituents:
             return {}
 
-        # 2. 收集所有 (sector_code, data_source) 对，批量查询 SectorInfo
-        sector_keys: set[tuple[str, str]] = set()
-        for c in constituents:
-            sector_keys.add((c.sector_code, c.data_source))
-
-        # 提取唯一的 sector_code 和 data_source 用于查询
+        # 批量查询 SectorInfo 名称
+        sector_keys: set[tuple[str, str]] = {(r[1], r[2]) for r in all_constituents}
         unique_codes = {k[0] for k in sector_keys}
         unique_sources = {k[1] for k in sector_keys}
 
         info_stmt = (
-            select(
-                SectorInfo.sector_code,
-                SectorInfo.data_source,
-                SectorInfo.name,
-            )
+            select(SectorInfo.sector_code, SectorInfo.data_source, SectorInfo.name)
             .where(
                 SectorInfo.sector_code.in_(unique_codes),
                 SectorInfo.data_source.in_(unique_sources),
             )
         )
         info_result = await pg_session.execute(info_stmt)
-        info_rows = info_result.all()
-
-        # 构建 (sector_code, data_source) → name 映射
         name_map: dict[tuple[str, str], str] = {}
-        for row in info_rows:
+        for row in info_result.all():
             name_map[(row.sector_code, row.data_source)] = row.name
 
-        # 3. 构建 symbol → {"DC": [...], "TI": [...], "TDX": [...]} 结果
+        # 构建结果（symbol 转为纯数字格式）
         classifications: dict[str, dict[str, list[str]]] = {}
-        for c in constituents:
-            if c.symbol not in classifications:
-                classifications[c.symbol] = {src: [] for src in _DATA_SOURCES}
-
-            # 若 SectorInfo 中缺少该 sector_code，使用原始值作为板块名称
-            sector_name = name_map.get(
-                (c.sector_code, c.data_source), c.sector_code
-            )
-            source_list = classifications[c.symbol][c.data_source]
+        for sym_raw, sector_code, ds in all_constituents:
+            bare = _strip_market_suffix(sym_raw)
+            if bare not in symbols_set:
+                continue
+            if bare not in classifications:
+                classifications[bare] = {src: [] for src in _DATA_SOURCES}
+            sector_name = name_map.get((sector_code, ds), sector_code)
+            source_list = classifications[bare].get(ds, [])
+            if ds not in classifications[bare]:
+                classifications[bare][ds] = source_list
             if sector_name not in source_list:
                 source_list.append(sector_name)
+
+        return classifications
 
         return classifications

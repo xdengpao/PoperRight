@@ -900,3 +900,63 @@ def calculate_dma(
     ama = _simple_sma(dma, signal_period)
 
     return DMAResult(dma=dma, ama=ama)
+
+
+# ---------------------------------------------------------------------------
+# PSY 心理线指标
+# ---------------------------------------------------------------------------
+
+def calculate_psy(closes: list[float], period: int = 12) -> float | None:
+    """
+    计算心理线指标。PSY = 最近 period 日中上涨天数 / period × 100。
+
+    Args:
+        closes: 收盘价序列（时间升序）
+        period: 统计周期，默认 12
+
+    Returns:
+        PSY 值（0-100），数据不足时返回 None
+    """
+    if len(closes) < period + 1:
+        return None
+    recent = closes[-(period + 1):]
+    up_days = sum(1 for i in range(1, len(recent)) if recent[i] > recent[i - 1])
+    return up_days / period * 100.0
+
+
+# ---------------------------------------------------------------------------
+# OBV 能量潮信号
+# ---------------------------------------------------------------------------
+
+def calculate_obv_signal(
+    closes: list[float],
+    volumes: list[int],
+    short: int = 5,
+    long: int = 20,
+) -> bool | None:
+    """
+    计算 OBV 能量潮信号。当 OBV 短期均值 > 长期均值时返回 True。
+
+    Args:
+        closes: 收盘价序列（时间升序）
+        volumes: 成交量序列（时间升序）
+        short: 短期均线周期，默认 5
+        long: 长期均线周期，默认 20
+
+    Returns:
+        True 表示 OBV 多头，False 表示空头，数据不足时返回 None
+    """
+    n = len(closes)
+    if n < long + 1 or len(volumes) < long + 1:
+        return None
+    obv = [0.0] * n
+    for i in range(1, n):
+        if closes[i] > closes[i - 1]:
+            obv[i] = obv[i - 1] + volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv[i] = obv[i - 1] - volumes[i]
+        else:
+            obv[i] = obv[i - 1]
+    obv_short_avg = sum(obv[-short:]) / short
+    obv_long_avg = sum(obv[-long:]) / long
+    return obv_short_avg > obv_long_avg
