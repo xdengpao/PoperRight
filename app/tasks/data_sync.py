@@ -1098,3 +1098,70 @@ def import_adj_factors(
 
     service = LocalKlineImportService()
     return _run_async(service.execute_adj_factors(adj_factors=adj_factors))
+
+
+# ---------------------------------------------------------------------------
+# 指数数据同步（需求 7）
+# ---------------------------------------------------------------------------
+
+_INDEX_SYNC_APIS = ["index_daily", "index_dailybasic", "idx_factor_pro"]
+
+
+@celery_app.task(
+    base=DataSyncTask,
+    name="app.tasks.data_sync.sync_index_data",
+    bind=True,
+    queue="data_sync",
+    soft_time_limit=3600,
+    time_limit=4200,
+)
+def sync_index_data(self) -> dict:
+    """每日指数数据增量同步。
+
+    按顺序分发 index_daily → index_dailybasic → idx_factor_pro 三个导入任务。
+    三者写入不同的表（kline / index_dailybasic / index_tech），无数据依赖，
+    通过 TushareImportService.start_import 分发到 Celery 队列并行执行。
+    """
+    return _run_async(_sync_index_data_async())
+
+
+async def _sync_index_data_async() -> dict:
+    from app.services.data_engine.tushare_import_service import TushareImportService
+
+    svc = TushareImportService()
+    results = {}
+    for api_name in _INDEX_SYNC_APIS:
+        try:
+            result = await svc.start_import(api_name, {})
+            results[api_name] = {"status": "dispatched", "task_id": result.get("task_id")}
+            logger.info("指数同步：已分发 %s 导入任务", api_name)
+        except Exception:
+            logger.error("指数同步：分发 %s 失败", api_name, exc_info=True)
+            results[api_name] = {"status": "failed"}
+    return results
+
+
+@celery_app.task(
+    base=DataSyncTask,
+    name="app.tasks.data_sync.sync_index_weight",
+    bind=True,
+    queue="data_sync",
+    soft_time_limit=1800,
+    time_limit=2400,
+)
+def sync_index_weight(self) -> dict:
+    """每月指数成分权重同步。"""
+    return _run_async(_sync_index_weight_async())
+
+
+async def _sync_index_weight_async() -> dict:
+    from app.services.data_engine.tushare_import_service import TushareImportService
+
+    svc = TushareImportService()
+    try:
+        result = await svc.start_import("index_weight", {})
+        logger.info("指数成分权重同步：已分发导入任务")
+        return {"status": "dispatched", "task_id": result.get("task_id")}
+    except Exception:
+        logger.error("指数成分权重同步失败", exc_info=True)
+        return {"status": "failed"}

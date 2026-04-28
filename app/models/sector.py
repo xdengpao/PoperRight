@@ -88,7 +88,7 @@ class SectorConstituent(PGBase):
     trade_date: Mapped[date] = mapped_column(Date, nullable=False)
     sector_code: Mapped[str] = mapped_column(String(20), nullable=False)
     data_source: Mapped[str] = mapped_column(String(10), nullable=False)
-    symbol: Mapped[str] = mapped_column(String(10), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(12), nullable=False)
     stock_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     __table_args__ = (

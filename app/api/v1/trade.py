@@ -15,7 +15,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 router = APIRouter(prefix="/trade", tags=["交易"])
 
@@ -35,6 +35,12 @@ class OrderRequest(BaseModel):
     take_profit: float | None = None
     mode: Literal["LIVE", "PAPER"] = "LIVE"
 
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _standardize(cls, v: str) -> str:
+        from app.core.symbol_utils import to_standard
+        return to_standard(v)
+
 
 class ConditionOrderIn(BaseModel):
     symbol: str
@@ -45,6 +51,12 @@ class ConditionOrderIn(BaseModel):
     quantity: int
     price: float | None = None
     trailing_pct: float | None = None
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _standardize(cls, v: str) -> str:
+        from app.core.symbol_utils import to_standard
+        return to_standard(v)
 
 
 class ConditionOrderUpdate(BaseModel):

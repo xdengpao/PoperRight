@@ -154,7 +154,7 @@ DEFAULT_MODULE_WEIGHTS = _DEFAULT_MODULE_WEIGHTS
 class KlineBar:
     """K线数据传输对象（业务层，从 app.models.kline.KlineBar 重导出并扩展）"""
     time: datetime
-    symbol: str
+    symbol: str                 # 标准代码格式，如 600000.SH
     freq: str
     open: Decimal
     high: Decimal
@@ -190,7 +190,7 @@ class SignalDetail:
 @dataclass
 class ScreenItem:
     """单条选股结果"""
-    symbol: str
+    symbol: str                         # 标准代码格式，如 600000.SH
     ref_buy_price: Decimal          # 买入参考价
     trend_score: float              # 趋势强度评分 0-100
     risk_level: RiskLevel           # 风险等级
@@ -204,7 +204,7 @@ class ScreenItem:
 @dataclass
 class ScreenChange:
     """选股结果变化条目（需求 10）"""
-    symbol: str                         # 股票代码
+    symbol: str                         # 标准代码格式，如 600000.SH
     change_type: ChangeType             # 变化类型
     item: ScreenItem | None = None      # 对应的 ScreenItem，REMOVED 时为 None
 

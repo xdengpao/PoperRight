@@ -306,49 +306,58 @@ class LocalKlineImportService:
 
     def infer_symbol_from_csv_name(self, csv_name: str, market: str = "hushen") -> str | None:
         """
-        从 ZIP 内 CSV 文件名推断股票代码（市场感知）。
+        从 ZIP 内 CSV 文件名推断股票代码（市场感知），返回标准代码格式。
 
         支持格式：
-        - hushen: sz000001.csv → 000001, sh600000.csv → 600000
-        - jingshi: bj920000.csv → 920000
-        - zhishu: 000001.csv → 000001（无前缀，直接数字）
+        - hushen: sz000001.csv → 000001.SZ, sh600000.csv → 600000.SH
+        - jingshi: bj920000.csv → 920000.BJ
+        - zhishu: 000001.csv → 000001.SH（指数，自动推断交易所）
 
         Args:
             csv_name: CSV 文件名
             market: 市场分类（hushen/jingshi/zhishu），默认 hushen
 
         Returns:
-            纯数字股票代码，无法推断时返回 None
+            标准代码格式，无法推断时返回 None
         """
         import re
-        basename = Path(csv_name).stem  # e.g. "sz000001"
-        # 去掉 sh/sz/bj 前缀（对 zhishu 无前缀文件名无影响）
+        from app.core.symbol_utils import to_standard
+        basename = Path(csv_name).stem
+        prefix_match = re.match(r"^(sz|sh|bj)", basename, flags=re.IGNORECASE)
+        exchange = None
+        if prefix_match:
+            exchange = {"sz": "SZ", "sh": "SH", "bj": "BJ"}[prefix_match.group(1).lower()]
         cleaned = re.sub(r"^(sz|sh|bj)", "", basename, flags=re.IGNORECASE)
-        # 验证是纯数字
         if cleaned and cleaned.isdigit():
-            return cleaned
+            try:
+                return to_standard(cleaned, exchange)
+            except ValueError:
+                return None
         return None
 
     def infer_symbol_from_adj_csv_name(self, csv_name: str) -> str | None:
         """
-        从复权因子 CSV 文件名推断股票代码。
+        从复权因子 CSV 文件名推断股票代码，返回标准代码格式。
 
         支持格式：
-        - 000001.SZ.csv → 000001
-        - 600000.SH.csv → 600000
-
-        提取第一个 '.' 之前的部分，验证为纯数字后返回。
+        - 000001.SZ.csv → 000001.SZ
+        - 600000.SH.csv → 600000.SH
 
         Args:
             csv_name: CSV 文件名
 
         Returns:
-            纯数字股票代码，无法推断时返回 None
+            标准代码格式，无法推断时返回 None
         """
-        basename = Path(csv_name).name  # e.g. "000001.SZ.csv"
+        from app.core.symbol_utils import to_standard
+        basename = Path(csv_name).name
         parts = basename.split(".")
-        if parts and parts[0].isdigit():
-            return parts[0]
+        if len(parts) >= 2 and parts[0].isdigit():
+            exchange = parts[1] if len(parts) >= 3 and parts[1] in ("SH", "SZ", "BJ") else None
+            try:
+                return to_standard(parts[0], exchange)
+            except ValueError:
+                return None
         return None
 
     def infer_symbol_and_freq(self, zip_path: Path) -> tuple[str, str] | None:

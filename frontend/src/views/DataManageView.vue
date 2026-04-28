@@ -160,7 +160,7 @@
             v-model="backfillSymbols"
             type="text"
             class="form-input"
-            placeholder="多个股票用逗号分隔，如 600000,000001"
+            placeholder="多个股票用逗号分隔，如 600000.SH,000001.SZ"
             aria-label="股票代码，多个用逗号分隔"
           />
         </div>

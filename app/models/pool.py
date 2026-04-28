@@ -58,7 +58,7 @@ class StockPoolItem(PGBase):
         ForeignKey("stock_pool.id", ondelete="CASCADE"),
         primary_key=True,
     )
-    symbol: Mapped[str] = mapped_column(String(10), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     added_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
     )

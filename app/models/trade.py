@@ -30,7 +30,7 @@ class TradeOrder(PGBase):
         server_default=sa_text("gen_random_uuid()"),
     )
     user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
-    symbol: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(12), nullable=True)
     order_type: Mapped[str | None] = mapped_column(String(20), nullable=True)   # 'LIMIT'|'MARKET'|'CONDITION'
     direction: Mapped[str | None] = mapped_column(String(5), nullable=True)     # 'BUY'|'SELL'
     price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
@@ -61,7 +61,7 @@ class Position(PGBase):
         server_default=sa_text("gen_random_uuid()"),
     )
     user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
-    symbol: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(12), nullable=True)
     quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     mode: Mapped[str | None] = mapped_column(String(10), nullable=True)     # 'LIVE'|'PAPER'

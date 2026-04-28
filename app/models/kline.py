@@ -21,8 +21,8 @@ class Kline(TSBase):
 
     # 时间轴（超表分区键）
     time: Mapped[datetime] = mapped_column(primary_key=True, nullable=False)
-    # 股票代码，如 000001.SZ
-    symbol: Mapped[str] = mapped_column(String(10), primary_key=True, nullable=False)
+    # 股票代码，标准格式如 000001.SZ
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True, nullable=False)
     # 频率：'1m','5m','15m','30m','60m','1d','1w','1M'
     freq: Mapped[str] = mapped_column(String(5), primary_key=True, nullable=False)
 

@@ -27,7 +27,8 @@ def _get_sync_pg_url() -> str:
 
 
 def _strip_suffix(ts_code: str) -> str:
-    return ts_code.split(".")[0] if "." in ts_code else ts_code
+    """兼容函数：现在所有表统一使用标准代码格式，直接返回原值。"""
+    return ts_code
 
 
 def load_factor_data(

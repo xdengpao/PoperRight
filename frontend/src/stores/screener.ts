@@ -14,6 +14,7 @@ export interface SignalDetail {
 }
 
 export interface ScreenItem {
+  /** 标准代码格式，如 600000.SH */
   symbol: string
   name: string
   ref_buy_price: number

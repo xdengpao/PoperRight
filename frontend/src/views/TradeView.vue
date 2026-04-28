@@ -98,7 +98,7 @@
                   id="order-symbol"
                   v-model="order.symbol"
                   class="input"
-                  placeholder="如 000001"
+                  placeholder="如 000001.SZ"
                   @input="order.symbol = (order.symbol as string).toUpperCase()"
                 />
               </div>
@@ -203,7 +203,7 @@
                   id="cond-symbol"
                   v-model="condOrder.symbol"
                   class="input"
-                  placeholder="如 000001"
+                  placeholder="如 000001.SZ"
                   @input="condOrder.symbol = (condOrder.symbol as string).toUpperCase()"
                 />
               </div>

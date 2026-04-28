@@ -18,7 +18,7 @@ A-Share Quantitative Trading System (A股右侧量化选股系统) — a full-st
 - Trading hours: 09:25–15:00 CST (Asia/Shanghai)
 - Scheduled jobs run on weekdays only (Mon–Fri)
 - All monetary values use `Decimal`; percentages are floats
-- Stock symbols are 6-digit codes (e.g., "600000" for SH, "000001" for SZ)
+- Stock symbols use standard format with exchange suffix (e.g., "600000.SH", "000001.SZ", "830799.BJ")
 - Market risk levels: NORMAL (threshold 80) → CAUTION (threshold 90, below MA20) → DANGER (buy suspended, below MA60)
 - Comments, docstrings, and UI labels are in Chinese (中文)
 - Data sources: Tushare, AkShare, local CSV files for K-line data

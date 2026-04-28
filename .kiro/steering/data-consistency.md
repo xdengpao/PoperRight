@@ -133,13 +133,16 @@ type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 
 | 规则 | 说明 |
 |------|------|
-| 格式 | 6 位数字，可带市场后缀 |
-| 存储 | `VARCHAR(10)` |
-| 无后缀 | `"600000"`, `"000001"` — 用于 stock_info, position, trade_order |
-| 带后缀 | `"600000.SH"`, `"000001.SZ"` — 用于 kline 表 |
-| 市场代码 | SH (上海), SZ (深圳), BJ (北京) |
+| 格式 | 标准代码：`{6位数字}.{交易所}`，如 `600000.SH`、`000001.SZ`、`830799.BJ` |
+| 存储 | `VARCHAR(12)` |
+| 交易所 | SH (上海), SZ (深圳), BJ (北京) |
+| 转换工具 | `app/core/symbol_utils.py` |
 
-**规则：** 同一张表内 symbol 格式必须统一。kline 表使用带后缀格式，其他业务表使用纯数字格式。
+**规则：**
+- 所有表的 symbol 字段统一使用标准代码格式（`{code}.{exchange}`）
+- 禁止在业务代码中自行实现代码格式转换（如 `split(".")`、内联 if/else 加后缀），必须使用 `symbol_utils` 模块
+- API 层兼容裸代码输入（如 `600000`），内部自动转为标准代码
+- Tushare 原始数据表的 `ts_code` 字段已是标准格式，与 `symbol` 字段格式一致
 
 ### 3.3 板块代码 (sector_code)
 
@@ -365,7 +368,7 @@ class SomeConfig:
 - [ ] 枚举存储为 `VARCHAR`，禁止数字编码
 - [ ] 时间戳使用 `TIMESTAMPTZ`，默认值 `NOW()`
 - [ ] UUID 使用 `PG_UUID(as_uuid=True)` + `gen_random_uuid()`
-- [ ] 股票代码使用 `VARCHAR(10)`，格式与所在表一致
+- [ ] 股票代码使用 `VARCHAR(12)`，统一标准代码格式（`{code}.{exchange}`），使用 `symbol_utils` 转换
 - [ ] JSONB 配置类实现 `to_dict()` / `from_dict()`
 - [ ] `from_dict()` 向后兼容旧格式
 - [ ] 前后端字段名一致（除已知例外）

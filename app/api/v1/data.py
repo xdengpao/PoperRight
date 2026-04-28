@@ -226,12 +226,9 @@ async def get_kline(
     end_date = end or date.today()
     start_date = start or (end_date - timedelta(days=90))
 
-    # 纯数字代码（用于本地 DB 查询，DB 中存储的是纯数字格式）
-    clean_symbol = symbol.split(".")[0]
-    # 带后缀代码（用于第三方 API，Tushare 需要 .SZ/.SH 格式）
-    ts_symbol = symbol
-    if "." not in symbol:
-        ts_symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+    # 统一转为标准代码格式
+    from app.core.symbol_utils import to_standard
+    std_symbol = to_standard(symbol)
 
     bars = []
 
@@ -243,7 +240,7 @@ async def get_kline(
             result = await session.execute(
                 select(Kline)
                 .where(
-                    Kline.symbol == clean_symbol,
+                    Kline.symbol == std_symbol,
                     Kline.freq == freq,
                     Kline.time >= start_dt,
                     Kline.time <= end_dt,
@@ -253,19 +250,19 @@ async def get_kline(
             rows = result.scalars().all()
             if rows:
                 bars = [KlineBarDTO.from_orm(r) for r in rows]
-                logger.info("从本地 DB 获取 K 线 symbol=%s 共 %d 条", clean_symbol, len(bars))
+                logger.info("从本地 DB 获取 K 线 symbol=%s 共 %d 条", std_symbol, len(bars))
     except Exception as exc:
-        logger.warning("本地 DB 查询 K 线失败 symbol=%s: %s", clean_symbol, exc)
+        logger.warning("本地 DB 查询 K 线失败 symbol=%s: %s", std_symbol, exc)
 
     # 2. 本地无数据，回退到第三方 API（分钟级频率仅查本地，不回退）
     MINUTE_FREQS = {"1m", "5m", "15m", "30m", "60m"}
     if not bars and freq not in MINUTE_FREQS:
         router_svc = DataSourceRouter()
         try:
-            bars = await router_svc.fetch_kline(ts_symbol, freq, start_date, end_date)
-            logger.info("从第三方 API 获取 K 线 symbol=%s 共 %d 条", ts_symbol, len(bars))
+            bars = await router_svc.fetch_kline(std_symbol, freq, start_date, end_date)
+            logger.info("从第三方 API 获取 K 线 symbol=%s 共 %d 条", std_symbol, len(bars))
         except Exception as exc:
-            logger.warning("第三方 API 获取 K 线失败 symbol=%s: %s", ts_symbol, exc)
+            logger.warning("第三方 API 获取 K 线失败 symbol=%s: %s", std_symbol, exc)
             bars = []
 
     # 3. 查询股票名称
@@ -275,7 +272,7 @@ async def get_kline(
         from app.models.stock import StockInfo
         async with AsyncSessionPG() as session:
             row = await session.execute(
-                select(StockInfo.name).where(StockInfo.symbol == clean_symbol)
+                select(StockInfo.name).where(StockInfo.symbol == std_symbol)
             )
             stock_name = row.scalar_one_or_none() or ""
     except Exception:
@@ -285,7 +282,7 @@ async def get_kline(
     if not stock_name:
         try:
             tushare = TushareAdapter()
-            data = await tushare._call_api("stock_basic", ts_code=ts_symbol, fields="ts_code,name")
+            data = await tushare._call_api("stock_basic", ts_code=std_symbol, fields="ts_code,name")
             rows = tushare._rows_from_data(data)
             if rows:
                 stock_name = rows[0].get("name", "")

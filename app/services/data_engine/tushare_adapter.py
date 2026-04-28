@@ -22,6 +22,7 @@ import httpx
 
 from app.core.config import settings
 from app.core.schemas import KlineBar
+from app.core.symbol_utils import to_standard
 from app.services.data_engine.base_adapter import BaseDataSourceAdapter
 from app.services.data_engine.fundamental_adapter import FundamentalsData
 from app.services.data_engine.money_flow_adapter import MarketOverview, MoneyFlowData
@@ -212,8 +213,7 @@ class TushareAdapter(BaseDataSourceAdapter):
             KlineBar 列表，按时间升序排列
         """
         # 自动补全 Tushare 格式后缀
-        if "." not in symbol:
-            symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        symbol = to_standard(symbol)
 
         logger.debug("Tushare fetch_kline symbol=%s freq=%s %s~%s", symbol, freq, start, end)
 
@@ -260,8 +260,7 @@ class TushareAdapter(BaseDataSourceAdapter):
             FundamentalsData 数据对象
         """
         # 自动补全 Tushare 格式后缀
-        if "." not in symbol:
-            symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        symbol = to_standard(symbol)
 
         logger.debug("Tushare fetch_fundamentals symbol=%s", symbol)
 
@@ -308,8 +307,7 @@ class TushareAdapter(BaseDataSourceAdapter):
             MoneyFlowData 数据对象
         """
         # 自动补全 Tushare 格式后缀
-        if "." not in symbol:
-            symbol = f"{symbol}.SH" if symbol.startswith("6") else f"{symbol}.SZ"
+        symbol = to_standard(symbol)
 
         logger.debug("Tushare fetch_money_flow symbol=%s date=%s", symbol, trade_date)
 

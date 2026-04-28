@@ -135,7 +135,8 @@ class KlineRepository:
         Returns:
             按时间升序排列的 KlineBar 列表
         """
-        symbol = symbol.split(".")[0] if "." in symbol else symbol
+        from app.core.symbol_utils import to_standard
+        symbol = to_standard(symbol)
         # 统一转为 datetime 以便与 TimescaleDB TIMESTAMPTZ 比较
         start_dt = datetime(start.year, start.month, start.day) if isinstance(start, date) and not isinstance(start, datetime) else start
         end_dt = datetime(end.year, end.month, end.day, 23, 59, 59) if isinstance(end, date) and not isinstance(end, datetime) else end

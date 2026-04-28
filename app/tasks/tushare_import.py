@@ -37,6 +37,7 @@ from app.services.data_engine.tushare_registry import (
     get_entry,
 )
 from app.tasks.base import DataSyncTask
+from app.core.symbol_utils import is_standard, to_standard
 
 logger = logging.getLogger(__name__)
 
@@ -1335,7 +1336,7 @@ def _expand_rows(rows: list[dict], entry: ApiEntry) -> list[dict]:
 def _convert_codes(rows: list[dict], entry: ApiEntry) -> list[dict]:
     """根据 code_format 转换代码格式。
 
-    - STOCK_SYMBOL: ts_code 去后缀（600000.SH → 600000），存入 symbol 字段
+    - STOCK_SYMBOL: ts_code 直接作为标准代码存入 symbol 字段（如 600000.SH）
     - INDEX_CODE: 保留 ts_code 原样
     - NONE: 不做任何转换
     """
@@ -1345,14 +1346,15 @@ def _convert_codes(rows: list[dict], entry: ApiEntry) -> list[dict]:
     if entry.code_format == CodeFormat.STOCK_SYMBOL:
         for row in rows:
             ts_code = row.get("ts_code", "")
-            if ts_code and "." in str(ts_code):
-                row["symbol"] = str(ts_code).split(".")[0]
-            elif ts_code:
-                row["symbol"] = str(ts_code)
+            if ts_code:
+                ts_code_str = str(ts_code)
+                try:
+                    row["symbol"] = to_standard(ts_code_str)
+                except ValueError:
+                    row["symbol"] = ts_code_str
         return rows
 
     if entry.code_format == CodeFormat.INDEX_CODE:
-        # 保留 ts_code 原样，不做转换
         return rows
 
     return rows
@@ -1395,21 +1397,13 @@ async def _get_stock_list() -> list[str]:
     ts_codes = []
     for row in rows:
         sym = str(row.symbol)
-        market = row.market
-
-        if market and market in ("SH", "SZ", "BJ"):
-            ts_codes.append(f"{sym}.{market}")
-            continue
-
-        if sym.startswith("6"):
-            ts_codes.append(f"{sym}.SH")
-        elif sym.startswith("0") or sym.startswith("3"):
-            ts_codes.append(f"{sym}.SZ")
-        elif sym.startswith("4") or sym.startswith("8"):
-            ts_codes.append(f"{sym}.BJ")
+        if is_standard(sym):
+            ts_codes.append(sym)
         else:
-            logger.warning("无法确定股票 %s 的交易所，默认归类为 SZ", sym)
-            ts_codes.append(f"{sym}.SZ")
+            try:
+                ts_codes.append(to_standard(sym, row.market))
+            except ValueError:
+                logger.warning("跳过非法代码 symbol=%r market=%r", sym, row.market)
 
     return ts_codes
 
@@ -2182,16 +2176,15 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
         else:
             continue
 
-        symbol = row.get("symbol", "")
-        if not symbol:
-            ts_code = row.get("ts_code", "")
-            if "." in str(ts_code):
-                symbol = str(ts_code).split(".")[0]
-            else:
-                symbol = str(ts_code)
-
+        symbol = row.get("symbol", "") or row.get("ts_code", "")
         if not symbol:
             continue
+        symbol = str(symbol)
+        if not is_standard(symbol):
+            try:
+                symbol = to_standard(symbol)
+            except ValueError:
+                symbol = symbol
 
         params_list.append({
             "time": ts,
@@ -2251,15 +2244,15 @@ async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None
     # 预处理：构建参数列表，过滤无效行
     params_list = []
     for row in rows:
-        symbol = row.get("symbol", "")
-        if not symbol:
-            ts_code = row.get("ts_code", "")
-            if "." in str(ts_code):
-                symbol = str(ts_code).split(".")[0]
-            else:
-                symbol = str(ts_code)
+        symbol = row.get("symbol", "") or row.get("ts_code", "")
         if not symbol:
             continue
+        symbol = str(symbol)
+        if not is_standard(symbol):
+            try:
+                symbol = to_standard(symbol)
+            except ValueError:
+                symbol = symbol
 
         trade_date_str = str(row.get("trade_date", ""))
         if len(trade_date_str) == 8 and trade_date_str.isdigit():

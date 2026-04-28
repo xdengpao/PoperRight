@@ -67,8 +67,9 @@ logger = logging.getLogger(__name__)
 
 
 def _strip_market_suffix(ts_code: str) -> str:
-    """将 Tushare ts_code 格式（如 '000001.SZ'）转换为纯数字格式（'000001'）。"""
-    return ts_code.split(".")[0] if "." in ts_code else ts_code
+    """兼容函数：现在所有表统一使用标准代码格式，直接返回原值。"""
+    return ts_code
+
 
 # 默认回溯天数（覆盖 MA250 所需的最少交易日）
 DEFAULT_LOOKBACK_DAYS = 365
@@ -1536,8 +1537,8 @@ class ScreenDataProvider:
         无数据时降级为 None，记录 WARNING 日志（需求 17.3）。
         """
         _index_factors = ("index_pe", "index_turnover", "index_ma_trend", "index_vol_ratio")
-        # 默认关注的主要指数
-        _TARGET_INDICES = ["000300.SH", "000905.SH", "000001.SH"]
+        from app.core.symbol_utils import INDEX_HS300, INDEX_ZZ500, INDEX_SH
+        _TARGET_INDICES = [INDEX_HS300, INDEX_ZZ500, INDEX_SH]
         try:
             screen_date_str = screen_date.strftime("%Y%m%d")
             pg = self._pg_session
@@ -1579,7 +1580,12 @@ class ScreenDataProvider:
                     fd["index_ma_trend"] = tech.macd > 0
                 else:
                     fd["index_ma_trend"] = None
-                fd["index_vol_ratio"] = None  # vol_ratio 不在 index_dailybasic 中
+                fd["index_vol_ratio"] = None  # 后续由 _compute_index_vol_ratios 填充
+
+            # 计算指数量比（当日成交量 / 近 5 日平均成交量）
+            await self._compute_index_vol_ratios(
+                stocks_data, stock_index_map, screen_date,
+            )
 
         except Exception:
             logger.warning("批量加载指数因子数据失败，指数因子降级为 None", exc_info=True)
@@ -1626,6 +1632,40 @@ class ScreenDataProvider:
             result[idx_code] = [row[0] for row in res.all()]
         return result
 
+    async def _compute_index_vol_ratios(
+        self,
+        stocks_data: dict[str, dict],
+        stock_index_map: dict[str, str],
+        screen_date: date,
+    ) -> None:
+        """计算指数量比（当日成交量 / 近 5 日平均成交量），写入 index_vol_ratio。"""
+        try:
+            kline_repo = KlineRepository(self._ts_session)
+            start = screen_date - timedelta(days=15)
+            unique_indices = set(stock_index_map.values()) | {"000001.SH"}
+            vol_ratio_map: dict[str, float | None] = {}
+
+            for idx_code in unique_indices:
+                bars = await kline_repo.query(
+                    symbol=idx_code, freq="1d", start=start, end=screen_date,
+                )
+                if len(bars) < 2:
+                    vol_ratio_map[idx_code] = None
+                    continue
+                today_vol = int(bars[-1].volume) if bars[-1].volume else 0
+                prev_vols = [int(b.volume) for b in bars[-6:-1] if b.volume]
+                if prev_vols and sum(prev_vols) > 0:
+                    avg_5d = sum(prev_vols) / len(prev_vols)
+                    vol_ratio_map[idx_code] = round(today_vol / avg_5d, 2)
+                else:
+                    vol_ratio_map[idx_code] = None
+
+            for symbol, fd in stocks_data.items():
+                idx_code = stock_index_map.get(symbol, "000001.SH")
+                fd["index_vol_ratio"] = vol_ratio_map.get(idx_code)
+        except Exception:
+            logger.warning("计算指数量比失败，index_vol_ratio 保持 None", exc_info=True)
+
     # ------------------------------------------------------------------
     # 板块分类数据加载（需求 9）
     # ------------------------------------------------------------------
@@ -1649,14 +1689,9 @@ class ScreenDataProvider:
         if not symbols:
             return {}
 
-        # 生成带后缀的 symbol 变体用于数据库端过滤
+        # 现在所有表统一使用标准代码格式，直接使用 symbols 查询
         symbols_set = set(symbols)
-        suffixed: list[str] = []
-        for s in symbols:
-            if "." not in s:
-                suffixed.extend([f"{s}.SH", f"{s}.SZ", f"{s}.BJ"])
-            else:
-                suffixed.append(s)
+        suffixed = list(symbols)
 
         # 按数据源分别查询
         all_constituents: list[tuple[str, str, str]] = []  # (symbol, sector_code, data_source)

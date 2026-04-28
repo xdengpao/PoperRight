@@ -23,6 +23,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.core.schemas import KlineBar
+from app.core.symbol_utils import to_bare, to_standard
 from app.services.data_engine.base_adapter import BaseDataSourceAdapter
 from app.services.data_engine.fundamental_adapter import FundamentalsData
 from app.services.data_engine.money_flow_adapter import MarketOverview, MoneyFlowData
@@ -124,7 +125,8 @@ class AkShareAdapter(BaseDataSourceAdapter):
             KlineBar 列表，按时间升序排列
         """
         self._ensure_akshare()
-        clean_symbol = symbol.split(".")[0]
+        std_symbol = to_standard(symbol)
+        clean_symbol = to_bare(symbol)
 
         logger.debug(
             "AkShare fetch_kline symbol=%s freq=%s %s~%s",
@@ -164,7 +166,7 @@ class AkShareAdapter(BaseDataSourceAdapter):
 
             bars.append(KlineBar(
                 time=dt,
-                symbol=symbol,
+                symbol=std_symbol,
                 freq=freq,
                 open=self._safe_decimal(row.get("开盘")),
                 high=self._safe_decimal(row.get("最高")),

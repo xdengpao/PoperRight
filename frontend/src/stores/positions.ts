@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
 export interface Position {
+  /** 标准代码格式，如 600000.SH */
   symbol: string
   name?: string
   quantity: number

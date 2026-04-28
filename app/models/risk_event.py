@@ -33,7 +33,7 @@ class RiskEventLog(PGBase):
     event_type: Mapped[str] = mapped_column(
         String(30), nullable=False,
     )  # ORDER_REJECTED / STOP_LOSS / POSITION_LIMIT / BREAKDOWN
-    symbol: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(12), nullable=True)
     rule_name: Mapped[str] = mapped_column(String(100), nullable=False)
     trigger_value: Mapped[float] = mapped_column(Float, nullable=False)
     threshold: Mapped[float] = mapped_column(Float, nullable=False)

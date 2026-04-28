@@ -278,7 +278,7 @@
           :id="`add-symbol-${activeList}`"
           v-model="newSymbol"
           class="input"
-          placeholder="股票代码，如 000001"
+          placeholder="股票代码，如 000001.SZ"
           @keyup.enter="addToList"
         />
         <label for="add-reason" class="sr-only">原因</label>

@@ -2213,7 +2213,6 @@ register(ApiEntry(
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
-    batch_by_code=True,
     extra_config={"freq": "1d", "max_rows": 8000},
 ))
 
@@ -2527,7 +2526,6 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_nothing",
     required_params=[ParamType.DATE_RANGE],
-    optional_params=[ParamType.INDEX_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,

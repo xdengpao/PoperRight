@@ -47,7 +47,7 @@
         <input
           id="symbol-input"
           v-model="symbol"
-          placeholder="输入股票代码，如 000001"
+          placeholder="输入股票代码，如 000001.SZ"
           class="input"
           @keyup.enter="loadKline"
         />
@@ -323,7 +323,7 @@ const moneyFlowLoaded = ref(false)
 
 // ─── K线图 ───────────────────────────────────────────────────────────────────
 
-const symbol = ref('000001')
+const symbol = ref('000001.SZ')
 const freq = ref('1d')
 const klineStart = ref('')
 const klineEnd = ref('')

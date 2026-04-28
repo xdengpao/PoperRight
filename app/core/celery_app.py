@@ -117,6 +117,20 @@ _beat_schedule = {
         "schedule": crontab(hour=2, minute=0),
         "options": {"queue": "data_sync"},
     },
+
+    # 指数数据增量同步：每个交易日 16:00 执行
+    "index-data-sync-1600": {
+        "task": "app.tasks.data_sync.sync_index_data",
+        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+        "options": {"queue": "data_sync"},
+    },
+
+    # 指数成分权重月度同步：每月 1 日 08:00 执行
+    "index-weight-sync-monthly": {
+        "task": "app.tasks.data_sync.sync_index_weight",
+        "schedule": crontab(hour=8, minute=0, day_of_month="1", day_of_week="1-5"),
+        "options": {"queue": "data_sync"},
+    },
 }
 
 # 盘中实时行情同步：交易时段每 10 秒执行（需求 7.5）

@@ -81,12 +81,12 @@ _DATE_DASH_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 def _normalize_symbol(raw: str) -> str:
-    """将带后缀的股票代码（如 ``000002.SZ``）转为裸代码（``000002``）。
-
-    业务表（stock_info, sector_constituent, position 等）统一使用裸代码，
-    仅 kline 时序表使用带后缀格式。参见 data-consistency.md §3.2。
-    """
-    return raw.split(".")[0] if "." in raw else raw
+    """将任意格式股票代码转为标准代码（如 ``000002.SZ``）。"""
+    from app.core.symbol_utils import to_standard
+    try:
+        return to_standard(raw.split(".")[0] if "." in raw else raw)
+    except ValueError:
+        return raw
 
 
 # ---------------------------------------------------------------------------

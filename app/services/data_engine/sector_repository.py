@@ -166,12 +166,10 @@ class SectorRepository:
             if trade_date is None:
                 return []
 
-        # symbol 格式适配：纯数字格式需匹配带后缀格式
-        if "." not in symbol:
-            symbol_variants = [f"{symbol}.SH", f"{symbol}.SZ", f"{symbol}.BJ"]
-            symbol_cond = SectorConstituent.symbol.in_(symbol_variants)
-        else:
-            symbol_cond = SectorConstituent.symbol == symbol
+        # 统一使用标准代码格式查询
+        from app.core.symbol_utils import to_standard
+        symbol = to_standard(symbol)
+        symbol_cond = SectorConstituent.symbol == symbol
 
         stmt = (
             select(SectorConstituent)

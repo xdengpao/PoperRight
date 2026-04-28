@@ -24,7 +24,7 @@ class MoneyFlow(PGBase):
 
     # 复合主键
     symbol: Mapped[str] = mapped_column(
-        String(10), primary_key=True, nullable=False
+        String(12), primary_key=True, nullable=False
     )
     trade_date: Mapped[date] = mapped_column(
         Date, primary_key=True, nullable=False

@@ -263,14 +263,9 @@ class BackfillService:
             result = []
             for row in rows:
                 ts_code = row.get("ts_code", "")
-                # 保留 Tushare 代码格式（如 000001.SZ），用于 API 调用
-                # 纯数字格式用于本地 DB 存储（在 KlineRepository 中处理）
                 symbol = ts_code if ts_code else ""
-                # stock_info 表存纯数字
-                clean_symbol = ts_code.split(".")[0] if "." in ts_code else ts_code
                 result.append({
                     "symbol": symbol,
-                    "clean_symbol": clean_symbol,
                     "name": row.get("name", ""),
                     "market": row.get("market", ""),
                     "list_date": row.get("list_date"),
@@ -313,7 +308,7 @@ class BackfillService:
                     except (ValueError, IndexError):
                         pass
                 await session.execute(upsert_sql, {
-                    "symbol": stock.get("clean_symbol", stock["symbol"].split(".")[0]),
+                    "symbol": stock["symbol"],
                     "name": stock.get("name", ""),
                     "market": stock.get("market", ""),
                     "list_date": list_date,

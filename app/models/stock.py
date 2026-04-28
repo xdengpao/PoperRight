@@ -25,7 +25,7 @@ class StockInfo(PGBase):
 
     __tablename__ = "stock_info"
 
-    symbol: Mapped[str] = mapped_column(String(10), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     market: Mapped[str | None] = mapped_column(String(10), nullable=True)   # SH/SZ/BJ
     board: Mapped[str | None] = mapped_column(String(10), nullable=True)    # 主板/创业板/科创板/北交所
@@ -50,7 +50,7 @@ class PermanentExclusion(PGBase):
 
     __tablename__ = "permanent_exclusion"
 
-    symbol: Mapped[str] = mapped_column(String(10), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     reason: Mapped[str | None] = mapped_column(String(50), nullable=True)   # 'ST','DELISTED','NEW_STOCK'
     created_at: Mapped[datetime] = mapped_column(
         TIMESTAMPTZ, server_default=sa_text("NOW()"), nullable=False
@@ -65,7 +65,7 @@ class StockList(PGBase):
 
     __tablename__ = "stock_list"
 
-    symbol: Mapped[str] = mapped_column(String(10), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(12), primary_key=True)
     list_type: Mapped[str] = mapped_column(String(10), primary_key=True)    # 'BLACK'|'WHITE'
     user_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)

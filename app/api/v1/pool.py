@@ -22,7 +22,7 @@ import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from redis.asyncio import Redis
@@ -85,15 +85,33 @@ class AddStocksRequest(BaseModel):
     """批量添加股票请求"""
     symbols: list[str]
 
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _standardize(cls, v: list[str]) -> list[str]:
+        from app.core.symbol_utils import to_standard
+        return [to_standard(s) for s in v]
+
 
 class RemoveStocksRequest(BaseModel):
     """批量移除股票请求"""
     symbols: list[str]
 
+    @field_validator("symbols", mode="before")
+    @classmethod
+    def _standardize(cls, v: list[str]) -> list[str]:
+        from app.core.symbol_utils import to_standard
+        return [to_standard(s) for s in v]
+
 
 class ManualAddStockRequest(BaseModel):
     """手动添加单只股票请求"""
     symbol: str
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def _standardize(cls, v: str) -> str:
+        from app.core.symbol_utils import to_standard
+        return to_standard(v)
 
 
 # ---------------------------------------------------------------------------

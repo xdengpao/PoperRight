@@ -73,7 +73,7 @@ class ScreenResult(PGBase):
     )
     screen_time: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
     screen_type: Mapped[str | None] = mapped_column(String(10), nullable=True)  # 'EOD'|'REALTIME'
-    symbol: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(12), nullable=True)
     ref_buy_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     trend_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 2), nullable=True)
     risk_level: Mapped[str | None] = mapped_column(String(10), nullable=True)   # 'LOW'|'MEDIUM'|'HIGH'

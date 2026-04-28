@@ -85,11 +85,11 @@ export function validatePoolName(name: string): ValidationResult {
 }
 
 /**
- * 校验 A 股股票代码格式（6 位数字）。
+ * 校验 A 股股票代码格式（支持 600000 或 600000.SH 格式）。
  */
 export function validateStockSymbol(symbol: string): ValidationResult {
-  if (!/^\d{6}$/.test(symbol)) {
-    return { valid: false, error: '请输入有效的A股代码（6位数字）' }
+  if (!/^\d{6}(\.(SH|SZ|BJ))?$/.test(symbol)) {
+    return { valid: false, error: '请输入有效的A股代码（如 600000 或 600000.SH）' }
   }
   return { valid: true }
 }

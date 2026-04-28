@@ -1269,7 +1269,8 @@ class BacktestEngine:
         if not index_data:
             return "NORMAL"
 
-        for index_symbol in ("000001.SH", "399006.SZ"):
+        from app.core.symbol_utils import INDEX_SH, INDEX_CYB
+        for index_symbol in (INDEX_SH, INDEX_CYB):
             bars = index_data.get(index_symbol)
             if not bars:
                 continue
