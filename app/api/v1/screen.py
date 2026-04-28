@@ -284,6 +284,46 @@ _BUILTIN_TEMPLATES: list[dict] = [
             "indicator_params": {}, "breakout": {}, "volume_price": {},
         },
     },
+    {
+        "id": "00000000-0000-0000-0000-000000000006",
+        "name": "右侧趋势突破综合策略",
+        "is_active": True,
+        "is_builtin": True,
+        "enabled_modules": ["factor_editor", "ma_trend", "breakout", "indicator_params", "volume_price"],
+        "config": {
+            "factors": [
+                {"factor_name": "ma_trend", "operator": ">=", "threshold": 75, "params": {}},
+                {"factor_name": "breakout", "operator": "==", "threshold": None, "params": {}},
+                {"factor_name": "sector_rank", "operator": "<=", "threshold": 25, "params": {}},
+                {"factor_name": "sector_trend", "operator": "==", "threshold": None, "params": {}},
+                {"factor_name": "macd", "operator": "==", "threshold": None, "params": {}},
+                {"factor_name": "turnover", "operator": "BETWEEN", "threshold": None,
+                 "params": {"threshold_low": 3.0, "threshold_high": 15.0}},
+                {"factor_name": "money_flow", "operator": ">=", "threshold": 75, "params": {}},
+                {"factor_name": "rsi", "operator": "BETWEEN", "threshold": None,
+                 "params": {"threshold_low": 55, "threshold_high": 80}},
+            ],
+            "logic": "AND",
+            "weights": {
+                "ma_trend": 0.20, "breakout": 0.20, "sector_rank": 0.12,
+                "sector_trend": 0.08, "macd": 0.12, "turnover": 0.08,
+                "money_flow": 0.12, "rsi": 0.08,
+            },
+            "ma_periods": [5, 10, 20, 60, 120, 250],
+            "ma_trend": {"ma_periods": [5, 10, 20, 60, 120], "slope_threshold": 0.0,
+                         "trend_score_threshold": 68, "support_ma_lines": [20, 60]},
+            "indicator_params": {"macd_fast": 12, "macd_slow": 26, "macd_signal": 9,
+                                 "rsi_period": 14, "rsi_lower": 55, "rsi_upper": 80},
+            "breakout": {"box_breakout": True, "high_breakout": True,
+                         "trendline_breakout": True, "volume_ratio_threshold": 1.5,
+                         "confirm_days": 1},
+            "volume_price": {"turnover_rate_min": 3.0, "turnover_rate_max": 15.0,
+                             "main_flow_threshold": 1000.0, "main_flow_days": 2,
+                             "large_order_ratio": 30.0, "min_daily_amount": 5000.0,
+                             "sector_rank_top": 25},
+            "sector_config": {"sector_data_source": "DC", "sector_period": 3, "sector_top_n": 25},
+        },
+    },
 ]
 
 
@@ -301,12 +341,13 @@ def _strategy_to_dict(s: StrategyTemplate) -> dict:
 
 
 async def _seed_builtin_templates(session: AsyncSession) -> None:
-    """将内置策略模板写入数据库（仅在尚未存在时）。"""
+    """将内置策略模板写入数据库，已存在的则同步更新配置。"""
     for tpl in _BUILTIN_TEMPLATES:
         existing = await session.execute(
             select(StrategyTemplate).where(StrategyTemplate.id == UUID(tpl["id"]))
         )
-        if existing.scalar_one_or_none() is None:
+        row = existing.scalar_one_or_none()
+        if row is None:
             entry = StrategyTemplate(
                 id=UUID(tpl["id"]),
                 user_id=_DEFAULT_USER_ID,
@@ -317,6 +358,11 @@ async def _seed_builtin_templates(session: AsyncSession) -> None:
                 enabled_modules=tpl["enabled_modules"],
             )
             session.add(entry)
+        else:
+            row.name = tpl["name"]
+            row.config = tpl["config"]
+            row.is_active = tpl["is_active"]
+            row.enabled_modules = tpl["enabled_modules"]
     await session.flush()
 
 

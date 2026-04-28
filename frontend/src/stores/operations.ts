@@ -69,6 +69,16 @@ export interface BuyRecord {
   signals_at_buy: Record<string, unknown> | null
 }
 
+export interface StrategyTemplate {
+  id: string
+  name: string
+  config: Record<string, unknown>
+  is_active: boolean
+  is_builtin: boolean
+  enabled_modules: string[]
+  created_at: string
+}
+
 export const useOperationsStore = defineStore('operations', () => {
   const plans = ref<TradingPlanSummary[]>([])
   const candidates = ref<CandidateStock[]>([])
@@ -76,6 +86,7 @@ export const useOperationsStore = defineStore('operations', () => {
   const checklist = ref<ChecklistItem[]>([])
   const checklistLevel = ref<string>('OK')
   const buyRecords = ref<BuyRecord[]>([])
+  const strategies = ref<StrategyTemplate[]>([])
   const loading = ref(false)
   const error = ref<string | null>(null)
 
@@ -177,11 +188,23 @@ export const useOperationsStore = defineStore('operations', () => {
     return data
   }
 
+  async function fetchStrategies() {
+    try {
+      const { data } = await apiClient.get('/strategies')
+      console.log('[fetchStrategies] raw data type:', typeof data, Array.isArray(data))
+      strategies.value = Array.isArray(data) ? data : (data.items || [])
+      console.log('[fetchStrategies] strategies loaded:', strategies.value.map(s => s.name))
+    } catch (e) {
+      console.error('[fetchStrategies] error:', e)
+      strategies.value = []
+    }
+  }
+
   return {
-    plans, candidates, positions, checklist, checklistLevel, buyRecords, loading, error,
+    plans, candidates, positions, checklist, checklistLevel, buyRecords, strategies, loading, error,
     fetchPlans, createPlan, updatePlanStatus, deletePlan,
     fetchCandidates, skipCandidate, executeBuy,
     fetchPositions, confirmSell,
-    fetchChecklist, fetchBuyRecords,
+    fetchChecklist, fetchBuyRecords, fetchStrategies,
   }
 })
