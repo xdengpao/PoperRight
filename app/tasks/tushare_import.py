@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import time
 from datetime import datetime
 from typing import Any
 
@@ -62,8 +61,6 @@ def _build_rate_limit_map() -> dict[RateLimitGroup, float]:
         RateLimitGroup.TIER_2: settings.rate_limit_tier_2,
     }
 
-
-_RATE_LIMIT_MAP: dict[RateLimitGroup, float] = _build_rate_limit_map()
 
 # Redis 键前缀和 TTL
 _PROGRESS_KEY_PREFIX = "tushare:import:"
@@ -352,7 +349,7 @@ async def _process_import(
         return {"status": "failed", "error": f"未知接口: {api_name}"}
 
     adapter = TushareAdapter(api_token=token)
-    rate_delay = _RATE_LIMIT_MAP.get(entry.rate_limit_group, 0.18)
+    rate_delay = _build_rate_limit_map().get(entry.rate_limit_group, 0.18)
 
     # 更新 Redis 进度为 running
     await _update_progress(task_id, status="running")
@@ -418,6 +415,8 @@ async def _process_import(
         return {"status": "failed", "error": error_msg, "record_count": total_records}
 
     finally:
+        # 释放 HTTP 连接池资源
+        await adapter.close()
         # 释放并发锁
         lock_key = f"{_LOCK_KEY_PREFIX}{api_name}"
         await _redis_delete(lock_key)
@@ -692,7 +691,7 @@ async def _process_chunk_with_retry(
                 }
 
             # 频率限制
-            time.sleep(rate_delay)
+            await asyncio.sleep(rate_delay)
 
         return {
             "records": total_records,
@@ -790,6 +789,7 @@ async def _process_batched_by_date(
     success_chunks = 0
     consecutive_truncation_count = 0
     truncation_warnings: list[dict] = []
+    failed_chunks: list[str] = []
     needs_smaller_chunk = False
     # 截断自动恢复记录（对应需求 2.5）
     truncation_recoveries: list[dict] = []
@@ -818,7 +818,7 @@ async def _process_batched_by_date(
             # 构建已完成部分的分批统计
             batch_stats = _build_batch_stats(
                 total, success_chunks, truncation_warnings, truncation_recoveries,
-                needs_smaller_chunk,
+                needs_smaller_chunk, failed_chunks=failed_chunks,
             )
             return {"status": "stopped", "record_count": total_records, "batch_stats": batch_stats}
 
@@ -843,7 +843,7 @@ async def _process_batched_by_date(
             if result.get("stopped"):
                 batch_stats = _build_batch_stats(
                     total, success_chunks, truncation_warnings, truncation_recoveries,
-                    needs_smaller_chunk,
+                    needs_smaller_chunk, failed_chunks=failed_chunks,
                 )
                 return {
                     "status": "stopped",
@@ -923,11 +923,13 @@ async def _process_batched_by_date(
         except TushareAPIError as api_exc:
             if api_exc.code and api_exc.code == -2001:
                 raise
+            failed_chunks.append(f"{chunk_start}-{chunk_end}")
             logger.error(
                 "API 调用失败 api=%s chunk=%s~%s: %s",
                 entry.api_name, chunk_start, chunk_end, api_exc,
             )
         except Exception as exc:
+            failed_chunks.append(f"{chunk_start}-{chunk_end}")
             logger.error(
                 "处理失败 api=%s chunk=%s~%s: %s",
                 entry.api_name, chunk_start, chunk_end, exc,
@@ -944,14 +946,14 @@ async def _process_batched_by_date(
         )
 
         # 频率限制
-        time.sleep(rate_delay)
+        await asyncio.sleep(rate_delay)
 
         chunk_index += 1
 
     # 构建分批统计信息（对应需求 8.1, 8.2）
     batch_stats = _build_batch_stats(
         total, success_chunks, truncation_warnings, truncation_recoveries,
-        needs_smaller_chunk,
+        needs_smaller_chunk, failed_chunks=failed_chunks,
     )
 
     return {"status": "completed", "record_count": total_records, "batch_stats": batch_stats}
@@ -963,21 +965,9 @@ def _build_batch_stats(
     truncation_warnings: list[dict],
     truncation_recoveries: list[dict],
     needs_smaller_chunk: bool,
+    failed_chunks: list[str] | None = None,
 ) -> dict:
-    """构建分批统计信息字典。
-
-    Args:
-        total_chunks: 总子区间数
-        success_chunks: 成功处理的子区间数
-        truncation_warnings: 截断警告列表
-        truncation_recoveries: 截断自动恢复详情列表
-        needs_smaller_chunk: 是否触发了步长自动缩小
-
-    Returns:
-        分批统计字典，包含截断恢复详情
-
-    对应需求：8.1, 8.2
-    """
+    """构建分批统计信息字典。"""
     stats: dict = {
         "batch_mode": "by_date",
         "total_chunks": total_chunks,
@@ -994,12 +984,14 @@ def _build_batch_stats(
         ],
     }
 
-    # 截断自动恢复详情（对应需求 2.5）
     if truncation_recoveries:
         stats["truncation_recoveries"] = truncation_recoveries[:10]
 
     if needs_smaller_chunk:
         stats["auto_shrink_applied"] = True
+
+    if failed_chunks:
+        stats["failed_chunks"] = failed_chunks[:100]
 
     return stats
 
@@ -1026,7 +1018,9 @@ async def _process_batched(
     # 获取股票列表
     stock_codes = await _get_stock_list()
     if not stock_codes:
-        return {"status": "completed", "record_count": 0}
+        return {"status": "completed", "record_count": 0, "batch_stats": {
+            "batch_mode": "by_code", "total_codes": 0, "failed_codes": [],
+        }}
 
     # 判断是否需要双重分批：batch_by_date=True 且用户提供了 start_date + end_date
     has_date_params = bool(params.get("start_date") and params.get("end_date"))
@@ -1046,6 +1040,7 @@ async def _process_batched(
     total = num_codes * num_date_chunks
     completed = 0
     total_records = 0
+    failed_codes: list[str] = []
 
     # 截断检测阈值（双重分批时使用）
     max_rows = entry.extra_config.get("max_rows", _TUSHARE_MAX_ROWS)
@@ -1069,7 +1064,9 @@ async def _process_batched(
                     # 检查停止信号
                     if await _check_stop_signal(task_id):
                         logger.info("Tushare 导入收到停止信号 task_id=%s", task_id)
-                        return {"status": "stopped", "record_count": total_records}
+                        return {"status": "stopped", "record_count": total_records, "batch_stats": {
+                            "batch_mode": batch_mode, "total_codes": num_codes, "failed_codes": failed_codes[:100],
+                        }}
 
                     # 构建本次 API 调用参数（ts_code + 日期子区间）
                     call_params = {**params, "ts_code": ts_code,
@@ -1114,11 +1111,13 @@ async def _process_batched(
                     except TushareAPIError as api_exc:
                         if api_exc.code and api_exc.code == -2001:
                             raise  # Token 无效，终止整个任务
+                        failed_codes.append(ts_code)
                         logger.error(
                             "API 调用失败 api=%s ts_code=%s chunk=%s~%s: %s",
                             entry.api_name, ts_code, chunk_start, chunk_end, api_exc,
                         )
                     except Exception as exc:
+                        failed_codes.append(ts_code)
                         logger.error(
                             "处理失败 api=%s ts_code=%s chunk=%s~%s: %s",
                             entry.api_name, ts_code, chunk_start, chunk_end, exc,
@@ -1133,7 +1132,7 @@ async def _process_batched(
                     )
 
                     # 频率限制
-                    time.sleep(rate_delay)
+                    await asyncio.sleep(rate_delay)
             else:
                 # 原有逻辑：单次调用（非双重分批）
                 # 检查停止信号
@@ -1176,11 +1175,13 @@ async def _process_batched(
                     # Token 无效不重试，其他 API 错误记录后继续
                     if api_exc.code and api_exc.code == -2001:
                         raise  # Token 无效，终止整个任务
+                    failed_codes.append(ts_code)
                     logger.error(
                         "API 调用失败 api=%s ts_code=%s: %s",
                         entry.api_name, ts_code, api_exc,
                     )
                 except Exception as exc:
+                    failed_codes.append(ts_code)
                     logger.error(
                         "处理失败 api=%s ts_code=%s: %s",
                         entry.api_name, ts_code, exc,
@@ -1195,9 +1196,11 @@ async def _process_batched(
                 )
 
                 # 频率限制
-                time.sleep(rate_delay)
+                await asyncio.sleep(rate_delay)
 
-    return {"status": "completed", "record_count": total_records}
+    return {"status": "completed", "record_count": total_records, "batch_stats": {
+        "batch_mode": batch_mode, "total_codes": num_codes, "failed_codes": failed_codes[:100],
+    }}
 
 
 # ---------------------------------------------------------------------------
@@ -1238,7 +1241,7 @@ async def _call_api_with_retry(
                     "频率限制 api=%s，等待 %ds 后重试 (attempt %d/%d)",
                     api_name, _RATE_LIMIT_WAIT, attempt + 1, _MAX_NETWORK_RETRIES,
                 )
-                time.sleep(_RATE_LIMIT_WAIT)
+                await asyncio.sleep(_RATE_LIMIT_WAIT)
                 last_exc = exc
                 continue
 
@@ -1253,7 +1256,7 @@ async def _call_api_with_retry(
             )
             last_exc = exc
             if attempt < _MAX_NETWORK_RETRIES - 1:
-                time.sleep(2 * (attempt + 1))  # 简单退避
+                await asyncio.sleep(2 * (attempt + 1))
             continue
 
         except httpx.HTTPStatusError as exc:
@@ -1382,17 +1385,22 @@ async def _get_stock_list() -> list[str]:
 
     async with AsyncSessionPG() as session:
         stmt = (
-            select(StockInfo.symbol)
+            select(StockInfo.symbol, StockInfo.market)
             .where(StockInfo.is_delisted == False)  # noqa: E712
             .order_by(StockInfo.symbol)
         )
         result = await session.execute(stmt)
-        symbols = list(result.scalars().all())
+        rows = result.all()
 
-    # 将纯 6 位 symbol 转为 Tushare ts_code 格式
     ts_codes = []
-    for sym in symbols:
-        sym = str(sym)
+    for row in rows:
+        sym = str(row.symbol)
+        market = row.market
+
+        if market and market in ("SH", "SZ", "BJ"):
+            ts_codes.append(f"{sym}.{market}")
+            continue
+
         if sym.startswith("6"):
             ts_codes.append(f"{sym}.SH")
         elif sym.startswith("0") or sym.startswith("3"):
@@ -1400,6 +1408,7 @@ async def _get_stock_list() -> list[str]:
         elif sym.startswith("4") or sym.startswith("8"):
             ts_codes.append(f"{sym}.BJ")
         else:
+            logger.warning("无法确定股票 %s 的交易所，默认归类为 SZ", sym)
             ts_codes.append(f"{sym}.SZ")
 
     return ts_codes
@@ -1429,18 +1438,23 @@ async def _process_batched_index(
     """按指数代码列表分批调用 API（用于 index_weekly/index_monthly 等）。"""
     index_codes = await _get_index_list()
     if not index_codes:
-        return {"status": "completed", "record_count": 0}
+        return {"status": "completed", "record_count": 0, "batch_stats": {
+            "batch_mode": "by_index", "total_indices": 0, "failed_codes": [],
+        }}
 
     total = len(index_codes)
     completed = 0
     total_records = 0
+    failed_codes: list[str] = []
 
     await _update_progress(task_id, status="running", total=total, completed=0,
                            batch_mode="by_index")
 
     for ts_code in index_codes:
         if await _check_stop_signal(task_id):
-            return {"status": "stopped", "record_count": total_records}
+            return {"status": "stopped", "record_count": total_records, "batch_stats": {
+                "batch_mode": "by_index", "total_indices": total, "failed_codes": failed_codes[:100],
+            }}
 
         # 根据接口要求选择参数名：index_weight 用 index_code，其他用 ts_code
         code_param_name = "index_code" if entry.api_name == "index_weight" else "ts_code"
@@ -1476,16 +1490,20 @@ async def _process_batched_index(
         except TushareAPIError as api_exc:
             if api_exc.code and api_exc.code == -2001:
                 raise
+            failed_codes.append(ts_code)
             logger.error("API 调用失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, api_exc)
         except Exception as exc:
+            failed_codes.append(ts_code)
             logger.error("处理失败 api=%s ts_code=%s: %s", entry.api_name, ts_code, exc)
 
         completed += 1
         await _update_progress(task_id, status="running", total=total, completed=completed,
                                current_item=ts_code, batch_mode="by_index")
-        time.sleep(rate_delay)
+        await asyncio.sleep(rate_delay)
 
-    return {"status": "completed", "record_count": total_records}
+    return {"status": "completed", "record_count": total_records, "batch_stats": {
+        "batch_mode": "by_index", "total_indices": total, "failed_codes": failed_codes[:100],
+    }}
 
 
 async def _process_batched_by_sector(
@@ -1656,13 +1674,14 @@ async def _process_batched_by_sector(
         )
 
         # 频率限制
-        time.sleep(rate_delay)
+        await asyncio.sleep(rate_delay)
 
     logger.info(
         "batch_by_sector 完成 api=%s data_source=%s: 总板块=%d, 成功=%d, 失败=%d, 空数据=%d, 总记录=%d",
         entry.api_name, ds, total, success_count, failed_count, empty_count, total_records,
     )
 
+    from datetime import date as _date_type
     return {
         "status": "completed",
         "record_count": total_records,
@@ -1671,6 +1690,7 @@ async def _process_batched_by_sector(
             "success_sectors": success_count,
             "failed_sectors": failed_count,
             "empty_sectors": empty_count,
+            "trade_date": _date_type.today().strftime("%Y%m%d"),
         },
     }
 
@@ -1690,6 +1710,7 @@ async def _update_progress(
     batch_mode: str = "",
     truncation_warnings: list[dict] | None = None,
     needs_smaller_chunk: bool = False,
+    failed_items: list[str] | None = None,
 ) -> None:
     """更新 Redis 中的导入进度。
 
@@ -1743,6 +1764,9 @@ async def _update_progress(
     # 连续截断标志（对应需求 7.5）
     if needs_smaller_chunk:
         progress["needs_smaller_chunk"] = True
+
+    if failed_items is not None:
+        progress["failed_items"] = failed_items[:100]
 
     await _redis_set(progress_key, json.dumps(progress), ex=_PROGRESS_TTL)
 
@@ -2048,27 +2072,49 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 
     stmt = text(sql)
 
+    # 批量写入常量
+    _PG_BATCH_SIZE = 1000
+
     # 死锁重试：多个 worker 并发写同一张表时可能触发 PostgreSQL 死锁
     max_retries = 3
     for attempt in range(max_retries):
         async with AsyncSessionPG() as session:
             try:
-                for row in filtered_rows:
-                    await session.execute(stmt, row)
+                # 分批批量写入（executemany 语义）
+                for i in range(0, len(filtered_rows), _PG_BATCH_SIZE):
+                    batch = filtered_rows[i : i + _PG_BATCH_SIZE]
+                    try:
+                        await session.execute(stmt, batch)
+                    except Exception as batch_exc:
+                        # 批量写入失败，回退到逐行模式处理该批次
+                        logger.warning(
+                            "批量写入失败，回退到逐行模式，表=%s, batch=%d~%d: %s",
+                            entry.target_table, i, i + len(batch), batch_exc,
+                        )
+                        await session.rollback()
+                        # 重新开启事务，逐行写入
+                        for row in batch:
+                            try:
+                                await session.execute(stmt, row)
+                            except Exception as row_exc:
+                                logger.warning(
+                                    "逐行写入跳过失败行，表=%s: %s",
+                                    entry.target_table, row_exc,
+                                )
+                                await session.rollback()
+                                continue
                 await session.commit()
                 return
             except Exception as exc:
                 await session.rollback()
-                # 检测死锁错误，重试
                 exc_str = str(exc)
                 if "deadlock" in exc_str.lower() and attempt < max_retries - 1:
-                    import time as _time
                     wait = 0.5 * (attempt + 1)
                     logger.warning(
                         "死锁检测，%0.1fs 后重试 (attempt %d/%d)，表=%s",
                         wait, attempt + 1, max_retries, entry.target_table,
                     )
-                    _time.sleep(wait)
+                    await asyncio.sleep(wait)
                     continue
                 raise
 
@@ -2107,7 +2153,7 @@ async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
 
 
 async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
-    """写入 kline 超表（股票/指数行情）。"""
+    """写入 kline 超表（股票/指数行情），批量 INSERT。"""
     from sqlalchemy import text
     from app.core.database import AsyncSessionTS
 
@@ -2124,43 +2170,64 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
             "amount" = COALESCE(EXCLUDED."amount", kline."amount")
     """)
 
+    # 预处理：构建参数列表，过滤无效行
+    params_list = []
+    for row in rows:
+        trade_date_str = row.get("trade_date", "")
+        if trade_date_str and len(str(trade_date_str)) == 8:
+            try:
+                ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
+            except ValueError:
+                continue
+        else:
+            continue
+
+        symbol = row.get("symbol", "")
+        if not symbol:
+            ts_code = row.get("ts_code", "")
+            if "." in str(ts_code):
+                symbol = str(ts_code).split(".")[0]
+            else:
+                symbol = str(ts_code)
+
+        if not symbol:
+            continue
+
+        params_list.append({
+            "time": ts,
+            "symbol": symbol,
+            "freq": freq,
+            "open": row.get("open"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "close": row.get("close"),
+            "volume": row.get("vol") or row.get("volume") or 0,
+            "amount": row.get("amount"),
+            "adj_type": 0,
+        })
+
+    if not params_list:
+        return
+
+    _TS_BATCH_SIZE = 1000
     async with AsyncSessionTS() as session:
         try:
-            for row in rows:
-                # 解析 trade_date → datetime
-                trade_date_str = row.get("trade_date", "")
-                if trade_date_str and len(str(trade_date_str)) == 8:
-                    try:
-                        ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
-                    except ValueError:
-                        continue
-                else:
-                    continue
-
-                # symbol：优先使用已转换的 symbol 字段，否则从 ts_code 提取
-                symbol = row.get("symbol", "")
-                if not symbol:
-                    ts_code = row.get("ts_code", "")
-                    if "." in str(ts_code):
-                        symbol = str(ts_code).split(".")[0]
-                    else:
-                        symbol = str(ts_code)
-
-                if not symbol:
-                    continue
-
-                await session.execute(sql, {
-                    "time": ts,
-                    "symbol": symbol,
-                    "freq": freq,
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("vol") or row.get("volume") or 0,
-                    "amount": row.get("amount"),
-                    "adj_type": 0,
-                })
+            for i in range(0, len(params_list), _TS_BATCH_SIZE):
+                batch = params_list[i : i + _TS_BATCH_SIZE]
+                try:
+                    await session.execute(sql, batch)
+                except Exception as batch_exc:
+                    logger.warning(
+                        "kline 批量写入失败，回退到逐行模式，batch=%d~%d: %s",
+                        i, i + len(batch), batch_exc,
+                    )
+                    await session.rollback()
+                    for p in batch:
+                        try:
+                            await session.execute(sql, p)
+                        except Exception:
+                            await session.rollback()
+                            continue
             await session.commit()
         except Exception:
             await session.rollback()
@@ -2168,7 +2235,7 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
 
 
 async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None:
-    """写入 adjustment_factor 表（复权因子）。"""
+    """写入 adjustment_factor 表（复权因子），批量 INSERT。"""
     from datetime import date as date_type
 
     from sqlalchemy import text
@@ -2181,37 +2248,58 @@ async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None
         ON CONFLICT ("symbol", "trade_date", "adj_type") DO NOTHING
     """)
 
+    # 预处理：构建参数列表，过滤无效行
+    params_list = []
+    for row in rows:
+        symbol = row.get("symbol", "")
+        if not symbol:
+            ts_code = row.get("ts_code", "")
+            if "." in str(ts_code):
+                symbol = str(ts_code).split(".")[0]
+            else:
+                symbol = str(ts_code)
+        if not symbol:
+            continue
+
+        trade_date_str = str(row.get("trade_date", ""))
+        if len(trade_date_str) == 8 and trade_date_str.isdigit():
+            trade_date = date_type(
+                int(trade_date_str[:4]),
+                int(trade_date_str[4:6]),
+                int(trade_date_str[6:8]),
+            )
+        else:
+            continue
+
+        params_list.append({
+            "symbol": symbol,
+            "trade_date": trade_date,
+            "adj_type": 0,
+            "adj_factor": row.get("adj_factor"),
+        })
+
+    if not params_list:
+        return
+
+    _TS_BATCH_SIZE = 1000
     async with AsyncSessionTS() as session:
         try:
-            for row in rows:
-                # symbol：优先使用已转换的 symbol 字段，否则从 ts_code 提取
-                symbol = row.get("symbol", "")
-                if not symbol:
-                    ts_code = row.get("ts_code", "")
-                    if "." in str(ts_code):
-                        symbol = str(ts_code).split(".")[0]
-                    else:
-                        symbol = str(ts_code)
-                if not symbol:
-                    continue
-
-                # trade_date → date 对象
-                trade_date_str = str(row.get("trade_date", ""))
-                if len(trade_date_str) == 8 and trade_date_str.isdigit():
-                    trade_date = date_type(
-                        int(trade_date_str[:4]),
-                        int(trade_date_str[4:6]),
-                        int(trade_date_str[6:8]),
+            for i in range(0, len(params_list), _TS_BATCH_SIZE):
+                batch = params_list[i : i + _TS_BATCH_SIZE]
+                try:
+                    await session.execute(sql, batch)
+                except Exception as batch_exc:
+                    logger.warning(
+                        "adjustment_factor 批量写入失败，回退到逐行模式，batch=%d~%d: %s",
+                        i, i + len(batch), batch_exc,
                     )
-                else:
-                    continue
-
-                await session.execute(sql, {
-                    "symbol": symbol,
-                    "trade_date": trade_date,
-                    "adj_type": 0,
-                    "adj_factor": row.get("adj_factor"),
-                })
+                    await session.rollback()
+                    for p in batch:
+                        try:
+                            await session.execute(sql, p)
+                        except Exception:
+                            await session.rollback()
+                            continue
             await session.commit()
         except Exception:
             await session.rollback()
@@ -2221,7 +2309,7 @@ async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None
 async def _write_to_sector_kline(
     rows: list[dict], entry: ApiEntry, freq: str, data_source: str,
 ) -> None:
-    """写入 sector_kline 超表（板块行情）。"""
+    """写入 sector_kline 超表（板块行情），批量 INSERT。"""
     from sqlalchemy import text
     from app.core.database import AsyncSessionTS
 
@@ -2240,36 +2328,59 @@ async def _write_to_sector_kline(
             "change_pct" = COALESCE(EXCLUDED."change_pct", sector_kline."change_pct")
     """)
 
+    # 预处理：构建参数列表，过滤无效行
+    params_list = []
+    for row in rows:
+        trade_date_str = row.get("trade_date", "")
+        if trade_date_str and len(str(trade_date_str)) == 8:
+            try:
+                ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
+            except ValueError:
+                continue
+        else:
+            continue
+
+        sector_code = row.get("ts_code", "")
+        if not sector_code:
+            continue
+
+        params_list.append({
+            "time": ts,
+            "sector_code": str(sector_code),
+            "data_source": data_source,
+            "freq": freq,
+            "open": row.get("open"),
+            "high": row.get("high"),
+            "low": row.get("low"),
+            "close": row.get("close"),
+            "volume": row.get("vol") or row.get("volume") or 0,
+            "amount": row.get("amount"),
+            "turnover": row.get("turnover_rate") or row.get("turnover"),
+            "change_pct": row.get("pct_change") or row.get("change_pct"),
+        })
+
+    if not params_list:
+        return
+
+    _TS_BATCH_SIZE = 1000
     async with AsyncSessionTS() as session:
         try:
-            for row in rows:
-                trade_date_str = row.get("trade_date", "")
-                if trade_date_str and len(str(trade_date_str)) == 8:
-                    try:
-                        ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
-                    except ValueError:
-                        continue
-                else:
-                    continue
-
-                sector_code = row.get("ts_code", "")
-                if not sector_code:
-                    continue
-
-                await session.execute(sql, {
-                    "time": ts,
-                    "sector_code": str(sector_code),
-                    "data_source": data_source,
-                    "freq": freq,
-                    "open": row.get("open"),
-                    "high": row.get("high"),
-                    "low": row.get("low"),
-                    "close": row.get("close"),
-                    "volume": row.get("vol") or row.get("volume") or 0,
-                    "amount": row.get("amount"),
-                    "turnover": row.get("turnover_rate") or row.get("turnover"),
-                    "change_pct": row.get("pct_change") or row.get("change_pct"),
-                })
+            for i in range(0, len(params_list), _TS_BATCH_SIZE):
+                batch = params_list[i : i + _TS_BATCH_SIZE]
+                try:
+                    await session.execute(sql, batch)
+                except Exception as batch_exc:
+                    logger.warning(
+                        "sector_kline 批量写入失败，回退到逐行模式，batch=%d~%d: %s",
+                        i, i + len(batch), batch_exc,
+                    )
+                    await session.rollback()
+                    for p in batch:
+                        try:
+                            await session.execute(sql, p)
+                        except Exception:
+                            await session.rollback()
+                            continue
             await session.commit()
         except Exception:
             await session.rollback()

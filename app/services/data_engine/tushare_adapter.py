@@ -56,6 +56,19 @@ class TushareAdapter(BaseDataSourceAdapter):
         self._api_token = api_token or settings.tushare_api_token
         self._api_url = (api_url or settings.tushare_api_url).rstrip("/")
         self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """获取或创建持久 HTTP 客户端（延迟初始化，自动重建）。"""
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout)
+        return self._client
+
+    async def close(self) -> None:
+        """关闭 HTTP 客户端，释放连接池资源。"""
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     # ------------------------------------------------------------------
     # 内部 API 调用
@@ -97,9 +110,9 @@ class TushareAdapter(BaseDataSourceAdapter):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(self._api_url, json=payload)
-                resp.raise_for_status()
+            client = await self._get_client()
+            resp = await client.post(self._api_url, json=payload)
+            resp.raise_for_status()
         except httpx.HTTPStatusError as exc:
             logger.error(
                 "Tushare HTTP 错误 [%s] api=%s: %s",

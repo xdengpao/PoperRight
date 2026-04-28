@@ -222,7 +222,7 @@ else
 fi
 
 # ── 2. 数据库迁移 ──
-echo -e "\n${CYAN}[2/6] 数据库迁移...${NC}"
+echo -e "\n${CYAN}[2/5] 数据库迁移...${NC}"
 if $NEED_MIGRATION; then
   cd "$ROOT_DIR"
   if alembic upgrade head 2>&1 | tail -3; then
@@ -234,17 +234,8 @@ else
   echo -e "${GREEN}  ✓ 无迁移变更，跳过${NC}"
 fi
 
-# ── 3. 重建 Docker 应用镜像 ──
-echo -e "\n${CYAN}[3/6] 重建 Docker 应用镜像 (app + celery-worker)...${NC}"
-if $NEED_CELERY_RESTART || $NEED_API_RESTART; then
-  docker compose -f "$ROOT_DIR/docker-compose.yml" up -d --build app celery-worker 2>&1 | grep -v "obsolete" || true
-  echo -e "${GREEN}  ✓ Docker app + celery-worker 镜像已重建并启动${NC}"
-else
-  echo -e "${GREEN}  ✓ 无代码变更，跳过镜像重建${NC}"
-fi
-
-# ── 4. 启动 FastAPI 后端 ──
-echo -e "\n${CYAN}[4/6] FastAPI 后端 (http://localhost:8000)...${NC}"
+# ── 3. 启动 FastAPI 后端 ──
+echo -e "\n${CYAN}[3/5] FastAPI 后端 (http://localhost:8000)...${NC}"
 cd "$ROOT_DIR"
 
 if ! $NEED_API_RESTART && check_service_alive "api"; then
@@ -264,7 +255,7 @@ else
 fi
 
 # ── 5. 启动 Celery Worker + Beat ──
-echo -e "\n${CYAN}[5/6] Celery Worker + Beat...${NC}"
+echo -e "\n${CYAN}[4/5] Celery Worker + Beat...${NC}"
 cd "$ROOT_DIR"
 
 # Worker
@@ -298,7 +289,7 @@ else
 fi
 
 # ── 6. 启动前端 Vite 开发服务器 ──
-echo -e "\n${CYAN}[6/6] Vue 前端 (http://localhost:5173)...${NC}"
+echo -e "\n${CYAN}[5/5] Vue 前端 (http://localhost:5173)...${NC}"
 cd "$ROOT_DIR/frontend"
 
 # 检查是否需要安装依赖

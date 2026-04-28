@@ -237,6 +237,28 @@ async def _process_batched(...) -> dict:
     }
 ```
 
+在 `_process_batched_index` 中同样新增失败项追踪：
+
+```python
+async def _process_batched_index(...) -> dict:
+    ...
+    failed_codes: list[str] = []  # 新增
+    ...
+    except Exception as exc:
+        failed_codes.append(ts_code)  # 新增
+        logger.error(...)
+    ...
+    return {
+        "status": "completed",
+        "record_count": total_records,
+        "batch_stats": {  # 新增
+            "batch_mode": "by_index",
+            "total_indices": total,
+            "failed_codes": failed_codes[:100],
+        },
+    }
+```
+
 在 `_process_batched_by_date` 中新增失败区间追踪（已有 truncation_warnings，新增 failed_chunks）：
 
 ```python

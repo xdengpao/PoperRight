@@ -246,6 +246,96 @@ class TushareImportService:
             },
         }
 
+    async def _get_last_successful_end_date(self, api_name: str) -> str | None:
+        """查询该接口最后一次成功导入的 end_date。
+
+        从 tushare_import_log 中查找 status='completed' 且 api_name 匹配的最新记录，
+        从其 params_json 中提取 end_date。
+
+        Returns:
+            YYYYMMDD 格式的日期字符串，或 None（无历史记录）
+        """
+        from sqlalchemy import select
+
+        from app.core.database import AsyncSessionPG
+        from app.models.tushare_import import TushareImportLog
+
+        async with AsyncSessionPG() as session:
+            stmt = (
+                select(TushareImportLog.params_json)
+                .where(
+                    TushareImportLog.api_name == api_name,
+                    TushareImportLog.status == "completed",
+                )
+                .order_by(TushareImportLog.finished_at.desc())
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            params_json = result.scalar_one_or_none()
+
+        if not params_json or not isinstance(params_json, dict):
+            return None
+
+        end_date = params_json.get("end_date")
+        if end_date and isinstance(end_date, str) and len(end_date) == 8:
+            return end_date
+        return None
+
+    async def _resolve_incremental_dates(
+        self, api_name: str, entry: ApiEntry, params: dict,
+    ) -> dict:
+        """为缺少日期参数的导入请求自动推断 start_date / end_date。
+
+        仅对含 DATE_RANGE 参数的接口生效。用户已指定 start_date + end_date 时直接返回。
+
+        Raises:
+            ValueError: start_date > end_date（数据已是最新，无需导入）
+        """
+        from datetime import datetime as _dt, timedelta
+
+        has_date_range = (
+            ParamType.DATE_RANGE in entry.required_params
+            or ParamType.DATE_RANGE in entry.optional_params
+        )
+        if not has_date_range:
+            return params
+
+        # 用户已显式指定完整日期范围
+        if params.get("start_date") and params.get("end_date"):
+            return params
+
+        # 自动推断 end_date
+        if not params.get("end_date"):
+            params["end_date"] = _dt.now().strftime("%Y%m%d")
+
+        # 自动推断 start_date
+        if not params.get("start_date"):
+            try:
+                last_end = await self._get_last_successful_end_date(api_name)
+            except Exception as exc:
+                logger.warning("查询增量日期失败 api=%s: %s，使用默认起始日期", api_name, exc)
+                last_end = None
+
+            if last_end:
+                # +1 天
+                try:
+                    last_dt = _dt.strptime(last_end, "%Y%m%d")
+                    next_dt = last_dt + timedelta(days=1)
+                    params["start_date"] = next_dt.strftime("%Y%m%d")
+                except ValueError:
+                    params["start_date"] = "20100101"
+            else:
+                params["start_date"] = "20100101"
+
+        # 检查日期合理性
+        if params["start_date"] > params["end_date"]:
+            raise ValueError(
+                f"数据已是最新，无需导入（上次导入截止 {params['start_date']}，"
+                f"当前 end_date={params['end_date']}）"
+            )
+
+        return params
+
     # ------------------------------------------------------------------
     # 公开接口：导入任务启动
     # ------------------------------------------------------------------
@@ -277,6 +367,9 @@ class TushareImportService:
         entry = get_entry(api_name)
         if entry is None:
             raise ValueError(f"未知的 Tushare 接口：{api_name}")
+
+        # 1.5 增量导入日期推断（自动填充 start_date / end_date）
+        params = await self._resolve_incremental_dates(api_name, entry, params)
 
         # 2. 参数校验
         self._validate_params(entry, params)
