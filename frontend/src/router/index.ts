@@ -112,6 +112,19 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/PositionsView.vue'),
         meta: { title: '持仓管理', roles: ['TRADER', 'ADMIN'] },
       },
+      // 实操模块
+      {
+        path: 'operations',
+        name: 'Operations',
+        component: () => import('@/views/OperationsView.vue'),
+        meta: { title: '实操', roles: ['TRADER', 'ADMIN'] },
+      },
+      {
+        path: 'operations/:planId',
+        name: 'OperationDetail',
+        component: () => import('@/views/OperationDetailView.vue'),
+        meta: { title: '交易计划详情', roles: ['TRADER', 'ADMIN'] },
+      },
       // 复盘分析（需求 16）
       {
         path: 'review',

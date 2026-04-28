@@ -20,6 +20,7 @@ celery_app = Celery(
         "app.tasks.sector_sync",
         "app.tasks.risk_cleanup",
         "app.tasks.tushare_import",
+        "app.tasks.operations",
     ],
 )
 
@@ -40,6 +41,7 @@ celery_app.conf.update(
         "app.tasks.screening.*": {"queue": "screening"},
         "app.tasks.backtest.*": {"queue": "backtest"},
         "app.tasks.review.*": {"queue": "review"},
+        "app.tasks.operations.*": {"queue": "operations"},
     },
 
     # 任务队列定义
@@ -48,6 +50,7 @@ celery_app.conf.update(
         "screening": {"exchange": "screening", "routing_key": "screening"},
         "backtest": {"exchange": "backtest", "routing_key": "backtest"},
         "review": {"exchange": "review", "routing_key": "review"},
+        "operations": {"exchange": "operations", "routing_key": "operations"},
     },
     task_default_queue="data_sync",
 
@@ -130,6 +133,34 @@ _beat_schedule = {
         "task": "app.tasks.data_sync.sync_index_weight",
         "schedule": crontab(hour=8, minute=0, day_of_month="1", day_of_week="1-5"),
         "options": {"queue": "data_sync"},
+    },
+
+    # 实操模块：盘后自动选股 + 候选筛选（每交易日 15:35）
+    "operations-post-market-screening": {
+        "task": "app.tasks.operations.post_market_screening",
+        "schedule": crontab(hour=15, minute=35, day_of_week="1-5"),
+        "options": {"queue": "operations"},
+    },
+
+    # 实操模块：止损阶段评估（每交易日 15:40）
+    "operations-stop-loss-evaluation": {
+        "task": "app.tasks.operations.stop_loss_evaluation",
+        "schedule": crontab(hour=15, minute=40, day_of_week="1-5"),
+        "options": {"queue": "operations"},
+    },
+
+    # 实操模块：复盘清单生成（每交易日 16:00）
+    "operations-daily-checklist": {
+        "task": "app.tasks.operations.daily_checklist",
+        "schedule": crontab(hour=16, minute=0, day_of_week="1-5"),
+        "options": {"queue": "operations"},
+    },
+
+    # 实操模块：周度策略健康检查（周五 17:00）
+    "operations-weekly-health": {
+        "task": "app.tasks.operations.weekly_health_check",
+        "schedule": crontab(hour=17, minute=0, day_of_week=5),
+        "options": {"queue": "operations"},
     },
 }
 

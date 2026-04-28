@@ -19,6 +19,7 @@ from app.api.v1.trade import router as trade_router
 from app.api.v1.tushare import router as tushare_router
 from app.api.v1.tushare_preview import router as tushare_preview_router
 from app.api.v1.ws import router as ws_router
+from app.api.v1.operations import router as operations_router
 
 router = APIRouter()
 
@@ -35,6 +36,7 @@ router.include_router(sector_router)
 router.include_router(pool_router)
 router.include_router(tushare_router)
 router.include_router(tushare_preview_router)
+router.include_router(operations_router)
 
 
 # ---------------------------------------------------------------------------

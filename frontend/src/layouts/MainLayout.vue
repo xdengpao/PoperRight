@@ -223,6 +223,9 @@ const menuGroups: Record<string, NavItem[]> = {
     { path: '/trade', label: '交易执行', icon: '💹', roles: ['TRADER', 'ADMIN'] },
     { path: '/positions', label: '持仓管理', icon: '💰', roles: ['TRADER', 'ADMIN'] },
   ],
+  '实操': [
+    { path: '/operations', label: '交易计划', icon: '🎯', roles: ['TRADER', 'ADMIN'] },
+  ],
   '分析': [
     { path: '/backtest', label: '策略回测', icon: '📈' },
     { path: '/review', label: '复盘分析', icon: '📝' },

@@ -42,6 +42,7 @@ if config.config_file_name is not None:
 # 随着模型增加，在此处添加对应导入
 from app.core.database import PGBase, TSBase  # noqa: E402
 import app.models.tushare_import  # noqa: E402, F401  — Tushare 导入相关表
+import app.models.operations  # noqa: E402, F401  — 实操模块相关表
 
 # ---------------------------------------------------------------------------
 # 根据命令行参数选择目标数据库

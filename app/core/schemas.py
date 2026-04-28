@@ -839,3 +839,179 @@ class HoldingContext:
     highest_price: float        # 买入后至当前交易日的最高收盘价
     lowest_price: float         # 买入后至当前交易日的最低收盘价
     entry_bar_index: int        # 买入时的 bar 索引
+
+
+# ---------------------------------------------------------------------------
+# 实操模块枚举类型
+# ---------------------------------------------------------------------------
+
+
+class PlanStatus(str, Enum):
+    """交易计划状态"""
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    ARCHIVED = "ARCHIVED"
+
+
+class CandidateStatus(str, Enum):
+    """候选股状态"""
+    PENDING = "PENDING"
+    BOUGHT = "BOUGHT"
+    SKIPPED = "SKIPPED"
+
+
+class PositionStatus(str, Enum):
+    """交易计划持仓状态"""
+    HOLDING = "HOLDING"
+    PENDING_SELL = "PENDING_SELL"
+    CLOSED = "CLOSED"
+
+
+class ChecklistLevel(str, Enum):
+    """复盘清单检查结果等级"""
+    OK = "OK"
+    WARNING = "WARNING"
+    DANGER = "DANGER"
+
+
+# ---------------------------------------------------------------------------
+# 实操模块配置数据类
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CandidateFilterConfig:
+    """候选股筛选规则配置"""
+    min_trend_score: float = 80.0
+    require_new_signal: bool = True
+    require_strong_signal: bool = True
+    exclude_fake_breakout: bool = True
+    sector_overheat_days: int = 5
+    sector_overheat_pct: float = 15.0
+
+    def to_dict(self) -> dict:
+        return {
+            "min_trend_score": self.min_trend_score,
+            "require_new_signal": self.require_new_signal,
+            "require_strong_signal": self.require_strong_signal,
+            "exclude_fake_breakout": self.exclude_fake_breakout,
+            "sector_overheat_days": self.sector_overheat_days,
+            "sector_overheat_pct": self.sector_overheat_pct,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CandidateFilterConfig":
+        return cls(
+            min_trend_score=data.get("min_trend_score", 80.0),
+            require_new_signal=data.get("require_new_signal", True),
+            require_strong_signal=data.get("require_strong_signal", True),
+            exclude_fake_breakout=data.get("exclude_fake_breakout", True),
+            sector_overheat_days=data.get("sector_overheat_days", 5),
+            sector_overheat_pct=data.get("sector_overheat_pct", 15.0),
+        )
+
+
+@dataclass
+class StageStopConfig:
+    """分阶段止损配置"""
+    fixed_stop_pct: float = 8.0
+    trailing_trigger_pct: float = 5.0
+    trailing_stop_pct: float = 5.0
+    tight_trigger_pct: float = 10.0
+    tight_stop_pct: float = 3.0
+    long_hold_days: int = 15
+    long_hold_trend_threshold: float = 60.0
+    trend_stop_ma: int = 20
+
+    def to_dict(self) -> dict:
+        return {
+            "fixed_stop_pct": self.fixed_stop_pct,
+            "trailing_trigger_pct": self.trailing_trigger_pct,
+            "trailing_stop_pct": self.trailing_stop_pct,
+            "tight_trigger_pct": self.tight_trigger_pct,
+            "tight_stop_pct": self.tight_stop_pct,
+            "long_hold_days": self.long_hold_days,
+            "long_hold_trend_threshold": self.long_hold_trend_threshold,
+            "trend_stop_ma": self.trend_stop_ma,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "StageStopConfig":
+        return cls(
+            fixed_stop_pct=data.get("fixed_stop_pct", 8.0),
+            trailing_trigger_pct=data.get("trailing_trigger_pct", 5.0),
+            trailing_stop_pct=data.get("trailing_stop_pct", 5.0),
+            tight_trigger_pct=data.get("tight_trigger_pct", 10.0),
+            tight_stop_pct=data.get("tight_stop_pct", 3.0),
+            long_hold_days=data.get("long_hold_days", 15),
+            long_hold_trend_threshold=data.get("long_hold_trend_threshold", 60.0),
+            trend_stop_ma=data.get("trend_stop_ma", 20),
+        )
+
+
+@dataclass
+class PositionControlConfig:
+    """仓位控制配置"""
+    max_stock_weight: float = 15.0
+    max_sector_weight: float = 30.0
+    max_positions: int = 10
+    max_total_weight: float = 80.0
+
+    def to_dict(self) -> dict:
+        return {
+            "max_stock_weight": self.max_stock_weight,
+            "max_sector_weight": self.max_sector_weight,
+            "max_positions": self.max_positions,
+            "max_total_weight": self.max_total_weight,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PositionControlConfig":
+        return cls(
+            max_stock_weight=data.get("max_stock_weight", 15.0),
+            max_sector_weight=data.get("max_sector_weight", 30.0),
+            max_positions=data.get("max_positions", 10),
+            max_total_weight=data.get("max_total_weight", 80.0),
+        )
+
+
+_DEFAULT_NORMAL_PARAMS: dict = {
+    "ma_trend": 75, "money_flow": 75,
+    "rsi_low": 55, "rsi_high": 80,
+    "turnover_low": 3.0, "turnover_high": 15.0,
+    "sector_rank": 25, "max_total_weight": 80.0,
+}
+
+_DEFAULT_CAUTION_PARAMS: dict = {
+    "ma_trend": 85, "money_flow": 80,
+    "rsi_low": 60, "rsi_high": 75,
+    "turnover_low": 3.0, "turnover_high": 12.0,
+    "sector_rank": 15, "max_total_weight": 50.0,
+}
+
+_DEFAULT_DANGER_PARAMS: dict = {
+    "suspend_new_positions": True, "max_total_weight": 0.0,
+}
+
+
+@dataclass
+class MarketProfileConfig:
+    """市场环境适配配置"""
+    normal: dict = field(default_factory=lambda: dict(_DEFAULT_NORMAL_PARAMS))
+    caution: dict = field(default_factory=lambda: dict(_DEFAULT_CAUTION_PARAMS))
+    danger: dict = field(default_factory=lambda: dict(_DEFAULT_DANGER_PARAMS))
+
+    def to_dict(self) -> dict:
+        return {
+            "normal": self.normal,
+            "caution": self.caution,
+            "danger": self.danger,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MarketProfileConfig":
+        return cls(
+            normal=data.get("normal", dict(_DEFAULT_NORMAL_PARAMS)),
+            caution=data.get("caution", dict(_DEFAULT_CAUTION_PARAMS)),
+            danger=data.get("danger", dict(_DEFAULT_DANGER_PARAMS)),
+        )
