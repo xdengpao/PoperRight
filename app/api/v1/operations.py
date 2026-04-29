@@ -437,3 +437,62 @@ async def update_market_profile(
         return {"updated": True}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 手动执行选股
+# ---------------------------------------------------------------------------
+
+
+@router.post("/plans/{plan_id}/screen", status_code=200)
+async def run_screening_for_plan(
+    plan_id: UUID,
+    pg_session: AsyncSession = Depends(get_pg_session),
+) -> dict:
+    """
+    为指定交易计划手动执行选股。
+
+    流程：
+    1. 加载计划关联的策略模板
+    2. 通过 ScreenDataProvider 加载全市场股票因子数据
+    3. 执行选股并使用计划的 candidate_filter 进行二次筛选
+    4. 保存候选股到数据库
+
+    Returns:
+        {
+            "screened_count": 选股数量,
+            "filtered_count": 二次筛选后数量,
+            "saved_count": 保存候选股数量,
+            "screen_time": 选股时间,
+        }
+    """
+    from app.services.screener.screen_data_provider import ScreenDataProvider
+    from app.core.database import AsyncSessionTS
+    from app.core.schemas import MarketRiskLevel
+
+    try:
+        # 加载全市场股票因子数据
+        async with AsyncSessionTS() as ts_session:
+            provider = ScreenDataProvider(
+                pg_session=pg_session,
+                ts_session=ts_session,
+                strategy_config={},
+            )
+            stocks_data = await provider.load_screen_data()
+
+        if not stocks_data:
+            raise HTTPException(status_code=503, detail="无法加载市场数据")
+
+        # 执行选股
+        result = await OperationsService.run_screening_for_plan(
+            session=pg_session,
+            plan_id=plan_id,
+            stocks_data=stocks_data,
+            market_risk=MarketRiskLevel.NORMAL,  # TODO: 从市场风控服务获取
+        )
+
+        await pg_session.commit()
+        return result
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

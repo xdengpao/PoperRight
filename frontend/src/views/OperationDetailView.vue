@@ -137,7 +137,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import axios from '@/api/axios'
+import { apiClient } from '@/api'
 import { useOperationsStore, type CandidateStock, type PlanPosition } from '@/stores/operations'
 
 const route = useRoute()
@@ -155,7 +155,7 @@ const tabs = computed(() => [
 ])
 
 onMounted(async () => {
-  const { data } = await axios.get(`/api/v1/operations/plans/${planId}`)
+  const { data } = await apiClient.get(`/operations/plans/${planId}`)
   planDetail.value = data
   store.fetchCandidates(planId)
   store.fetchPositions(planId)

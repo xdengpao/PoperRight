@@ -40,6 +40,11 @@
         <div class="card-actions" @click.stop>
           <button
             v-if="plan.status === 'ACTIVE'"
+            class="btn-sm btn-primary"
+            @click="handleRunScreening(plan.id, plan.name)"
+          >执行选股</button>
+          <button
+            v-if="plan.status === 'ACTIVE'"
             class="btn-sm"
             @click="store.updatePlanStatus(plan.id, 'PAUSED')"
           >暂停</button>
@@ -347,6 +352,16 @@ watch([selectedName, selectedStrategyId], () => {
   console.log('[watch] name:', selectedName.value, 'sid:', selectedStrategyId.value)
 })
 
+// 选择策略后自动填充计划名称（如果名称为空）
+watch(selectedStrategyId, (newId) => {
+  if (newId && !selectedName.value) {
+    const strategy = store.strategies.find(s => s.id === newId)
+    if (strategy) {
+      selectedName.value = strategy.name + '交易计划'
+    }
+  }
+})
+
 function moduleLabel(m: string) {
   const map: Record<string, string> = { ma_trend: '均线趋势', breakout: '形态突破', indicator_params: '技术指标', volume_price: '量价资金', factor_editor: '因子编辑' }
   return map[m] || m
@@ -404,6 +419,17 @@ async function handleDelete(planId: string, planName: string) {
     await store.deletePlan(planId)
   }
 }
+
+async function handleRunScreening(planId: string, planName: string) {
+  if (!confirm(`确定执行选股「${planName}」？`)) return
+  try {
+    const result = await store.runScreening(planId)
+    alert(`选股完成：筛选 ${result.screened_count} 只，二次筛选 ${result.filtered_count} 只，保存 ${result.saved_count} 只候选股`)
+    await store.fetchPlans()
+  } catch (e: any) {
+    alert(`选股失败：${e.response?.data?.detail || e.message}`)
+  }
+}
 </script>
 
 <style scoped>
@@ -430,6 +456,7 @@ async function handleDelete(planId: string, planName: string) {
 .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-secondary { background: #f5f5f5; border: 1px solid #ddd; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
 .btn-sm { font-size: 0.8rem; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: #fff; }
+.btn-sm.btn-primary { background: #1976d2; color: #fff; border-color: #1976d2; }
 .btn-danger { color: #d32f2f; border-color: #d32f2f; }
 .empty-state, .loading-state { text-align: center; padding: 48px; color: #666; }
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }

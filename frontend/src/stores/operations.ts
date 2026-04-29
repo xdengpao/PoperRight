@@ -200,11 +200,16 @@ export const useOperationsStore = defineStore('operations', () => {
     }
   }
 
+  async function runScreening(planId: string) {
+    const { data } = await apiClient.post(`/operations/plans/${planId}/screen`)
+    return data
+  }
+
   return {
     plans, candidates, positions, checklist, checklistLevel, buyRecords, strategies, loading, error,
     fetchPlans, createPlan, updatePlanStatus, deletePlan,
     fetchCandidates, skipCandidate, executeBuy,
     fetchPositions, confirmSell,
-    fetchChecklist, fetchBuyRecords, fetchStrategies,
+    fetchChecklist, fetchBuyRecords, fetchStrategies, runScreening,
   }
 })

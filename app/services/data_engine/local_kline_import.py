@@ -585,7 +585,13 @@ class LocalKlineImportService:
 
     @staticmethod
     def _parse_datetime(time_str: str) -> datetime:
-        """尝试多种格式解析时间字符串。"""
+        """尝试多种格式解析时间字符串，返回 UTC 时区的 datetime 对象。
+        
+        对于日线数据（仅日期格式），统一使用 00:00:00 UTC 时间戳。
+        对于分钟级数据（带时间格式），保持原有时间戳，但明确标记为 UTC。
+        """
+        from datetime import timezone
+        
         formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
@@ -599,7 +605,9 @@ class LocalKlineImportService:
         ]
         for fmt in formats:
             try:
-                return datetime.strptime(time_str, fmt)
+                dt = datetime.strptime(time_str, fmt)
+                # 明确标记为 UTC 时区
+                return dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
         raise ValueError(f"无法解析时间: {time_str}")
