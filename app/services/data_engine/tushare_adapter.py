@@ -185,14 +185,21 @@ class TushareAdapter(BaseDataSourceAdapter):
 
     @staticmethod
     def _parse_trade_date(value: Any) -> datetime:
-        """解析 Tushare 日期字符串 (YYYYMMDD) 为 datetime。"""
+        """解析 Tushare 日期字符串 (YYYYMMDD) 为 UTC 时区的 datetime。
+        
+        日线数据统一使用 00:00:00 UTC 时间戳存储。
+        """
+        from datetime import timezone
+        
         if value is None:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         s = str(value).strip()
         try:
-            return datetime.strptime(s[:8], "%Y%m%d")
+            dt = datetime.strptime(s[:8], "%Y%m%d")
+            # 明确标记为 UTC 时区，时间设为 00:00:00
+            return dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            return datetime.utcnow()
+            return datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
     # ------------------------------------------------------------------
     # 公开接口：fetch_kline

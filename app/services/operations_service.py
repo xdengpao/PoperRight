@@ -862,3 +862,88 @@ class OperationsService:
                 for r in rows
             ],
         }
+
+    # ------------------------------------------------------------------
+    # 手动执行选股
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    async def run_screening_for_plan(
+        session: AsyncSession,
+        plan_id: UUID,
+        stocks_data: dict[str, dict],
+        market_risk: MarketRiskLevel = MarketRiskLevel.NORMAL,
+        blacklist: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """
+        为指定交易计划执行选股。
+
+        流程：
+        1. 加载计划关联的策略模板
+        2. 使用策略配置执行选股
+        3. 使用计划的 candidate_filter 进行二次筛选
+        4. 保存候选股到数据库
+
+        Args:
+            session: 数据库会话
+            plan_id: 交易计划 ID
+            stocks_data: 全市场股票因子数据 {symbol: factor_dict}
+            market_risk: 当前市场风险等级
+            blacklist: 黑名单股票集合
+
+        Returns:
+            {
+                "screened_count": 选股数量,
+                "filtered_count": 二次筛选后数量,
+                "saved_count": 保存候选股数量,
+                "screen_time": 选股时间,
+            }
+        """
+        from app.models.strategy import StrategyTemplate
+        from app.services.screener.screen_executor import ScreenExecutor
+        from app.core.schemas import StrategyConfig
+
+        # 1. 加载交易计划
+        plan = await _get_plan_or_raise(session, plan_id)
+
+        # 2. 加载关联的策略模板
+        strategy = await session.get(StrategyTemplate, plan.strategy_id)
+        if strategy is None:
+            raise ValueError("关联的策略模板不存在")
+
+        # 3. 构建策略配置
+        config = StrategyConfig.from_dict(strategy.config)
+        enabled_modules = list(strategy.enabled_modules) if strategy.enabled_modules else []
+
+        # 4. 执行选股
+        executor = ScreenExecutor(
+            config,
+            strategy_id=str(plan.strategy_id),
+            enabled_modules=enabled_modules or None,
+            raw_config=strategy.config,
+        )
+        result = executor.run_eod_screen(stocks_data)
+
+        # 5. 二次筛选
+        filter_config = CandidateFilterConfig.from_dict(plan.candidate_filter)
+        filtered_items = OperationsService.filter_candidates_pure(
+            screen_items=result.items,
+            filter_config=filter_config,
+            market_risk=market_risk,
+            blacklist=blacklist,
+        )
+
+        # 6. 保存候选股
+        saved_count = await OperationsService.save_candidates(
+            session=session,
+            plan_id=plan_id,
+            screen_date=date.today(),
+            items=filtered_items,
+        )
+
+        return {
+            "screened_count": len(result.items),
+            "filtered_count": len(filtered_items),
+            "saved_count": saved_count,
+            "screen_time": result.screen_time.isoformat(),
+        }

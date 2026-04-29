@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Awaitable
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -126,9 +126,12 @@ class MarketDataClient:
                 raw_time = item.get("time") or item.get("datetime") or item.get("ts")
                 if isinstance(raw_time, (int, float)):
                     ts = raw_time / 1000 if raw_time > 1e10 else raw_time
-                    bar_time = datetime.utcfromtimestamp(ts)
+                    bar_time = datetime.fromtimestamp(ts, tz=timezone.utc)
                 else:
                     bar_time = datetime.fromisoformat(str(raw_time))
+                    # 如果解析结果无时区信息，假设为 UTC
+                    if bar_time.tzinfo is None:
+                        bar_time = bar_time.replace(tzinfo=timezone.utc)
 
                 bar = KlineBar(
                     time=bar_time,
