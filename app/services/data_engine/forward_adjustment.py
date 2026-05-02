@@ -9,11 +9,12 @@
 import bisect
 import logging
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.models.adjustment_factor import AdjustmentFactor
 from app.models.kline import KlineBar
+from app.services.data_engine.kline_normalizer import derive_trade_date
 
 logger = logging.getLogger(__name__)
 
@@ -64,8 +65,7 @@ def adjust_kline_bars(
 
     adjusted_bars: list[KlineBar] = []
     for bar in bars:
-        # 提取K线对应的日期（KlineBar.time 是 datetime）
-        bar_date = bar.time.date() if isinstance(bar.time, datetime) else bar.time
+        bar_date = derive_trade_date(bar.time, bar.freq)
 
         daily_factor = _find_factor_for_date(bar_date, factor_map, sorted_dates)
 

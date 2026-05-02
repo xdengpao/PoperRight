@@ -334,6 +334,54 @@ class TestGetFactorMeta:
             assert meta.factor_name == factor_name
 
 
+class TestFactorDataSourceConfig:
+    """验证支持数据源选择的因子元数据声明。"""
+
+    MONEY_FLOW_SOURCE_FACTORS = {
+        "money_flow",
+        "large_order",
+        "super_large_net_inflow",
+        "large_net_inflow",
+        "small_net_outflow",
+        "money_flow_strength",
+        "net_inflow_rate",
+    }
+
+    SECTOR_SOURCE_FACTORS = {"sector_rank", "sector_trend"}
+
+    NO_SOURCE_FACTORS = {
+        "turnover",
+        "volume_price",
+        "index_pe",
+        "index_turnover",
+        "index_ma_trend",
+        "index_vol_ratio",
+    }
+
+    @pytest.mark.parametrize("factor_name", sorted(MONEY_FLOW_SOURCE_FACTORS))
+    def test_money_flow_factors_declare_source_config(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.data_source_config is not None
+        assert meta.data_source_config.kind == "money_flow"
+        assert meta.data_source_config.config_path == "volume_price.money_flow_source"
+        assert {opt.value for opt in meta.data_source_config.options} == {
+            "money_flow",
+            "moneyflow_ths",
+            "moneyflow_dc",
+        }
+
+    @pytest.mark.parametrize("factor_name", sorted(SECTOR_SOURCE_FACTORS))
+    def test_sector_factors_declare_source_config(self, factor_name):
+        meta = FACTOR_REGISTRY[factor_name]
+        assert meta.data_source_config is not None
+        assert meta.data_source_config.kind == "sector"
+        assert meta.data_source_config.config_path == "sector_config.sector_data_source"
+
+    @pytest.mark.parametrize("factor_name", sorted(NO_SOURCE_FACTORS))
+    def test_non_source_factors_do_not_declare_source_config(self, factor_name):
+        assert FACTOR_REGISTRY[factor_name].data_source_config is None
+
+
 # ---------------------------------------------------------------------------
 # get_factors_by_category 辅助函数
 # ---------------------------------------------------------------------------

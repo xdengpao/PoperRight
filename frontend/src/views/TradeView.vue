@@ -7,12 +7,12 @@
         <button
           :class="['mode-btn', tradeMode === 'PAPER' && 'active-paper']"
           @click="tradeMode = 'PAPER'"
-          aria-pressed="tradeMode === 'PAPER'"
+          :aria-pressed="tradeMode === 'PAPER'"
         >模拟盘</button>
         <button
           :class="['mode-btn', tradeMode === 'LIVE' && 'active-live']"
           @click="confirmSwitchLive"
-          aria-pressed="tradeMode === 'LIVE'"
+          :aria-pressed="tradeMode === 'LIVE'"
         >实盘</button>
       </div>
     </div>
@@ -108,12 +108,12 @@
                   <button
                     :class="['dir-btn', 'dir-buy', order.direction === 'BUY' && 'active']"
                     @click="order.direction = 'BUY'"
-                    aria-pressed="order.direction === 'BUY'"
+                    :aria-pressed="order.direction === 'BUY'"
                   >买入</button>
                   <button
                     :class="['dir-btn', 'dir-sell', order.direction === 'SELL' && 'active']"
                     @click="order.direction = 'SELL'"
-                    aria-pressed="order.direction === 'SELL'"
+                    :aria-pressed="order.direction === 'SELL'"
                   >卖出</button>
                 </div>
               </div>

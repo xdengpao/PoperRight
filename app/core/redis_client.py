@@ -7,6 +7,8 @@ Redis 异步客户端
 - FastAPI 依赖注入辅助函数
 """
 
+import asyncio
+import os
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -17,20 +19,33 @@ from redis.asyncio.client import PubSub
 from app.core.config import settings
 
 # ---------------------------------------------------------------------------
-# 连接池（全局单例）
+# 连接池（按进程和 event loop 隔离）
 # ---------------------------------------------------------------------------
-_pool: aioredis.ConnectionPool | None = None
+_pools: dict[tuple[int, int], aioredis.ConnectionPool] = {}
 
 
 def _get_pool() -> aioredis.ConnectionPool:
-    global _pool
-    if _pool is None:
-        _pool = aioredis.ConnectionPool.from_url(
+    """返回当前进程、当前 event loop 专属连接池。
+
+    redis.asyncio 的连接绑定创建它们的 event loop。FastAPI、Celery prefork
+    子进程和 Celery 任务内的持久 loop 不能共享同一个连接池，否则会出现
+    "Future attached to a different loop" 或 "Event loop is closed"。
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.get_event_loop()
+
+    key = (os.getpid(), id(loop))
+    pool = _pools.get(key)
+    if pool is None:
+        pool = aioredis.ConnectionPool.from_url(
             settings.redis_url,
             max_connections=50,
             decode_responses=True,
         )
-    return _pool
+        _pools[key] = pool
+    return pool
 
 
 def get_redis_client() -> Redis:
@@ -129,7 +144,13 @@ async def init_redis() -> None:
 
 async def close_redis() -> None:
     """应用关闭时释放连接池"""
-    global _pool
-    if _pool is not None:
-        await _pool.aclose()
-        _pool = None
+    global _pools
+    current_pid = os.getpid()
+    pools = [
+        (key, pool)
+        for key, pool in _pools.items()
+        if key[0] == current_pid
+    ]
+    for key, pool in pools:
+        await pool.aclose()
+        _pools.pop(key, None)

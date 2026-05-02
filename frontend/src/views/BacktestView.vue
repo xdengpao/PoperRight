@@ -453,7 +453,7 @@ import { storeToRefs } from 'pinia'
 import { apiClient } from '@/api'
 import * as echarts from 'echarts'
 import { useBacktestStore, FREQ_OPTIONS, INDICATOR_DESCRIPTIONS, BASE_FIELD_OPTIONS, getTemplateFreqLabel } from '@/stores/backtest'
-import type { TradeOrder, BacktestResult, OptimizeResult, RunStatus, ExitTemplate } from '@/stores/backtest'
+import type { TradeOrder, OptimizeResult, ExitTemplate } from '@/stores/backtest'
 
 // ─── Store ────────────────────────────────────────────────────────────────────
 
@@ -477,6 +477,10 @@ const {
 interface StrategyItem {
   id: string
   name: string
+}
+
+type TooltipAxisPoint = {
+  axisValue?: string | number
 }
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
@@ -946,7 +950,8 @@ function renderEquityChart() {
       textStyle: { color: '#e6edf3', fontSize: 12 },
       formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
         if (!Array.isArray(params)) return ''
-        const date = params[0]?.axisValue ?? ''
+        const firstPoint = params[0] as TooltipAxisPoint
+        const date = firstPoint?.axisValue ?? ''
         let html = `<div style="margin-bottom:4px;color:#8b949e">${date}</div>`
         for (const p of params) {
           const val = typeof p.value === 'number' ? p.value.toFixed(4) : p.value

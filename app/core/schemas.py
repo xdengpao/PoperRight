@@ -219,11 +219,53 @@ class ScreenResult:
     is_complete: bool = True        # False 表示超时返回的不完整结果
     market_risk_level: MarketRiskLevel | None = None   # 大盘风险等级（需求 4）
     changes: list[ScreenChange] = field(default_factory=list)  # 变化列表（需求 10）
+    factor_stats: list["FactorConditionStats"] = field(default_factory=list)  # 因子筛选统计
+    group_stats: list[dict] = field(default_factory=list)  # 分组筛选统计
 
 
 # ---------------------------------------------------------------------------
 # 策略配置数据类
 # ---------------------------------------------------------------------------
+
+
+FactorRole = Literal["primary", "confirmation", "score_only", "disabled"]
+GroupLogic = Literal["AND", "OR", "AT_LEAST_N", "SCORE_ONLY"]
+ConfirmationMode = Literal["blocking", "score_only"]
+
+
+@dataclass
+class FactorGroupConfig:
+    """因子分组配置，用于主条件/确认因子/仅加分的可编辑组合。"""
+    group_id: str
+    label: str
+    role: FactorRole
+    logic: GroupLogic = "AND"
+    factor_names: list[str] = field(default_factory=list)
+    min_pass_count: int | None = None
+    blocking: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "group_id": self.group_id,
+            "label": self.label,
+            "role": self.role,
+            "logic": self.logic,
+            "factor_names": self.factor_names,
+            "min_pass_count": self.min_pass_count,
+            "blocking": self.blocking,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "FactorGroupConfig":
+        return cls(
+            group_id=str(data.get("group_id", "")),
+            label=str(data.get("label", "")),
+            role=data.get("role", "primary"),
+            logic=data.get("logic", "AND"),
+            factor_names=[str(v) for v in data.get("factor_names", [])],
+            min_pass_count=data.get("min_pass_count"),
+            blocking=bool(data.get("blocking", True)),
+        )
 
 
 @dataclass
@@ -233,7 +275,48 @@ class FactorCondition:
     operator: str                   # 比较运算符：">", "<", ">=", "<=", "==", "cross_up", "cross_down"
     threshold: float | None = None  # 阈值（数值型因子）
     params: dict = field(default_factory=dict)  # 因子专属参数
+    role: FactorRole | None = None  # 主条件/确认因子/仅加分/禁用
+    group_id: str | None = None     # 所属分组 ID
 
+    def to_dict(self) -> dict:
+        payload = {
+            "factor_name": self.factor_name,
+            "operator": self.operator,
+            "threshold": self.threshold,
+            "params": self.params,
+        }
+        if self.role is not None:
+            payload["role"] = self.role
+        if self.group_id is not None:
+            payload["group_id"] = self.group_id
+        return payload
+
+
+@dataclass
+class FactorConditionStats:
+    """单个因子条件在本轮选股中的筛选统计。"""
+    factor_name: str
+    label: str | None = None
+    role: str | None = None
+    group_id: str | None = None
+    evaluated_count: int = 0
+    passed_count: int = 0
+    failed_count: int = 0
+    missing_count: int = 0
+    remaining_after_count: int | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "factor_name": self.factor_name,
+            "label": self.label,
+            "role": self.role,
+            "group_id": self.group_id,
+            "evaluated_count": self.evaluated_count,
+            "passed_count": self.passed_count,
+            "failed_count": self.failed_count,
+            "missing_count": self.missing_count,
+            "remaining_after_count": self.remaining_after_count,
+        }
 
 
 @dataclass
@@ -366,6 +449,14 @@ class VolumePriceConfig:
     sector_rank_top: int = 30               # 板块排名范围
     money_flow_mode: str = "relative"       # 资金流信号模式："relative" | "absolute"（需求 6.6）
     relative_threshold_pct: float = 5.0     # 相对阈值百分比（需求 6.6）
+    money_flow_source: str = "moneyflow_dc"  # 资金流数据源：money_flow / moneyflow_ths / moneyflow_dc
+
+    @staticmethod
+    def normalize_money_flow_source(source: object) -> str:
+        """归一化资金流数据源，非法值回退到覆盖更完整的 moneyflow_dc。"""
+        if source in {"money_flow", "moneyflow_ths", "moneyflow_dc"}:
+            return str(source)
+        return "moneyflow_dc"
 
     def to_dict(self) -> dict:
         return {
@@ -378,6 +469,7 @@ class VolumePriceConfig:
             "sector_rank_top": self.sector_rank_top,
             "money_flow_mode": self.money_flow_mode,
             "relative_threshold_pct": self.relative_threshold_pct,
+            "money_flow_source": self.normalize_money_flow_source(self.money_flow_source),
         }
 
     @classmethod
@@ -392,6 +484,9 @@ class VolumePriceConfig:
             sector_rank_top=data.get("sector_rank_top", 30),
             money_flow_mode=data.get("money_flow_mode", "relative"),
             relative_threshold_pct=data.get("relative_threshold_pct", 5.0),
+            money_flow_source=cls.normalize_money_flow_source(
+                data.get("money_flow_source", "moneyflow_dc")
+            ),
         )
 
 
@@ -470,6 +565,8 @@ class StrategyConfig:
     """选股策略配置"""
     factors: list[FactorCondition] = field(default_factory=list)
     logic: Literal["AND", "OR"] = "AND"         # 因子间逻辑运算
+    factor_groups: list[FactorGroupConfig] = field(default_factory=list)
+    confirmation_mode: ConfirmationMode = "blocking"
     weights: dict[str, float] = field(default_factory=dict)  # 因子权重
     ma_periods: list[int] = field(default_factory=lambda: [5, 10, 20, 60, 120, 250])
     indicator_params: IndicatorParamsConfig = field(default_factory=IndicatorParamsConfig)
@@ -486,16 +583,10 @@ class StrategyConfig:
         else:
             ip = self.indicator_params  # type: ignore[assignment]
         return {
-            "factors": [
-                {
-                    "factor_name": f.factor_name,
-                    "operator": f.operator,
-                    "threshold": f.threshold,
-                    "params": f.params,
-                }
-                for f in self.factors
-            ],
+            "factors": [f.to_dict() for f in self.factors],
             "logic": self.logic,
+            "factor_groups": [g.to_dict() for g in self.factor_groups],
+            "confirmation_mode": self.confirmation_mode,
             "weights": self.weights,
             "ma_periods": self.ma_periods,
             "indicator_params": ip,
@@ -514,8 +605,15 @@ class StrategyConfig:
                 operator=f["operator"],
                 threshold=f.get("threshold"),
                 params=f.get("params", {}),
+                role=f.get("role"),
+                group_id=f.get("group_id"),
             )
             for f in data.get("factors", [])
+        ]
+        factor_groups = [
+            FactorGroupConfig.from_dict(g)
+            for g in data.get("factor_groups", [])
+            if isinstance(g, dict)
         ]
         # indicator_params: accept both plain dict (legacy) and structured dict
         raw_ip = data.get("indicator_params", {})
@@ -536,6 +634,8 @@ class StrategyConfig:
         return cls(
             factors=factors,
             logic=data.get("logic", "AND"),
+            factor_groups=factor_groups,
+            confirmation_mode=data.get("confirmation_mode", "blocking"),
             weights=data.get("weights", {}),
             ma_periods=data.get("ma_periods", [5, 10, 20, 60, 120, 250]),
             indicator_params=indicator_params,

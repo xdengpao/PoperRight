@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.models.kline import KlineBar
 from app.models.stock import StockInfo
+from app.services.data_engine.kline_normalizer import derive_trade_date
 from app.services.data_engine.kline_repository import KlineRepository
 from app.services.screener.screen_data_provider import (
     ScreenDataProvider,
@@ -49,7 +50,10 @@ class HistoricalDataPreparer:
             start=start_date,
             end=end_date,
         )
-        trading_dates = sorted({b.time.date() if hasattr(b.time, 'date') else b.time for b in bars})
+        trading_dates = sorted({
+            derive_trade_date(b.time, getattr(b, "freq", "1d")) if hasattr(b.time, 'date') else b.time
+            for b in bars
+        })
         logger.info("评估期 %s ~ %s 共 %d 个交易日", start_date, end_date, len(trading_dates))
         return trading_dates
 
@@ -122,7 +126,11 @@ class HistoricalDataPreparer:
         result: dict[date, dict[str, Any]] = {}
 
         for i, bar in enumerate(bars):
-            bar_date = bar.time.date() if hasattr(bar.time, 'date') else bar.time
+            bar_date = (
+                derive_trade_date(bar.time, getattr(bar, "freq", "1d"))
+                if hasattr(bar.time, 'date')
+                else bar.time
+            )
             if bar_date < start_date:
                 continue
 

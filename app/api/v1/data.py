@@ -221,7 +221,8 @@ async def get_kline(
     from app.core.database import AsyncSessionTS
     from app.models.kline import Kline, KlineBar as KlineBarDTO
 
-    from datetime import timedelta
+    from datetime import timedelta, timezone
+    from zoneinfo import ZoneInfo
 
     end_date = end or date.today()
     start_date = start or (end_date - timedelta(days=90))
@@ -235,13 +236,14 @@ async def get_kline(
     # 1. 先从本地 TimescaleDB 查询
     try:
         async with AsyncSessionTS() as session:
-            start_dt = datetime.combine(start_date, datetime.min.time())
-            end_dt = datetime.combine(end_date, datetime.max.time())
+            start_dt = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+            end_dt = datetime.combine(end_date, datetime.max.time(), tzinfo=timezone.utc)
             result = await session.execute(
                 select(Kline)
                 .where(
                     Kline.symbol == std_symbol,
                     Kline.freq == freq,
+                    Kline.adj_type == 0,
                     Kline.time >= start_dt,
                     Kline.time <= end_dt,
                 )
@@ -264,6 +266,20 @@ async def get_kline(
         except Exception as exc:
             logger.warning("第三方 API 获取 K 线失败 symbol=%s: %s", std_symbol, exc)
             bars = []
+
+    from app.services.data_engine.kline_normalizer import (
+        dedupe_bars_by_trade_date,
+        derive_trade_date,
+    )
+
+    if bars:
+        before = len(bars)
+        bars = sorted(dedupe_bars_by_trade_date(bars), key=lambda b: b.time)
+        if len(bars) != before:
+            logger.warning(
+                "K 线查询发现重复交易日并已去重 symbol=%s freq=%s before=%d after=%d",
+                std_symbol, freq, before, len(bars),
+            )
 
     # 3. 查询股票名称
     stock_name = ""
@@ -297,28 +313,39 @@ async def get_kline(
 
             adj_repo = AdjFactorRepository()
             factors = await adj_repo.query_by_symbol(
-                clean_symbol, adj_type=1, start=start_date, end=end_date,
+                std_symbol, adj_type=1, start=start_date, end=end_date,
             )
-            latest = await adj_repo.query_latest_factor(clean_symbol, adj_type=1)
+            latest = await adj_repo.query_latest_factor(std_symbol, adj_type=1)
             if factors and latest:
                 bars = adjust_kline_bars(bars, factors, latest)
             else:
                 logger.warning(
-                    "股票 %s 无前复权因子数据，返回原始K线", clean_symbol,
+                    "股票 %s 无前复权因子数据，返回原始K线", std_symbol,
                 )
         except Exception as exc:
             logger.warning(
-                "查询前复权因子失败 symbol=%s: %s，返回原始K线数据", clean_symbol, exc,
+                "查询前复权因子失败 symbol=%s: %s，返回原始K线数据", std_symbol, exc,
             )
 
+    sh_tz = ZoneInfo("Asia/Shanghai")
+    minute_freqs = {"1m", "5m", "15m", "30m", "60m"}
+
     return {
-        "symbol": symbol,
+        "symbol": std_symbol,
         "name": stock_name,
         "freq": freq,
         "adj_type": adj_type,
         "bars": [
             {
                 "time": bar.time.isoformat(),
+                "trade_date": derive_trade_date(bar.time, freq).isoformat(),
+                "trade_time": (
+                    (bar.time if bar.time.tzinfo is not None else bar.time.replace(tzinfo=timezone.utc))
+                    .astimezone(sh_tz)
+                    .strftime("%H:%M")
+                    if freq in minute_freqs
+                    else None
+                ),
                 "open": str(bar.open),
                 "high": str(bar.high),
                 "low": str(bar.low),

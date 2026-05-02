@@ -41,7 +41,10 @@ from app.services.risk_controller import (
     MarketRiskChecker,
     StockRiskFilter,
 )
-from app.services.screener.strategy_engine import StrategyEngine
+from app.services.screener.strategy_engine import (
+    StrategyEngine,
+    summarize_factor_condition_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1093,6 +1096,26 @@ class ScreenExecutor:
 
         # 选股结果变化检测（需求 10）：比较上一轮结果，生成变化列表
         changes = self._compute_result_diff(filtered_items, previous_items)
+        factor_stats = summarize_factor_condition_stats(self._config, stocks_data)
+        group_stats: list[dict[str, Any]] = []
+        if self._config.factor_groups and stocks_data:
+            group_pass_counts = {group.group_id: 0 for group in self._config.factor_groups}
+            for stock_data in stocks_data.values():
+                eval_result = StrategyEngine.evaluate(self._config, stock_data)
+                for group_result in eval_result.group_results:
+                    if group_result.get("passed"):
+                        group_pass_counts[group_result["group_id"]] = (
+                            group_pass_counts.get(group_result["group_id"], 0) + 1
+                        )
+            for group in self._config.factor_groups:
+                group_stats.append({
+                    "group_id": group.group_id,
+                    "label": group.label,
+                    "role": group.role,
+                    "logic": group.logic,
+                    "passed_count": group_pass_counts.get(group.group_id, 0),
+                    "total_count": len(stocks_data),
+                })
 
         return ScreenResult(
             strategy_id=strategy_id,
@@ -1102,6 +1125,8 @@ class ScreenExecutor:
             is_complete=True,
             market_risk_level=market_risk_level,
             changes=changes,
+            factor_stats=factor_stats,
+            group_stats=group_stats,
         )
 
 

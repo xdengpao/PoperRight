@@ -15,6 +15,7 @@ export interface SectorRankingItem {
 
 export interface SectorKlineBar {
   time: string
+  trade_date?: string
   open: number | null
   high: number | null
   low: number | null
@@ -58,6 +59,7 @@ export interface ConstituentBrowseItem {
 
 export interface KlineBrowseItem {
   time: string
+  trade_date?: string
   sector_code: string
   data_source: string
   freq: string

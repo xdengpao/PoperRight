@@ -12,12 +12,16 @@ import logging
 from datetime import date, datetime
 from typing import Sequence
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionTS
 from app.models.kline import Kline, KlineBar
+from app.services.data_engine.kline_normalizer import (
+    normalize_kline_symbol,
+    normalize_kline_time,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,10 +78,24 @@ class KlineRepository:
         if not bars:
             return 0
 
-        rows = [
-            {
-                "time": b.time,
-                "symbol": b.symbol.split(".")[0] if "." in b.symbol else b.symbol,
+        rows_by_key: dict[tuple[datetime, str, str, int], dict] = {}
+        skipped = 0
+        for b in bars:
+            symbol = normalize_kline_symbol(b.symbol)
+            if symbol is None:
+                skipped += 1
+                logger.warning("跳过无法标准化的 K 线代码: %s", b.symbol)
+                continue
+            try:
+                normalized_time = normalize_kline_time(b.time, b.freq)
+            except ValueError as exc:
+                skipped += 1
+                logger.warning("跳过无法归一化时间的 K 线 symbol=%s time=%s: %s", b.symbol, b.time, exc)
+                continue
+
+            row = {
+                "time": normalized_time,
+                "symbol": symbol,
                 "freq": b.freq,
                 "open": b.open,
                 "high": b.high,
@@ -91,23 +109,44 @@ class KlineRepository:
                 "limit_down": b.limit_down,
                 "adj_type": b.adj_type,
             }
-            for b in bars
-        ]
+            key = (normalized_time, symbol, b.freq, b.adj_type)
+            current = rows_by_key.get(key)
+            if current is None or _row_completeness(row) >= _row_completeness(current):
+                rows_by_key[key] = row
+
+        rows = list(rows_by_key.values())
+        if not rows:
+            logger.info("K 线批量写入无有效行，共跳过 %d 条", skipped)
+            return 0
 
         inserted = 0
         async with self._get_session_ctx() as session:
             for i in range(0, len(rows), _BATCH_SIZE):
                 chunk = rows[i : i + _BATCH_SIZE]
-                stmt = (
-                    pg_insert(Kline)
-                    .values(chunk)
-                    .on_conflict_do_nothing()
+                stmt = pg_insert(Kline).values(chunk)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["time", "symbol", "freq", "adj_type"],
+                    set_={
+                        "open": func.coalesce(stmt.excluded.open, Kline.open),
+                        "high": func.coalesce(stmt.excluded.high, Kline.high),
+                        "low": func.coalesce(stmt.excluded.low, Kline.low),
+                        "close": func.coalesce(stmt.excluded.close, Kline.close),
+                        "volume": func.coalesce(stmt.excluded.volume, Kline.volume),
+                        "amount": func.coalesce(stmt.excluded.amount, Kline.amount),
+                        "turnover": func.coalesce(stmt.excluded.turnover, Kline.turnover),
+                        "vol_ratio": func.coalesce(stmt.excluded.vol_ratio, Kline.vol_ratio),
+                        "limit_up": func.coalesce(stmt.excluded.limit_up, Kline.limit_up),
+                        "limit_down": func.coalesce(stmt.excluded.limit_down, Kline.limit_down),
+                    },
                 )
                 result = await session.execute(stmt)
                 inserted += result.rowcount or 0
             await session.commit()
 
-        logger.info("K 线批量写入完成，共 %d 条，实际插入 %d 条", len(rows), inserted)
+        logger.info(
+            "K 线批量写入完成，有效 %d 条，跳过 %d 条，影响 %d 条",
+            len(rows), skipped, inserted,
+        )
         return inserted
 
     # ------------------------------------------------------------------
@@ -182,3 +221,20 @@ class _NullContext:
 
     async def __aexit__(self, *_) -> None:
         pass  # 由外部调用方负责 commit/close
+
+
+def _row_completeness(row: dict) -> int:
+    """用于同批次重复业务键去重的字段完整度评分。"""
+    fields = (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover",
+        "vol_ratio",
+        "limit_up",
+        "limit_down",
+    )
+    return sum(1 for field in fields if row.get(field) not in (None, ""))

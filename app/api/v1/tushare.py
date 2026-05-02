@@ -15,12 +15,16 @@ Tushare 数据在线导入 API 端点
 from __future__ import annotations
 
 import logging
+import json
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.services.data_engine.tushare_import_service import TushareImportService
+from app.services.data_engine.tushare_smart_import_workflow import (
+    TushareSmartImportWorkflowService,
+)
 from app.services.data_engine.tushare_registry import (
     TokenTier,
     get_all_entries,
@@ -39,7 +43,7 @@ router = APIRouter(prefix="/data/tushare", tags=["tushare"])
 class TushareImportRequest(BaseModel):
     """导入请求"""
     api_name: str
-    params: dict = {}
+    params: dict = Field(default_factory=dict)
 
 
 class TushareImportResponse(BaseModel):
@@ -99,6 +103,56 @@ class TushareImportLogItem(BaseModel):
     finished_at: str | None
 
 
+class WorkflowDateRange(BaseModel):
+    """工作流日期范围"""
+
+    start_date: str
+    end_date: str
+
+
+class TushareWorkflowStartRequest(BaseModel):
+    """智能选股一键导入启动请求"""
+
+    mode: str = "daily_fast"
+    date_range: WorkflowDateRange | None = None
+    target_date: str | None = None
+    strategy_scope: dict | None = None
+    repair_source_workflow_id: str | None = None
+    options: dict = Field(default_factory=dict)
+
+
+class TushareWorkflowStartResponse(BaseModel):
+    """智能选股一键导入启动响应"""
+
+    workflow_task_id: str
+    status: str
+    total_steps: int | None = None
+
+
+class TushareWorkflowStopResponse(BaseModel):
+    """智能选股一键导入停止响应"""
+
+    message: str
+
+
+def _workflow_date_range(body: TushareWorkflowStartRequest) -> dict | None:
+    """兼容显式日期范围和单目标交易日。"""
+    if body.date_range:
+        return body.date_range.model_dump()
+    if body.target_date:
+        return {"start_date": body.target_date, "end_date": body.target_date}
+    return None
+
+
+def _workflow_options(body: TushareWorkflowStartRequest) -> dict:
+    """合并工作流扩展选项，避免 API 层之外感知请求模型细节。"""
+    return {
+        **body.options,
+        **({"strategy_scope": body.strategy_scope} if body.strategy_scope else {}),
+        **({"repair_source_workflow_id": body.repair_source_workflow_id} if body.repair_source_workflow_id else {}),
+    }
+
+
 # ---------------------------------------------------------------------------
 # 端点实现
 # ---------------------------------------------------------------------------
@@ -152,6 +206,104 @@ async def get_api_registry() -> list[ApiRegistryItem]:
         ))
 
     return items
+
+
+@router.get("/workflows/smart-screening")
+async def get_smart_screening_workflow(
+    mode: str = Query(default="daily_fast"),
+) -> dict:
+    """获取智能选股一键导入工作流定义"""
+    svc = TushareSmartImportWorkflowService()
+    return svc.get_definition(mode=mode)
+
+
+@router.post("/workflows/smart-screening/plan")
+async def plan_smart_screening_workflow(
+    body: TushareWorkflowStartRequest,
+) -> dict:
+    """生成智能选股一键导入计划但不启动"""
+    svc = TushareSmartImportWorkflowService()
+    try:
+        return await svc.get_plan_async(
+            mode=body.mode,
+            date_range=_workflow_date_range(body),
+            options=_workflow_options(body),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("生成智能选股一键导入计划失败")
+        raise HTTPException(status_code=500, detail=f"生成工作流计划失败：{exc}") from exc
+
+
+@router.post("/workflows/smart-screening/start")
+async def start_smart_screening_workflow(
+    body: TushareWorkflowStartRequest,
+) -> TushareWorkflowStartResponse:
+    """启动智能选股一键导入工作流"""
+    svc = TushareSmartImportWorkflowService()
+    try:
+        result = await svc.start_workflow(
+            mode=body.mode,
+            date_range=_workflow_date_range(body),
+            options=_workflow_options(body),
+        )
+    except ValueError as exc:
+        detail: str | dict = str(exc)
+        try:
+            detail = json.loads(str(exc))
+        except json.JSONDecodeError:
+            pass
+        raise HTTPException(status_code=400, detail=detail) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("启动智能选股一键导入工作流失败")
+        raise HTTPException(status_code=500, detail=f"启动工作流失败：{exc}") from exc
+
+    return TushareWorkflowStartResponse(**result)
+
+
+@router.get("/workflows/status/{workflow_task_id}")
+async def get_workflow_status(workflow_task_id: str) -> dict:
+    """查询智能选股一键导入工作流状态"""
+    svc = TushareSmartImportWorkflowService()
+    return await svc.get_status(workflow_task_id)
+
+
+@router.post("/workflows/stop/{workflow_task_id}")
+async def stop_workflow(workflow_task_id: str) -> TushareWorkflowStopResponse:
+    """停止智能选股一键导入工作流"""
+    svc = TushareSmartImportWorkflowService()
+    result = await svc.stop_workflow(workflow_task_id)
+    return TushareWorkflowStopResponse(message=result["message"])
+
+
+@router.post("/workflows/pause/{workflow_task_id}")
+async def pause_workflow(workflow_task_id: str) -> TushareWorkflowStopResponse:
+    """暂停智能选股一键导入工作流"""
+    svc = TushareSmartImportWorkflowService()
+    result = await svc.pause_workflow(workflow_task_id)
+    return TushareWorkflowStopResponse(message=result["message"])
+
+
+@router.get("/workflows/running")
+async def get_running_workflow() -> dict | None:
+    """获取当前运行中的智能选股一键导入工作流"""
+    svc = TushareSmartImportWorkflowService()
+    return await svc.get_running_workflow()
+
+
+@router.post("/workflows/resume/{workflow_task_id}")
+async def resume_workflow(workflow_task_id: str) -> dict:
+    """继续执行失败或停止的智能选股一键导入工作流"""
+    svc = TushareSmartImportWorkflowService()
+    try:
+        return await svc.resume_workflow(workflow_task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="工作流不存在或状态已过期") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/import")

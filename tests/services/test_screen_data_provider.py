@@ -80,6 +80,22 @@ def _make_bar(
 class TestBuildFactorDict:
     """测试 _build_factor_dict 静态方法的因子字典转换正确性。"""
 
+    def test_filter_valid_kline_bars_drops_incomplete_ohlcv(self):
+        """OHLCV 关键字段为空的 K 线不应进入指标计算。"""
+        valid_bar = _make_bar(day_offset=0)
+        invalid_close = _make_bar(day_offset=1)
+        invalid_close.close = None
+        invalid_volume = _make_bar(day_offset=2)
+        invalid_volume.volume = None
+
+        result = ScreenDataProvider._filter_valid_kline_bars([
+            valid_bar,
+            invalid_close,
+            invalid_volume,
+        ])
+
+        assert result == [valid_bar]
+
     def test_latest_quote_fields(self):
         """最新行情字段应取自最后一条 bar。"""
         stock = _make_stock()
@@ -230,6 +246,35 @@ class TestLoadScreenData:
         assert "000001.SZ" in result
         assert result["000001.SZ"]["close"] == bars[-1].close
         assert result["000001.SZ"]["raw_close"] == bars[-1].close
+
+    @pytest.mark.asyncio
+    async def test_stock_with_incomplete_kline_filtered(self):
+        """K 线序列包含空值时应过滤坏行并保留可计算数据。"""
+        stock = _make_stock(symbol="000001.SZ")
+        bad_bar = _make_bar(symbol="000001.SZ", day_offset=0)
+        bad_bar.close = None
+        good_bar = _make_bar(symbol="000001.SZ", day_offset=1, close=Decimal("16.00"))
+
+        provider = ScreenDataProvider(
+            pg_session=MagicMock(), ts_session=MagicMock()
+        )
+        provider._load_valid_stocks = AsyncMock(return_value=[stock])
+
+        with patch(
+            "app.services.screener.screen_data_provider.KlineRepository"
+        ) as MockRepo, patch(
+            "app.services.screener.screen_data_provider.AdjFactorRepository"
+        ) as MockAdjRepo:
+            mock_repo = MockRepo.return_value
+            mock_repo.query = AsyncMock(return_value=[bad_bar, good_bar])
+            mock_adj_repo = MockAdjRepo.return_value
+            mock_adj_repo.query_batch = AsyncMock(return_value={})
+
+            result = await provider.load_screen_data()
+
+        assert "000001.SZ" in result
+        assert result["000001.SZ"]["closes"] == [Decimal("16.00")]
+        assert result["000001.SZ"]["raw_close"] == Decimal("16.00")
 
     @pytest.mark.asyncio
     async def test_failed_stock_skipped_with_warning(self):

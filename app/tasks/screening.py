@@ -27,10 +27,14 @@ from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from app.core.celery_app import celery_app
 from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.core.redis_client import get_redis_client
-from app.core.schemas import StrategyConfig
+from app.core.schemas import ScreenType, StrategyConfig
 from app.models.strategy import StrategyTemplate
 from app.services.screener.screen_data_provider import ScreenDataProvider
 from app.services.screener.screen_executor import ScreenExecutor
+from app.services.screener.strategy_engine import (
+    summarize_factor_condition_stats,
+    summarize_factor_failures,
+)
 from app.tasks.base import ScreeningTask
 
 logger = logging.getLogger(__name__)
@@ -44,6 +48,8 @@ _RESULT_CACHE_PREFIX = "screen:results:"
 _LAST_RUN_KEY = "screen:eod:last_run"
 _RESULT_CACHE_TTL = 86400  # 24 小时
 _LAST_RUN_TTL = 86400  # 24 小时
+_MANUAL_TASK_PREFIX = "screen:task:"
+_MANUAL_TASK_TTL = 86400  # 24 小时
 
 # 增量计算因子缓存键前缀与 TTL（需求 9）
 FACTOR_CACHE_PREFIX = "screen:factor_cache:"
@@ -72,6 +78,23 @@ _CACHED_FACTORS = {
 
 # 实时选股单轮执行耗时告警阈值（秒）
 _REALTIME_SLOW_THRESHOLD = 8.0
+
+# 数据源代码 → API 字段名映射（与 screen API 响应保持一致）
+_SOURCE_TO_API_KEY = {"DC": "eastmoney", "TI": "tonghuashun", "TDX": "tongdaxin"}
+
+# 信号分类 → 前端展示维度
+_SIGNAL_DIMENSION_MAP: dict[str, str] = {
+    "MA_TREND": "技术面",
+    "MACD": "技术面",
+    "BOLL": "技术面",
+    "RSI": "技术面",
+    "DMA": "技术面",
+    "BREAKOUT": "技术面",
+    "MA_SUPPORT": "技术面",
+    "CAPITAL_INFLOW": "资金面",
+    "LARGE_ORDER": "资金面",
+    "SECTOR_STRONG": "板块面",
+}
 
 
 def _is_trading_hours(now: datetime | None = None) -> bool:
@@ -394,6 +417,212 @@ async def _cache_screen_results(
         logger.warning("写入 Redis 缓存失败，选股结果未缓存", exc_info=True)
     finally:
         await redis.aclose()
+
+
+async def _set_manual_task_state(task_id: str, payload: dict[str, Any]) -> None:
+    """写入手动选股任务状态。"""
+    redis = get_redis_client()
+    try:
+        await redis.set(
+            f"{_MANUAL_TASK_PREFIX}{task_id}",
+            json.dumps(payload, ensure_ascii=False),
+            ex=_MANUAL_TASK_TTL,
+        )
+    finally:
+        await redis.aclose()
+
+
+async def _cache_manual_screen_response(strategy_id: str, response: dict[str, Any]) -> None:
+    """缓存前端结果页使用的完整选股响应。"""
+    redis = get_redis_client()
+    try:
+        payload = json.dumps(response, ensure_ascii=False)
+        await redis.set(f"{_RESULT_CACHE_PREFIX}{strategy_id}", payload, ex=_RESULT_CACHE_TTL)
+        await redis.set(f"{_RESULT_CACHE_PREFIX}latest", payload, ex=_RESULT_CACHE_TTL)
+    finally:
+        await redis.aclose()
+
+
+def _build_screen_response(
+    strategy_id: str,
+    screen_type: ScreenType,
+    result,
+    stocks_data: dict[str, dict],
+) -> dict[str, Any]:
+    """构建与 /screen/run 旧同步接口兼容的完整响应。"""
+    screen_time_str = result.screen_time.isoformat()
+    factor_stats = [
+        stat.to_dict() if hasattr(stat, "to_dict") else dict(stat)
+        for stat in getattr(result, "factor_stats", [])
+    ]
+    return {
+        "strategy_id": strategy_id,
+        "screen_type": screen_type.value,
+        "screen_time": screen_time_str,
+        "items": [
+            {
+                "symbol": item.symbol,
+                "name": stocks_data.get(item.symbol, {}).get("name", item.symbol),
+                "ref_buy_price": float(item.ref_buy_price),
+                "trend_score": item.trend_score,
+                "risk_level": item.risk_level.value,
+                "signals": [
+                    {
+                        "category": s.category.value,
+                        "label": s.label,
+                        "is_fake_breakout": s.is_fake_breakout,
+                        "strength": s.strength.value,
+                        "freshness": s.freshness.value,
+                        "description": s.description,
+                        "dimension": _SIGNAL_DIMENSION_MAP.get(s.category.value, "其他"),
+                    }
+                    for s in item.signals
+                ],
+                "has_fake_breakout": item.has_fake_breakout,
+                "sector_classifications": {
+                    _SOURCE_TO_API_KEY[src]: names
+                    for src, names in stocks_data.get(item.symbol, {})
+                        .get("sector_classifications", {"DC": [], "TI": [], "TDX": []})
+                        .items()
+                    if src in _SOURCE_TO_API_KEY
+                },
+                "screen_time": screen_time_str,
+            }
+            for item in result.items
+        ],
+        "is_complete": result.is_complete,
+        "factor_stats": factor_stats,
+        "group_stats": getattr(result, "group_stats", []),
+    }
+
+
+@celery_app.task(
+    base=ScreeningTask,
+    name="app.tasks.screening.run_manual_screening",
+    bind=True,
+    queue="screening",
+    soft_time_limit=1800,
+    time_limit=3600,
+    autoretry_for=(),
+    max_retries=0,
+)
+def run_manual_screening(
+    self,
+    task_id: str,
+    strategy_id: str,
+    config_dict: dict,
+    enabled_modules: list[str] | None,
+    screen_type: str,
+) -> dict:
+    """手动触发的异步选股任务。"""
+    logger.info("开始手动选股任务 task_id=%s strategy_id=%s", task_id, strategy_id)
+    start_time = time_mod.monotonic()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(_set_manual_task_state(task_id, {
+            "task_id": task_id,
+            "status": "running",
+            "message": "正在加载市场数据",
+            "strategy_id": strategy_id,
+            "started_at": datetime.now().isoformat(),
+        }))
+
+        strategy_config = StrategyConfig.from_dict(config_dict)
+        raw_config = strategy_config.to_dict()
+        stocks_data = loop.run_until_complete(
+            _load_market_data_async(strategy_config=raw_config)
+        )
+
+        loop.run_until_complete(_set_manual_task_state(task_id, {
+            "task_id": task_id,
+            "status": "running",
+            "message": "正在执行策略筛选",
+            "strategy_id": strategy_id,
+            "total_screened": len(stocks_data),
+        }))
+
+        executor = ScreenExecutor(
+            strategy_config=strategy_config,
+            strategy_id=strategy_id,
+            enabled_modules=enabled_modules,
+            raw_config=raw_config,
+        )
+        screen_type_enum = ScreenType(screen_type)
+        if screen_type_enum == ScreenType.EOD:
+            result = executor.run_eod_screen(stocks_data)
+        else:
+            result = executor.run_realtime_screen(stocks_data)
+
+        if getattr(result, "group_stats", None):
+            logger.info(
+                "手动选股分组统计 task_id=%s strategy_id=%s group_stats=%s 入选=%d",
+                task_id,
+                strategy_id,
+                json.dumps(result.group_stats, ensure_ascii=False),
+                len(result.items),
+            )
+
+        if len(result.items) == 0 and stocks_data:
+            factor_summary = summarize_factor_failures(strategy_config, stocks_data)
+            logger.info(
+                "手动选股 0 入选因子统计 task_id=%s summary=%s",
+                task_id,
+                json.dumps(factor_summary, ensure_ascii=False),
+            )
+        factor_stats = [
+            stat.to_dict()
+            for stat in summarize_factor_condition_stats(strategy_config, stocks_data)
+        ]
+
+        response = _build_screen_response(
+            strategy_id=strategy_id,
+            screen_type=screen_type_enum,
+            result=result,
+            stocks_data=stocks_data,
+        )
+        loop.run_until_complete(_cache_manual_screen_response(strategy_id, response))
+
+        elapsed = time_mod.monotonic() - start_time
+        final_state = {
+            "task_id": task_id,
+            "status": "completed",
+            "message": "选股完成",
+            "strategy_id": strategy_id,
+            "screen_type": screen_type_enum.value,
+            "total_screened": len(stocks_data),
+            "passed": len(result.items),
+            "screen_time": response["screen_time"],
+            "factor_stats": response.get("factor_stats", factor_stats),
+            "elapsed_seconds": round(elapsed, 3),
+            "result_cache_key": f"{_RESULT_CACHE_PREFIX}{strategy_id}",
+            "completed_at": datetime.now().isoformat(),
+        }
+        loop.run_until_complete(_set_manual_task_state(task_id, final_state))
+        logger.info(
+            "手动选股任务完成 task_id=%s 筛选=%d 入选=%d 耗时=%.3fs",
+            task_id, len(stocks_data), len(result.items), elapsed,
+        )
+        return final_state
+
+    except Exception as exc:
+        elapsed = time_mod.monotonic() - start_time
+        error_state = {
+            "task_id": task_id,
+            "status": "failed",
+            "message": str(exc)[:500],
+            "strategy_id": strategy_id,
+            "elapsed_seconds": round(elapsed, 3),
+            "failed_at": datetime.now().isoformat(),
+        }
+        try:
+            loop.run_until_complete(_set_manual_task_state(task_id, error_state))
+        finally:
+            logger.error("手动选股任务失败 task_id=%s: %s", task_id, exc, exc_info=True)
+        return error_state
+
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,25 @@ class FactorCategory(str, Enum):
 
 
 @dataclass(frozen=True)
+class FactorDataSourceOption:
+    """因子可选数据源选项。"""
+    value: str
+    label: str
+    description: str = ""
+    recommended: bool = False
+    legacy: bool = False
+
+
+@dataclass(frozen=True)
+class FactorDataSourceConfig:
+    """因子数据源配置声明。"""
+    kind: str
+    config_path: str
+    scope: str = "strategy"
+    options: tuple[FactorDataSourceOption, ...] = ()
+
+
+@dataclass(frozen=True)
 class FactorMeta:
     """因子元数据（不可变）"""
     factor_name: str                                    # 因子标识符，如 "ma_trend"
@@ -74,6 +93,44 @@ class FactorMeta:
     description: str = ""                               # 说明文本
     examples: list[dict] = field(default_factory=list)  # 配置示例
     default_range: tuple[float, float] | None = None    # range 类型默认区间
+    data_source_config: FactorDataSourceConfig | None = None  # 可选数据源配置
+
+
+MONEY_FLOW_DATA_SOURCE_CONFIG = FactorDataSourceConfig(
+    kind="money_flow",
+    config_path="volume_price.money_flow_source",
+    options=(
+        FactorDataSourceOption(
+            value="moneyflow_dc",
+            label="东方财富资金流",
+            description="覆盖较完整，推荐默认使用",
+            recommended=True,
+        ),
+        FactorDataSourceOption(
+            value="moneyflow_ths",
+            label="同花顺资金流",
+            description="覆盖较完整，可作为备选资金流源",
+        ),
+        FactorDataSourceOption(
+            value="money_flow",
+            label="旧资金流表",
+            description="历史旧表，当前覆盖不足",
+            legacy=True,
+        ),
+    ),
+)
+
+SECTOR_DATA_SOURCE_CONFIG = FactorDataSourceConfig(
+    kind="sector",
+    config_path="sector_config.sector_data_source",
+    options=(
+        FactorDataSourceOption(value="DC", label="东方财富 DC"),
+        FactorDataSourceOption(value="THS", label="同花顺 THS"),
+        FactorDataSourceOption(value="TDX", label="通达信 TDX"),
+        FactorDataSourceOption(value="TI", label="申万行业 TI"),
+        FactorDataSourceOption(value="CI", label="中信行业 CI"),
+    ),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +365,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 80, "说明": "筛选主力资金净流入排名前 20% 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "large_order": FactorMeta(
         factor_name="large_order",
@@ -322,6 +380,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 30, "说明": "筛选大单成交占比 ≥ 30% 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "volume_price": FactorMeta(
         factor_name="volume_price",
@@ -350,6 +409,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 80, "说明": "筛选超大单净流入排名前 20% 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "large_net_inflow": FactorMeta(
         factor_name="large_net_inflow",
@@ -363,6 +423,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 75, "说明": "筛选大单净流入排名前 25% 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "small_net_outflow": FactorMeta(
         factor_name="small_net_outflow",
@@ -374,6 +435,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"说明": "筛选小单净流出的个股，表示散户卖出、主力吸筹"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "money_flow_strength": FactorMeta(
         factor_name="money_flow_strength",
@@ -388,6 +450,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 70, "说明": "筛选资金流强度综合评分 ≥ 70 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
     "net_inflow_rate": FactorMeta(
         factor_name="net_inflow_rate",
@@ -400,6 +463,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
         examples=[
             {"operator": ">=", "threshold": 5, "说明": "筛选净流入占比 ≥ 5% 的个股"},
         ],
+        data_source_config=MONEY_FLOW_DATA_SOURCE_CONFIG,
     ),
 
     # ── 基本面（6 个） ──
@@ -501,6 +565,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
                 "板块类型": "INDUSTRY/CONCEPT/REGION/STYLE 可选",
             },
         ],
+        data_source_config=SECTOR_DATA_SOURCE_CONFIG,
     ),
     "sector_trend": FactorMeta(
         factor_name="sector_trend",
@@ -516,6 +581,7 @@ FACTOR_REGISTRY: dict[str, FactorMeta] = {
                 "板块类型": "INDUSTRY/CONCEPT/REGION/STYLE 可选",
             },
         ],
+        data_source_config=SECTOR_DATA_SOURCE_CONFIG,
     ),
 
     # ── 指数专题因子（需求 17.1，index_dailybasic/idx_factor_pro，4 个） ──

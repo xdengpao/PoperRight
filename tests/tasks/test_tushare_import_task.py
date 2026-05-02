@@ -138,8 +138,8 @@ class TestApplyFieldMappings:
 class TestConvertCodes:
     """代码格式转换函数测试"""
 
-    def test_stock_symbol_removes_suffix(self):
-        """STOCK_SYMBOL 模式应去除 ts_code 后缀，生成 symbol 字段"""
+    def test_stock_symbol_uses_standard_symbol(self):
+        """STOCK_SYMBOL 模式应生成标准 symbol 字段"""
         entry = _make_entry(code_format=CodeFormat.STOCK_SYMBOL)
         rows = [
             {"ts_code": "600000.SH", "close": 10.5},
@@ -149,9 +149,9 @@ class TestConvertCodes:
 
         result = _convert_codes(rows, entry)
 
-        assert result[0]["symbol"] == "600000"
-        assert result[1]["symbol"] == "000001"
-        assert result[2]["symbol"] == "430047"
+        assert result[0]["symbol"] == "600000.SH"
+        assert result[1]["symbol"] == "000001.SZ"
+        assert result[2]["symbol"] == "430047.BJ"
 
     def test_index_code_preserves_ts_code(self):
         """INDEX_CODE 模式应保留 ts_code 原样，不添加 symbol"""
@@ -180,13 +180,13 @@ class TestConvertCodes:
         assert result == rows
 
     def test_stock_symbol_with_pure_digits(self):
-        """STOCK_SYMBOL 模式处理纯数字代码（无点号）时应直接作为 symbol"""
+        """STOCK_SYMBOL 模式处理纯数字代码时应补全交易所后缀"""
         entry = _make_entry(code_format=CodeFormat.STOCK_SYMBOL)
         rows = [{"ts_code": "600000", "close": 10.5}]
 
         result = _convert_codes(rows, entry)
 
-        assert result[0]["symbol"] == "600000"
+        assert result[0]["symbol"] == "600000.SH"
 
     def test_stock_symbol_empty_ts_code(self):
         """STOCK_SYMBOL 模式处理空 ts_code 时不应崩溃"""
@@ -372,13 +372,13 @@ class TestErrorHandling:
         )
         entry = _make_entry()
 
-        with patch("time.sleep") as mock_sleep:
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
             result = await _call_api_with_retry(adapter, "daily", {}, entry)
 
         assert result == {"fields": ["ts_code"], "items": [["600000.SH"]]}
         assert adapter._call_api.call_count == 2
         # 应等待 60 秒
-        mock_sleep.assert_called_with(60)
+        mock_sleep.assert_awaited_with(60)
 
     @pytest.mark.asyncio
     async def test_successful_api_call(self):

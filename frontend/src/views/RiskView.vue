@@ -528,6 +528,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { apiClient } from '@/api'
 import VChart from 'vue-echarts'
+import { dedupeKlineByTradeDate, getKlineTradeDate } from '@/components/minuteKlineUtils'
 import { use } from 'echarts/core'
 import { CandlestickChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
@@ -677,6 +678,7 @@ function indexRiskLabel(level: string): string {
 /** 指数 K 线数据条目 */
 interface IndexKlineItem {
   time: string
+  trade_date?: string
   open: number
   high: number
   low: number
@@ -698,7 +700,7 @@ async function fetchIndexKline(symbol: string) {
   klineLoading.value[symbol] = true
   try {
     const res = await apiClient.get<IndexKlineItem[]>('/risk/index-kline', { params: { symbol } })
-    klineData.value[symbol] = res.data
+    klineData.value[symbol] = dedupeKlineByTradeDate(res.data)
   } catch {
     klineData.value[symbol] = []
   } finally {
@@ -716,7 +718,7 @@ function buildKlineOption(symbol: string) {
   if (!data.length) return {}
 
   // 日期标签
-  const dates = data.map(d => d.time.slice(0, 10))
+  const dates = data.map(d => getKlineTradeDate(d))
   // OHLC 数据：[open, close, low, high]（ECharts candlestick 格式）
   const ohlc = data.map(d => [d.open, d.close, d.low, d.high])
   // MA20 数据
@@ -772,7 +774,7 @@ function buildKlineOption(symbol: string) {
         const item = data[idx]
         if (!item) return ''
         return [
-          `<b>${item.time.slice(0, 10)}</b>`,
+          `<b>${getKlineTradeDate(item)}</b>`,
           `开: ${item.open.toFixed(2)}`,
           `高: ${item.high.toFixed(2)}`,
           `低: ${item.low.toFixed(2)}`,

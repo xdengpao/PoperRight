@@ -57,6 +57,7 @@ interface VolumePriceConfig {
   large_order_ratio: number
   min_daily_amount: number
   sector_rank_top: number
+  money_flow_source: 'money_flow' | 'moneyflow_ths' | 'moneyflow_dc'
 }
 
 interface FullStrategyConfig {
@@ -175,8 +176,9 @@ function restoreFromConfig(cfg: FullStrategyConfig): {
         large_order_ratio: vp.large_order_ratio ?? 30,
         min_daily_amount: vp.min_daily_amount ?? 5000,
         sector_rank_top: vp.sector_rank_top ?? 30,
+        money_flow_source: vp.money_flow_source ?? 'moneyflow_dc',
       }
-    : { turnover_rate_min: 3, turnover_rate_max: 15, main_flow_threshold: 1000, main_flow_days: 2, large_order_ratio: 30, min_daily_amount: 5000, sector_rank_top: 30 }
+    : { turnover_rate_min: 3, turnover_rate_max: 15, main_flow_threshold: 1000, main_flow_days: 2, large_order_ratio: 30, min_daily_amount: 5000, sector_rank_top: 30, money_flow_source: 'moneyflow_dc' }
 
   return {
     logic: cfg.logic ?? 'AND',
@@ -259,6 +261,7 @@ const volumePriceArb: fc.Arbitrary<VolumePriceConfig> = fc.record({
   large_order_ratio: fc.double({ min: 0, max: 100, noNaN: true, noDefaultInfinity: true }),
   min_daily_amount: fc.double({ min: 0, max: 1000000, noNaN: true, noDefaultInfinity: true }),
   sector_rank_top: fc.integer({ min: 1, max: 100 }),
+  money_flow_source: fc.constantFrom('money_flow', 'moneyflow_ths', 'moneyflow_dc'),
 })
 
 // ---------------------------------------------------------------------------
@@ -331,6 +334,7 @@ describe('属性 46：策略配置回显 round-trip 正确性', () => {
           expect(restored.volumePriceConfig.large_order_ratio).toBeCloseTo(volumePrice.large_order_ratio, 10)
           expect(restored.volumePriceConfig.min_daily_amount).toBeCloseTo(volumePrice.min_daily_amount, 10)
           expect(restored.volumePriceConfig.sector_rank_top).toBe(volumePrice.sector_rank_top)
+          expect(restored.volumePriceConfig.money_flow_source).toBe(volumePrice.money_flow_source)
 
           // ── Verify factors round-trip (weights are stored as 0-1, restored as 0-100) ──
           for (let i = 0; i < factors.length; i++) {

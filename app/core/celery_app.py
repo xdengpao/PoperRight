@@ -20,6 +20,7 @@ celery_app = Celery(
         "app.tasks.sector_sync",
         "app.tasks.risk_cleanup",
         "app.tasks.tushare_import",
+        "app.tasks.tushare_workflow",
         "app.tasks.operations",
     ],
 )
@@ -38,6 +39,7 @@ celery_app.conf.update(
         "app.tasks.data_sync.*": {"queue": "data_sync"},
         "app.tasks.sector_sync.*": {"queue": "data_sync"},
         "app.tasks.tushare_import.*": {"queue": "data_sync"},
+        "app.tasks.tushare_workflow.*": {"queue": "data_sync"},
         "app.tasks.screening.*": {"queue": "screening"},
         "app.tasks.backtest.*": {"queue": "backtest"},
         "app.tasks.review.*": {"queue": "review"},
@@ -61,7 +63,7 @@ celery_app.conf.update(
 
     # Redis broker 可见性超时（秒）
     # 必须大于最长任务的执行时间，否则 Redis 会重新投递任务导致重复执行
-    broker_transport_options={"visibility_timeout": 14400},  # 4 小时
+    broker_transport_options={"visibility_timeout": 36000},  # 10 小时
 
     # 结果过期时间（24小时）
     result_expires=86400,

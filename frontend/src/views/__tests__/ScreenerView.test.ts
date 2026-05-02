@@ -98,6 +98,16 @@ const MOCK_FACTOR_REGISTRY: Record<string, FactorMeta[]> = {
       description: '主力资金净流入的全市场百分位排名',
       examples: [],
       default_range: null,
+      data_source_config: {
+        kind: 'money_flow',
+        config_path: 'volume_price.money_flow_source',
+        scope: 'strategy',
+        options: [
+          { value: 'moneyflow_dc', label: '东方财富资金流', description: '覆盖较完整，推荐默认使用', recommended: true, legacy: false },
+          { value: 'moneyflow_ths', label: '同花顺资金流', description: '覆盖较完整，可作为备选资金流源', recommended: false, legacy: false },
+          { value: 'money_flow', label: '旧资金流表', description: '历史旧表，当前覆盖不足', recommended: false, legacy: true },
+        ],
+      },
     },
   ],
   fundamental: [
@@ -128,6 +138,18 @@ const MOCK_FACTOR_REGISTRY: Record<string, FactorMeta[]> = {
       description: '股票所属板块在全市场板块涨幅排名中的位次',
       examples: [],
       default_range: null,
+      data_source_config: {
+        kind: 'sector',
+        config_path: 'sector_config.sector_data_source',
+        scope: 'strategy',
+        options: [
+          { value: 'DC', label: '东方财富 DC', description: '', recommended: false, legacy: false },
+          { value: 'THS', label: '同花顺 THS', description: '', recommended: false, legacy: false },
+          { value: 'TDX', label: '通达信 TDX', description: '', recommended: false, legacy: false },
+          { value: 'TI', label: '申万行业 TI', description: '', recommended: false, legacy: false },
+          { value: 'CI', label: '中信行业 CI', description: '', recommended: false, legacy: false },
+        ],
+      },
     },
     {
       factor_name: 'sector_trend',
@@ -141,6 +163,31 @@ const MOCK_FACTOR_REGISTRY: Record<string, FactorMeta[]> = {
       description: '股票所属板块是否处于多头趋势',
       examples: [],
       default_range: null,
+      data_source_config: {
+        kind: 'sector',
+        config_path: 'sector_config.sector_data_source',
+        scope: 'strategy',
+        options: [
+          { value: 'DC', label: '东方财富 DC', description: '', recommended: false, legacy: false },
+          { value: 'THS', label: '同花顺 THS', description: '', recommended: false, legacy: false },
+          { value: 'TDX', label: '通达信 TDX', description: '', recommended: false, legacy: false },
+          { value: 'TI', label: '申万行业 TI', description: '', recommended: false, legacy: false },
+          { value: 'CI', label: '中信行业 CI', description: '', recommended: false, legacy: false },
+        ],
+      },
+    },
+    {
+      factor_name: 'index_pe',
+      label: '指数市盈率',
+      category: 'sector',
+      threshold_type: 'range',
+      default_threshold: null,
+      value_min: null,
+      value_max: null,
+      unit: '',
+      description: '所属指数的市盈率',
+      examples: [],
+      default_range: [10, 25],
     },
   ],
 }
@@ -888,13 +935,214 @@ describe('ScreenerView - sector selector rendering', () => {
     const dsOptions = dataSourceSelect.findAll('option')
     expect(dsOptions.length).toBe(5)
 
-    // Sector type selector should no longer exist (removed per 需求 22.5)
+    // Sector type selector should be visible for sector source factors.
     const sectorTypeSelect = wrapper.find('[aria-label="板块类型"]')
-    expect(sectorTypeSelect.exists()).toBe(false)
+    expect(sectorTypeSelect.exists()).toBe(true)
 
     // Period input
     const periodInput = wrapper.find('[aria-label="涨幅周期"]')
     expect(periodInput.exists()).toBe(true)
+
+    wrapper.unmount()
+  })
+})
+
+describe('ScreenerView - factor data source selector', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+    setupDefaultMocks()
+  })
+
+  it('renders money-flow source selector and saves selected source', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/screen/factor-registry') return Promise.resolve({ data: MOCK_FACTOR_REGISTRY })
+      if (url === '/screen/strategy-examples') return Promise.resolve({ data: MOCK_STRATEGY_EXAMPLES })
+      if (url === '/strategies') {
+        return Promise.resolve({
+          data: [{
+            id: 'test-money-flow',
+            name: 'Money Flow Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'money_flow', operator: '>=', threshold: 75, params: {} },
+              ],
+              weights: { money_flow: 1.0 },
+              volume_price: { money_flow_source: 'moneyflow_dc' },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          }],
+        })
+      }
+      if (typeof url === 'string' && url.startsWith('/strategies/')) {
+        return Promise.resolve({
+          data: {
+            id: 'test-money-flow',
+            name: 'Money Flow Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'money_flow', operator: '>=', threshold: 75, params: {} },
+              ],
+              weights: { money_flow: 1.0 },
+              volume_price: { money_flow_source: 'moneyflow_dc' },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          },
+        })
+      }
+      return Promise.resolve({ data: [] })
+    })
+    mockPost.mockResolvedValue({ data: {} })
+    mockPut.mockResolvedValue({ data: {} })
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    const sourceSelect = wrapper.find('[aria-label="资金流数据源"]')
+    expect(sourceSelect.exists()).toBe(true)
+    expect(sourceSelect.findAll('option').map((o) => o.element.value)).toEqual([
+      'moneyflow_dc',
+      'moneyflow_ths',
+      'money_flow',
+    ])
+
+    await sourceSelect.setValue('moneyflow_ths')
+    await wrapper.find('.btn-save').trigger('click')
+    await flushPromises()
+
+    expect(mockPut).toHaveBeenCalled()
+    const payload = mockPut.mock.calls[0][1] as { config: { volume_price: { money_flow_source: string } } }
+    expect(payload.config.volume_price.money_flow_source).toBe('moneyflow_ths')
+
+    wrapper.unmount()
+  })
+
+  it('does not render sector source selector for index topic factors', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/screen/factor-registry') return Promise.resolve({ data: MOCK_FACTOR_REGISTRY })
+      if (url === '/screen/strategy-examples') return Promise.resolve({ data: MOCK_STRATEGY_EXAMPLES })
+      if (url === '/strategies') {
+        return Promise.resolve({
+          data: [{
+            id: 'test-index',
+            name: 'Index Factor Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'index_pe', operator: 'BETWEEN', threshold: null, params: { threshold_low: 10, threshold_high: 25 } },
+              ],
+              weights: { index_pe: 1.0 },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          }],
+        })
+      }
+      if (typeof url === 'string' && url.startsWith('/strategies/')) {
+        return Promise.resolve({
+          data: {
+            id: 'test-index',
+            name: 'Index Factor Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'index_pe', operator: 'BETWEEN', threshold: null, params: { threshold_low: 10, threshold_high: 25 } },
+              ],
+              weights: { index_pe: 1.0 },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          },
+        })
+      }
+      return Promise.resolve({ data: [] })
+    })
+    mockPost.mockResolvedValue({ data: {} })
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.sector-selectors').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="数据来源"]').exists()).toBe(false)
+    expect(wrapper.find('[aria-label="板块类型"]').exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+})
+
+describe('ScreenerView - factor role selector', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+  })
+
+  it('renders role selector for factor rows', async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/screen/factor-registry') return Promise.resolve({ data: MOCK_FACTOR_REGISTRY })
+      if (url === '/screen/strategy-examples') return Promise.resolve({ data: MOCK_STRATEGY_EXAMPLES })
+      if (url === '/strategies') {
+        return Promise.resolve({
+          data: [{
+            id: 'role-test',
+            name: 'Role Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'ma_trend', operator: '>=', threshold: 75, params: {}, role: 'primary', group_id: 'primary_core' },
+              ],
+              weights: { ma_trend: 1 },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          }],
+        })
+      }
+      if (typeof url === 'string' && url.startsWith('/strategies/')) {
+        return Promise.resolve({
+          data: {
+            id: 'role-test',
+            name: 'Role Test',
+            config: {
+              logic: 'AND',
+              factors: [
+                { factor_name: 'ma_trend', operator: '>=', threshold: 75, params: {}, role: 'primary', group_id: 'primary_core' },
+              ],
+              weights: { ma_trend: 1 },
+            },
+            is_active: true,
+            created_at: '2024-01-01',
+            enabled_modules: ['factor_editor'],
+          },
+        })
+      }
+      return Promise.resolve({ data: [] })
+    })
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    const roleSelect = wrapper.find('.factor-role-select')
+    expect(roleSelect.exists()).toBe(true)
+    expect(roleSelect.text()).toContain('主条件')
+    expect(roleSelect.text()).toContain('确认')
 
     wrapper.unmount()
   })
@@ -1224,10 +1472,10 @@ describe('ScreenerView - 板块数据源覆盖率显示', () => {
     expect(dcOption!.text()).toContain('板块')
     expect(dcOption!.text()).toContain('股票')
 
-    // TI 选项应包含覆盖率信息和警告标记
+    // TI 选项应包含总板块、股票数和警告标记
     const tiOption = options.find(o => o.element.value === 'TI')
     expect(tiOption).toBeDefined()
-    expect(tiOption!.text()).toContain('90')
+    expect(tiOption!.text()).toContain('1724')
     expect(tiOption!.text()).toContain('5755')
     expect(tiOption!.text()).toContain('⚠️')
 
@@ -1254,7 +1502,8 @@ describe('ScreenerView - 板块数据源覆盖率显示', () => {
     const warning = wrapper.find('.sector-coverage-warning')
     expect(warning.exists()).toBe(true)
     expect(warning.attributes('role')).toBe('alert')
-    expect(warning.text()).toContain('该数据源成分股数据不完整')
+    expect(warning.text()).toContain('仅 90/1724 个板块有成分股映射')
+    expect(warning.text()).toContain('板块涨幅排名和板块趋势因子将无法生效')
     expect(warning.text()).toContain('90')
     expect(warning.text()).toContain('1724')
 
@@ -1289,6 +1538,102 @@ describe('ScreenerView - 板块数据源覆盖率显示', () => {
     // TDX 的 coverage_ratio = 1.0 >= 0.5，不应显示警告
     const warning = wrapper.find('.sector-coverage-warning')
     expect(warning.exists()).toBe(false)
+
+    wrapper.unmount()
+  })
+})
+
+describe('ScreenerView - 因子筛选统计展示', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    mockGet.mockReset()
+    mockPost.mockReset()
+    mockPut.mockReset()
+    mockDelete.mockReset()
+  })
+
+  it('页面恢复最近一次选股统计，并在一键执行选股按钮左侧展示通过数和缺失数', async () => {
+    const strategy = {
+      id: 'strategy-1',
+      name: '右侧趋势突破综合策略',
+      config: {
+        factors: [
+          {
+            factor_name: 'money_flow',
+            operator: '>=',
+            threshold: 75,
+            params: {},
+            role: 'confirmation',
+            group_id: 'confirmation',
+          },
+        ],
+        logic: 'AND',
+        factor_groups: [
+          {
+            group_id: 'confirmation',
+            label: '确认因子',
+            role: 'confirmation',
+            logic: 'OR',
+            factor_names: ['money_flow'],
+            blocking: true,
+          },
+        ],
+        weights: { money_flow: 0.12 },
+        volume_price: { money_flow_source: 'moneyflow_dc' },
+      },
+      is_active: true,
+      created_at: '2026-05-02',
+      enabled_modules: ['factor_editor', 'volume_price'],
+    }
+    const factorStats = [
+      {
+        factor_name: 'money_flow',
+        label: '主力资金净流入',
+        role: 'confirmation',
+        group_id: 'confirmation',
+        evaluated_count: 5335,
+        passed_count: 1334,
+        failed_count: 4000,
+        missing_count: 1,
+      },
+    ]
+
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/strategies') return Promise.resolve({ data: [strategy] })
+      if (url === '/strategies/strategy-1') return Promise.resolve({ data: strategy })
+      if (url === '/screen/factor-registry') return Promise.resolve({ data: MOCK_FACTOR_REGISTRY })
+      if (url === '/screen/strategy-examples') return Promise.resolve({ data: MOCK_STRATEGY_EXAMPLES })
+      if (url === '/sector/coverage') return Promise.resolve({ data: { sources: [] } })
+      if (url === '/sector/types') return Promise.resolve({ data: [] })
+      if (url === '/screen/results') {
+        return Promise.resolve({
+          data: {
+            strategy_id: 'strategy-1',
+            items: [],
+            factor_stats: factorStats,
+          },
+        })
+      }
+      if (url === '/screen/schedule') return Promise.resolve({ data: null })
+      return Promise.resolve({ data: [] })
+    })
+    mockPost.mockResolvedValue({ data: {} })
+
+    const wrapper = mountScreenerView()
+    await flushPromises()
+    await flushPromises()
+
+    const runRow = wrapper.find('.run-row')
+    const statsStrip = runRow.find('.factor-stats-strip')
+    const runButton = runRow.find('button[aria-label="执行选股"]')
+
+    expect(statsStrip.exists()).toBe(true)
+    expect(statsStrip.text()).toContain('主力资金净流入 通过 1334 只，缺失 1 只')
+    expect(runButton.exists()).toBe(true)
+    expect(
+      statsStrip.element.compareDocumentPosition(runButton.element)
+        & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
 
     wrapper.unmount()
   })

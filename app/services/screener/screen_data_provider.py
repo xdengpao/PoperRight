@@ -15,7 +15,7 @@ import logging
 import statistics
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -77,6 +77,31 @@ DEFAULT_LOOKBACK_DAYS = 365
 # 资金流数据默认回溯交易日数
 _MONEY_FLOW_LOOKBACK_DAYS = 5
 
+_MONEY_FLOW_SOURCES = {"money_flow", "moneyflow_ths", "moneyflow_dc"}
+_ENHANCED_MONEY_FLOW_FIELDS = (
+    "super_large_net_inflow",
+    "large_net_inflow",
+    "small_net_outflow",
+    "money_flow_strength",
+    "net_inflow_rate",
+)
+
+# 不同数据源保留各自板块类型编码，选股侧按数据源适配“行业”语义。
+_INDUSTRY_SECTOR_TYPE_VALUES: dict[str, tuple[str, ...]] = {
+    "DC": ("行业板块", "INDUSTRY"),
+    "TDX": ("行业板块", "INDUSTRY"),
+    "THS": ("I", "INDUSTRY"),
+    "TI": ("L1", "L2", "L3", "INDUSTRY"),
+    "CI": ("行业板块", "INDUSTRY"),
+}
+
+_INDUSTRY_SOURCE_PRIORITY: tuple[str, ...] = ("DC", "TDX", "THS", "TI", "CI")
+
+
+def _get_industry_sector_type_values(data_source: str) -> tuple[str, ...]:
+    """返回指定数据源中表示行业板块的原始类型值。"""
+    return _INDUSTRY_SECTOR_TYPE_VALUES.get(data_source, ("INDUSTRY", "行业板块"))
+
 
 class ScreenDataProvider:
     """
@@ -125,6 +150,8 @@ class ScreenDataProvider:
         if not stocks:
             return {}
 
+        money_flow_source = self._resolve_money_flow_source()
+
         # 2. 批量查询所有股票的前复权因子
         adj_repo = AdjFactorRepository(self._ts_session)
         all_symbols = [s.symbol for s in stocks]
@@ -154,6 +181,19 @@ class ScreenDataProvider:
                 if not bars:
                     continue  # 无行情数据的股票跳过
 
+                valid_bars = self._filter_valid_kline_bars(bars)
+                if not valid_bars:
+                    logger.warning(
+                        "股票 %s K线 OHLCV 数据全部无效，跳过", stock.symbol
+                    )
+                    continue
+                if len(valid_bars) < len(bars):
+                    logger.debug(
+                        "股票 %s 过滤无效K线 %d 条，保留 %d 条",
+                        stock.symbol, len(bars) - len(valid_bars), len(valid_bars),
+                    )
+                bars = valid_bars
+
                 # 前复权处理：在指标计算前调整 OHLC 价格
                 raw_close = bars[-1].close  # 保留原始收盘价
                 factors = batch_factors.get(stock.symbol, [])
@@ -161,17 +201,18 @@ class ScreenDataProvider:
                     latest_factor = factors[-1].adj_factor  # 因子按日期升序，最后一个即最新
                     bars = adjust_kline_bars(bars, factors, latest_factor)
                 else:
-                    logger.warning(
+                    logger.debug(
                         "股票 %s 无前复权因子数据，使用原始K线", stock.symbol
                     )
 
                 factor_dict = self._build_factor_dict(stock, bars, self._strategy_config)
                 factor_dict["raw_close"] = raw_close
 
-                # 资金流因子接入（需求 1）：查询 money_flow 表数据
-                await self._enrich_money_flow_factors(
-                    factor_dict, stock.symbol, screen_date,
-                )
+                # 资金流因子接入：旧 money_flow 表仍按单股票查询；THS/DC 走批量路径。
+                if money_flow_source == "money_flow":
+                    await self._enrich_money_flow_factors(
+                        factor_dict, stock.symbol, screen_date,
+                    )
 
                 result[stock.symbol] = factor_dict
             except Exception:
@@ -193,10 +234,17 @@ class ScreenDataProvider:
             await self._enrich_margin_factors(result, screen_date)
         except Exception:
             logger.warning("_enrich_margin_factors 异常，跳过", exc_info=True)
-        try:
-            await self._enrich_enhanced_money_flow_factors(result, screen_date)
-        except Exception:
-            logger.warning("_enrich_enhanced_money_flow_factors 异常，跳过", exc_info=True)
+        if money_flow_source in {"moneyflow_ths", "moneyflow_dc"}:
+            try:
+                await self._enrich_selected_money_flow_factors(
+                    result, screen_date, money_flow_source,
+                )
+            except Exception:
+                logger.warning("_enrich_selected_money_flow_factors 异常，跳过", exc_info=True)
+        else:
+            for fd in result.values():
+                for field in _ENHANCED_MONEY_FLOW_FIELDS:
+                    fd.setdefault(field, None)
         try:
             await self._enrich_board_hit_factors(result, screen_date)
         except Exception:
@@ -334,6 +382,27 @@ class ScreenDataProvider:
     # 资金流因子接入（需求 1）
     # ------------------------------------------------------------------
 
+    def _resolve_money_flow_source(self) -> str:
+        """读取策略配置中的资金流数据源，非法或缺失时回退到 moneyflow_dc。"""
+        volume_price = self._strategy_config.get("volume_price")
+        if hasattr(volume_price, "money_flow_source"):
+            source = getattr(volume_price, "money_flow_source")
+        elif isinstance(volume_price, dict):
+            source = volume_price.get("money_flow_source")
+        else:
+            source = None
+        return str(source) if source in _MONEY_FLOW_SOURCES else "moneyflow_dc"
+
+    @staticmethod
+    def _set_money_flow_missing(factor_dict: dict[str, Any]) -> None:
+        """将资金流相关字段设为安全降级值。"""
+        factor_dict["money_flow"] = False
+        factor_dict["money_flow_value"] = None
+        factor_dict["money_flow_pctl"] = None
+        factor_dict["large_order"] = False
+        factor_dict["main_net_inflow"] = None
+        factor_dict["large_order_ratio"] = None
+
     async def _query_money_flow_data(
         self,
         symbol: str,
@@ -402,9 +471,7 @@ class ScreenDataProvider:
                     symbol,
                 )
                 factor_dict["money_flow"] = False
-                factor_dict["large_order"] = False
-                factor_dict["main_net_inflow"] = None
-                factor_dict["large_order_ratio"] = None
+                self._set_money_flow_missing(factor_dict)
                 return
 
             # 提取最近 N 日主力净流入序列（万元）
@@ -438,6 +505,7 @@ class ScreenDataProvider:
                 else None
             )
             factor_dict["main_net_inflow"] = latest_inflow
+            factor_dict["money_flow_value"] = latest_inflow
             factor_dict["large_order_ratio"] = latest_large_order_ratio if raw_ratio != 0.0 else None
 
         except Exception:
@@ -447,10 +515,7 @@ class ScreenDataProvider:
                 symbol,
                 exc_info=True,
             )
-            factor_dict["money_flow"] = False
-            factor_dict["large_order"] = False
-            factor_dict["main_net_inflow"] = None
-            factor_dict["large_order_ratio"] = None
+            self._set_money_flow_missing(factor_dict)
 
     async def _load_valid_stocks(self) -> list[StockInfo]:
         """查询全市场有效股票（排除 ST 和退市）。"""
@@ -465,6 +530,20 @@ class ScreenDataProvider:
         async with AsyncSessionPG() as session:
             res = await session.execute(stmt)
             return list(res.scalars().all())
+
+    @staticmethod
+    def _filter_valid_kline_bars(bars: list[KlineBar]) -> list[KlineBar]:
+        """过滤无法参与指标计算的 K 线。"""
+        return [
+            bar for bar in bars
+            if (
+                bar.open is not None
+                and bar.high is not None
+                and bar.low is not None
+                and bar.close is not None
+                and bar.volume is not None
+            )
+        ]
 
     @staticmethod
     def _build_factor_dict(
@@ -672,7 +751,11 @@ class ScreenDataProvider:
 
         # money_flow 和 large_order 依赖额外数据源，使用安全默认值
         stock_data["money_flow"] = False
+        stock_data["money_flow_value"] = None
+        stock_data["money_flow_pctl"] = None
         stock_data["large_order"] = False
+        stock_data["main_net_inflow"] = None
+        stock_data["large_order_ratio"] = None
 
         # PSY 心理线
         try:
@@ -809,6 +892,7 @@ class ScreenDataProvider:
         - 相同值使用平均排名（average tie-breaking）
         """
         for factor_name in factor_names:
+            source_field = "money_flow_value" if factor_name == "money_flow" else factor_name
             pctl_field = f"{factor_name}_pctl"
 
             # 收集所有 (symbol, value) 对，排除 None
@@ -816,7 +900,7 @@ class ScreenDataProvider:
             none_symbols: list[str] = []
 
             for symbol, data in stocks_data.items():
-                val = data.get(factor_name)
+                val = data.get(source_field)
                 if val is None:
                     none_symbols.append(symbol)
                 else:
@@ -881,59 +965,63 @@ class ScreenDataProvider:
             return {}
 
         try:
-            # 查询可用的数据源，优先使用 "DC"
-            data_source = "DC"
-
-            # 查询该数据源下 INDUSTRY 类型的板块代码
-            sector_codes_stmt = (
-                select(SectorInfo.sector_code)
-                .where(
-                    SectorInfo.data_source == data_source,
-                    SectorInfo.sector_type == "INDUSTRY",
-                )
+            source_stmt = select(SectorInfo.data_source).distinct()
+            source_result = await pg_session.execute(source_stmt)
+            available_sources = [row[0] for row in source_result.all()]
+            ordered_sources = [
+                source for source in _INDUSTRY_SOURCE_PRIORITY
+                if source in available_sources
+            ]
+            ordered_sources.extend(
+                source for source in available_sources
+                if source not in ordered_sources
             )
-            sector_result = await pg_session.execute(sector_codes_stmt)
-            valid_sector_codes = {row[0] for row in sector_result.all()}
 
-            if not valid_sector_codes:
-                # 尝试其他数据源
-                fallback_stmt = (
-                    select(SectorInfo.data_source)
-                    .where(SectorInfo.sector_type == "INDUSTRY")
-                    .limit(1)
+            data_source: str | None = None
+            valid_sector_codes: set[str] = set()
+            latest_date = None
+            for candidate_source in ordered_sources:
+                industry_type_values = _get_industry_sector_type_values(
+                    candidate_source,
                 )
-                fb_result = await pg_session.execute(fallback_stmt)
-                fb_row = fb_result.scalar_one_or_none()
-                if fb_row is None:
-                    logger.warning("未找到任何 INDUSTRY 类型板块信息")
-                    return {}
-                data_source = fb_row
                 sector_codes_stmt = (
                     select(SectorInfo.sector_code)
                     .where(
-                        SectorInfo.data_source == data_source,
-                        SectorInfo.sector_type == "INDUSTRY",
+                        SectorInfo.data_source == candidate_source,
+                        SectorInfo.sector_type.in_(industry_type_values),
                     )
                 )
                 sector_result = await pg_session.execute(sector_codes_stmt)
-                valid_sector_codes = {row[0] for row in sector_result.all()}
+                candidate_codes = {row[0] for row in sector_result.all()}
+                if not candidate_codes:
+                    continue
+
+                latest_date_stmt = (
+                    select(func.max(SectorConstituent.trade_date))
+                    .where(
+                        SectorConstituent.data_source == candidate_source,
+                        SectorConstituent.sector_code.in_(candidate_codes),
+                    )
+                )
+                date_result = await pg_session.execute(latest_date_stmt)
+                candidate_latest_date = date_result.scalar_one_or_none()
+                if candidate_latest_date is None:
+                    continue
+
+                data_source = candidate_source
+                valid_sector_codes = candidate_codes
+                latest_date = candidate_latest_date
+                break
+
+            if data_source is None:
+                logger.warning("未找到任何可识别为行业板块且包含成分股数据的板块信息")
+                return {}
 
             if not valid_sector_codes:
                 return {}
 
-            # 查询最新交易日
-            latest_date_stmt = (
-                select(func.max(SectorConstituent.trade_date))
-                .where(
-                    SectorConstituent.data_source == data_source,
-                    SectorConstituent.sector_code.in_(valid_sector_codes),
-                )
-            )
-            date_result = await pg_session.execute(latest_date_stmt)
-            latest_date = date_result.scalar_one_or_none()
-
             if latest_date is None:
-                logger.warning("未找到 INDUSTRY 成分股交易日数据")
+                logger.warning("未找到行业成分股交易日数据")
                 return {}
 
             # 查询成分股数据（根据数据源模式选择查询方式）
@@ -1112,8 +1200,22 @@ class ScreenDataProvider:
             if pg is None:
                 async with AsyncSessionPG() as pg:
                     rows = await self._query_stk_factor(pg, screen_date_str)
+                    actual_date_str = screen_date_str
+                    if not rows:
+                        actual_date_str = await self._resolve_latest_stk_factor_date(
+                            pg, screen_date, max_days=10,
+                        ) or screen_date_str
+                        if actual_date_str != screen_date_str:
+                            rows = await self._query_stk_factor(pg, actual_date_str)
             else:
                 rows = await self._query_stk_factor(pg, screen_date_str)
+                actual_date_str = screen_date_str
+                if not rows:
+                    actual_date_str = await self._resolve_latest_stk_factor_date(
+                        pg, screen_date, max_days=10,
+                    ) or screen_date_str
+                    if actual_date_str != screen_date_str:
+                        rows = await self._query_stk_factor(pg, actual_date_str)
 
             row_map: dict[str, StkFactor] = {_strip_market_suffix(r.ts_code): r for r in rows}
 
@@ -1137,13 +1239,44 @@ class ScreenDataProvider:
                 fd.setdefault("psy", None)
                 fd.setdefault("obv_signal", None)
                 matched += 1
-            logger.info("stk_factor 匹配 %d/%d 只股票", matched, len(stocks_data))
+            if actual_date_str != screen_date_str:
+                actual_date = datetime.strptime(actual_date_str, "%Y%m%d").date()
+                fallback_days = (screen_date - actual_date).days
+                logger.info(
+                    "stk_factor 使用最近可用日期 target=%s actual=%s fallback_days=%d matched=%d/%d",
+                    screen_date_str, actual_date_str, fallback_days, matched, len(stocks_data),
+                )
+            else:
+                logger.info("stk_factor 匹配 %d/%d 只股票", matched, len(stocks_data))
         except Exception:
             logger.warning("批量加载 stk_factor 数据失败，技术面专业因子降级为 None", exc_info=True)
             for fd in stocks_data.values():
                 for f in ("kdj_k", "kdj_d", "kdj_j", "cci", "wr",
                           "trix", "bias", "psy", "obv_signal"):
                     fd.setdefault(f, None)
+
+    async def _resolve_latest_stk_factor_date(
+        self,
+        session: AsyncSession,
+        target: date,
+        max_days: int = 10,
+    ) -> str | None:
+        """解析不晚于目标日期且在窗口内的最近 stk_factor 日期。"""
+        min_date = target - timedelta(days=max_days)
+        target_str = target.strftime("%Y%m%d")
+        min_str = min_date.strftime("%Y%m%d")
+        stmt = (
+            select(StkFactor.trade_date)
+            .where(
+                StkFactor.trade_date <= target_str,
+                StkFactor.trade_date >= min_str,
+            )
+            .group_by(StkFactor.trade_date)
+            .order_by(StkFactor.trade_date.desc())
+            .limit(1)
+        )
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
 
     async def _query_stk_factor(
         self, session: AsyncSession, trade_date_str: str,
@@ -1299,6 +1432,101 @@ class ScreenDataProvider:
     # 增强资金流因子批量加载（需求 15.2, 15.3, 15.4, 21.2）
     # ------------------------------------------------------------------
 
+    async def _enrich_selected_money_flow_factors(
+        self,
+        stocks_data: dict[str, dict],
+        screen_date: date,
+        source: Literal["moneyflow_ths", "moneyflow_dc"],
+    ) -> None:
+        """按用户选择的数据源批量加载资金流因子，不在 THS/DC 之间自动回退。"""
+        screen_date_str = screen_date.strftime("%Y%m%d")
+        pg = self._pg_session
+        if pg is None:
+            async with AsyncSessionPG() as pg:
+                rows, actual_date_str = await self._query_selected_moneyflow_rows(
+                    pg, source, screen_date, screen_date_str,
+                )
+        else:
+            rows, actual_date_str = await self._query_selected_moneyflow_rows(
+                pg, source, screen_date, screen_date_str,
+            )
+
+        row_map: dict[str, MoneyflowThs | MoneyflowDc] = {
+            _strip_market_suffix(r.ts_code): r for r in rows
+        }
+        missing_count = 0
+
+        for symbol, fd in stocks_data.items():
+            row = row_map.get(symbol)
+            if row is None:
+                missing_count += 1
+                self._set_money_flow_missing(fd)
+                for field in _ENHANCED_MONEY_FLOW_FIELDS:
+                    fd[field] = None
+                continue
+
+            elg_net = (row.buy_elg_amount or 0.0) - (row.sell_elg_amount or 0.0)
+            lg_net = (row.buy_lg_amount or 0.0) - (row.sell_lg_amount or 0.0)
+            md_net = (row.buy_md_amount or 0.0) - (row.sell_md_amount or 0.0)
+            sm_net = (row.sell_sm_amount or 0.0) - (row.buy_sm_amount or 0.0)
+            money_flow_raw = elg_net + lg_net + md_net
+
+            fd["super_large_net_inflow"] = elg_net
+            fd["large_net_inflow"] = lg_net
+            fd["small_net_outflow"] = sm_net > 0
+            fd["money_flow"] = money_flow_raw > 0
+            fd["money_flow_value"] = money_flow_raw
+            fd["main_net_inflow"] = money_flow_raw
+
+            total_flow_amount = sum(
+                abs(v or 0.0)
+                for v in (
+                    row.buy_sm_amount,
+                    row.sell_sm_amount,
+                    row.buy_md_amount,
+                    row.sell_md_amount,
+                    row.buy_lg_amount,
+                    row.sell_lg_amount,
+                    row.buy_elg_amount,
+                    row.sell_elg_amount,
+                )
+            )
+            if total_flow_amount > 0:
+                large_order_ratio = abs(elg_net + lg_net) / total_flow_amount * 100.0
+            else:
+                large_order_ratio = None
+            fd["large_order_ratio"] = large_order_ratio
+            fd["large_order"] = (
+                check_large_order_signal(large_order_ratio).signal
+                if large_order_ratio is not None
+                else False
+            )
+
+            def _map_to_score(val: float) -> float:
+                if val > 0:
+                    return min(100.0, 50.0 + val / 10000.0)
+                return max(0.0, 50.0 + val / 10000.0)
+
+            fd["money_flow_strength"] = self.compute_money_flow_strength(
+                _map_to_score(elg_net),
+                _map_to_score(lg_net),
+                _map_to_score(md_net),
+                _map_to_score(sm_net),
+            )
+            fd["net_inflow_rate"] = row.net_mf_amount if row.net_mf_amount is not None else None
+
+        if missing_count:
+            logger.info(
+                "资金流数据源 %s 日期 %s 缺失 %d/%d 只股票",
+                source, actual_date_str, missing_count, len(stocks_data),
+            )
+        if actual_date_str != screen_date_str:
+            actual_date = datetime.strptime(actual_date_str, "%Y%m%d").date()
+            logger.info(
+                "资金流数据源 %s 使用最近可用日期 target=%s actual=%s fallback_days=%d",
+                source, screen_date_str, actual_date_str, (screen_date - actual_date).days,
+            )
+
     async def _enrich_enhanced_money_flow_factors(
         self,
         stocks_data: dict[str, dict],
@@ -1397,6 +1625,52 @@ class ScreenDataProvider:
         stmt = select(MoneyflowDc).where(MoneyflowDc.trade_date == trade_date_str)
         res = await session.execute(stmt)
         return list(res.scalars().all())
+
+    async def _query_selected_moneyflow_rows(
+        self,
+        session: AsyncSession,
+        source: Literal["moneyflow_ths", "moneyflow_dc"],
+        screen_date: date,
+        screen_date_str: str,
+    ) -> tuple[list[MoneyflowThs | MoneyflowDc], str]:
+        """查询用户选择的资金流源，目标日缺失时回退到最近可用日期。"""
+        query = self._query_moneyflow_ths if source == "moneyflow_ths" else self._query_moneyflow_dc
+        rows = await query(session, screen_date_str)
+        actual_date_str = screen_date_str
+        if rows:
+            return rows, actual_date_str
+
+        actual_date_str = (
+            await self._resolve_latest_moneyflow_date(session, source, screen_date, max_days=10)
+        ) or screen_date_str
+        if actual_date_str != screen_date_str:
+            rows = await query(session, actual_date_str)
+        return rows, actual_date_str
+
+    async def _resolve_latest_moneyflow_date(
+        self,
+        session: AsyncSession,
+        source: Literal["moneyflow_ths", "moneyflow_dc"],
+        target: date,
+        max_days: int = 10,
+    ) -> str | None:
+        """解析不晚于目标日期且在窗口内的最近资金流日期。"""
+        model = MoneyflowThs if source == "moneyflow_ths" else MoneyflowDc
+        min_date = target - timedelta(days=max_days)
+        target_str = target.strftime("%Y%m%d")
+        min_str = min_date.strftime("%Y%m%d")
+        stmt = (
+            select(model.trade_date)
+            .where(
+                model.trade_date <= target_str,
+                model.trade_date >= min_str,
+            )
+            .group_by(model.trade_date)
+            .order_by(model.trade_date.desc())
+            .limit(1)
+        )
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
 
     # ------------------------------------------------------------------
     # 打板面因子批量加载（需求 16.3, 16.4, 16.5, 21.2）

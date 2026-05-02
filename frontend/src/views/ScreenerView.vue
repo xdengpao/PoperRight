@@ -92,6 +92,25 @@
             @click="config.logic = 'OR'"
           >OR（满足其一）</button>
         </div>
+        <div class="group-rule-controls">
+          <select v-model="groupRules.confirmation_logic" class="input group-rule-select" aria-label="确认因子逻辑">
+            <option value="OR">确认 OR</option>
+            <option value="AND">确认 AND</option>
+            <option value="AT_LEAST_N">至少 N 个</option>
+          </select>
+          <input
+            v-if="groupRules.confirmation_logic === 'AT_LEAST_N'"
+            v-model.number="groupRules.confirmation_min_pass_count"
+            type="number"
+            min="1"
+            class="input group-min-input"
+            aria-label="确认因子最少通过数量"
+          />
+          <label class="group-blocking-toggle">
+            <input v-model="groupRules.confirmation_blocking" type="checkbox" />
+            <span>确认拦截</span>
+          </label>
+        </div>
         <button class="btn btn-outline btn-sm" @click="showExamplesDialog = true">📋 加载示例策略</button>
       </div>
 
@@ -132,6 +151,12 @@
           <span class="threshold-type-badge" :class="getFactorThresholdType(factor.factor_name)">
             {{ thresholdTypeLabel(getFactorThresholdType(factor.factor_name)) }}
           </span>
+
+          <select v-model="factor.role" class="input factor-role-select" :aria-label="`因子角色 ${idx + 1}`">
+            <option v-for="role in factorRoleOptions" :key="role.value" :value="role.value">
+              {{ role.label }}
+            </option>
+          </select>
 
           <!-- Boolean type: toggle switch, hide operator -->
           <template v-if="getFactorThresholdType(factor.factor_name) === 'boolean'">
@@ -176,8 +201,34 @@
             ({{ getFactorMeta(factor.factor_name)?.value_min }}–{{ getFactorMeta(factor.factor_name)?.value_max }})
           </span>
 
+          <!-- Money-flow source selector: 策略级资金流数据源 -->
+          <div v-if="isMoneyFlowSourceFactor(factor.factor_name)" class="factor-source-selectors">
+            <select
+              :value="volumePriceConfig.money_flow_source"
+              @change="onMoneyFlowSourceChange(($event.target as HTMLSelectElement).value)"
+              class="input factor-source-select"
+              aria-label="资金流数据源"
+            >
+              <option
+                v-for="opt in getMoneyFlowSourceOptions(factor.factor_name)"
+                :key="opt.value"
+                :value="opt.value"
+              >
+                {{ formatDataSourceOptionLabel(opt) }}
+              </option>
+            </select>
+            <span class="factor-source-scope">策略级</span>
+          </div>
+          <div
+            v-if="isMoneyFlowSourceFactor(factor.factor_name) && volumePriceConfig.money_flow_source === 'money_flow'"
+            class="factor-source-warning"
+            role="alert"
+          >
+            旧资金流表覆盖不足，建议使用东方财富或同花顺资金流。
+          </div>
+
           <!-- Sector-specific selectors: 两级下拉（需求 22.6, 22.7） -->
-          <div v-if="factor.type === 'sector'" class="sector-selectors">
+          <div v-if="isSectorSourceFactor(factor.factor_name)" class="sector-selectors">
             <select
               :value="sectorConfig.sector_data_source"
               @change="onDataSourceChange(($event.target as HTMLSelectElement).value)"
@@ -199,7 +250,7 @@
               <span class="param-hint">天</span>
             </div>
           </div>
-          <div v-if="factor.type === 'sector' && selectedSourceCoverage && selectedSourceCoverage.sectors_with_constituents < selectedSourceCoverage.total_sectors * 0.1" class="sector-coverage-warning" role="alert">
+          <div v-if="isSectorSourceFactor(factor.factor_name) && selectedSourceCoverage && selectedSourceCoverage.sectors_with_constituents < selectedSourceCoverage.total_sectors * 0.1" class="sector-coverage-warning" role="alert">
             ⚠️ {{ sectorConfig.sector_data_source }} 仅 {{ selectedSourceCoverage.sectors_with_constituents }}/{{ selectedSourceCoverage.total_sectors }} 个板块有成分股映射，大部分股票无法匹配到板块，板块涨幅排名和板块趋势因子将无法生效。请前往「Tushare 数据导入」页面导入对应的板块成分数据{{ bestAlternativeSource ? `，或切换到数据更完整的${bestAlternativeSource}` : '' }}。
           </div>
 
@@ -653,6 +704,24 @@
               <span style="font-size:13px;color:#8b949e;">%</span>
             </div>
           </div>
+          <!-- 资金流数据源 -->
+          <div class="panel-row">
+            <label class="panel-label" for="money-flow-source">资金流数据源</label>
+            <select
+              id="money-flow-source"
+              v-model="volumePriceConfig.money_flow_source"
+              class="input param-select"
+              aria-label="资金流数据源"
+            >
+              <option
+                v-for="opt in moneyFlowSourceOptions"
+                :key="opt.value"
+                :value="opt.value"
+              >
+                {{ formatDataSourceOptionLabel(opt) }}
+              </option>
+            </select>
+          </div>
           <!-- 主力资金净流入阈值 -->
           <div class="panel-row">
             <label class="panel-label" for="main-flow">主力净流入阈值</label>
@@ -784,6 +853,16 @@
           </span>
           <span v-else class="run-hint muted">未选择策略，将使用当前因子配置执行</span>
         </div>
+        <div v-if="factorStatsForRun.length" class="factor-stats-strip" aria-label="因子筛选统计">
+          <span
+            v-for="stat in factorStatsForRun"
+            :key="`${stat.factor_name}-${stat.group_id ?? 'none'}`"
+            :class="['factor-stat-pill', stat.role ?? 'unknown']"
+            :title="formatFactorStatTooltip(stat)"
+          >
+            {{ stat.label || stat.factor_name }} 通过 {{ stat.passed_count }} 只<span v-if="stat.missing_count">，缺失 {{ stat.missing_count }} 只</span>
+          </span>
+        </div>
         <button
           class="btn btn-run"
           @click="runScreen"
@@ -914,7 +993,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { apiClient } from '@/api'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
@@ -922,7 +1001,7 @@ import ErrorBanner from '@/components/ErrorBanner.vue'
 import FactorUsagePanel from '@/components/FactorUsagePanel.vue'
 import { storeToRefs } from 'pinia'
 import { useScreenerStore } from '@/stores/screener'
-import type { FactorMeta, StrategyExample } from '@/stores/screener'
+import type { FactorConditionStats, FactorDataSourceOption, FactorMeta, FactorRole, StrategyExample } from '@/stores/screener'
 
 // ─── 类型定义 ─────────────────────────────────────────────────────────────────
 
@@ -935,6 +1014,18 @@ interface FactorCondition {
   threshold: number | null
   weight: number
   params: Record<string, unknown>
+  role: FactorRole
+  group_id: string | null
+}
+
+interface FactorGroupConfig {
+  group_id: string
+  label: string
+  role: FactorRole
+  logic: 'AND' | 'OR' | 'AT_LEAST_N' | 'SCORE_ONLY'
+  factor_names: string[]
+  min_pass_count?: number | null
+  blocking: boolean
 }
 
 type StrategyModule = 'factor_editor' | 'ma_trend' | 'indicator_params' | 'breakout' | 'volume_price'
@@ -985,6 +1076,13 @@ const factorTypes: { key: FactorType; label: string }[] = [
   { key: 'chip', label: '筹码面' },
   { key: 'margin', label: '两融面' },
   { key: 'board_hit', label: '打板面' },
+]
+
+const factorRoleOptions: { value: FactorRole; label: string }[] = [
+  { value: 'primary', label: '主条件' },
+  { value: 'confirmation', label: '确认' },
+  { value: 'score_only', label: '加分' },
+  { value: 'disabled', label: '禁用' },
 ]
 
 /** 每个因子类型下可选的因子名称枚举
@@ -1061,9 +1159,44 @@ const factorNameOptions: Record<FactorType, { value: string; label: string }[]> 
   ],
 }
 
-function factorNameLabel(type: FactorType, name: string): string {
-  return factorNameOptions[type]?.find((f) => f.value === name)?.label ?? name
-}
+const MONEY_FLOW_SOURCE_FACTOR_NAMES = new Set([
+  'money_flow',
+  'large_order',
+  'super_large_net_inflow',
+  'large_net_inflow',
+  'small_net_outflow',
+  'money_flow_strength',
+  'net_inflow_rate',
+])
+
+const SECTOR_SOURCE_FACTOR_NAMES = new Set([
+  'sector_rank',
+  'sector_trend',
+])
+
+const moneyFlowSourceOptions: FactorDataSourceOption[] = [
+  {
+    value: 'moneyflow_dc',
+    label: '东方财富资金流',
+    description: '覆盖较完整，推荐默认使用',
+    recommended: true,
+    legacy: false,
+  },
+  {
+    value: 'moneyflow_ths',
+    label: '同花顺资金流',
+    description: '覆盖较完整，可作为备选资金流源',
+    recommended: false,
+    legacy: false,
+  },
+  {
+    value: 'money_flow',
+    label: '旧资金流表',
+    description: '历史旧表，当前覆盖不足',
+    recommended: false,
+    legacy: true,
+  },
+]
 
 /** 根据因子名称推断所属类型（用于加载旧配置时的兼容） */
 function inferFactorType(name: string): FactorType {
@@ -1095,6 +1228,33 @@ function getFactorThresholdType(factorName: string): string {
   return getFactorMeta(factorName)?.threshold_type ?? 'absolute'
 }
 
+function getFactorDataSourceConfig(factorName: string) {
+  return getFactorMeta(factorName)?.data_source_config ?? null
+}
+
+function isMoneyFlowSourceFactor(factorName: string): boolean {
+  const dataSourceConfig = getFactorDataSourceConfig(factorName)
+  return dataSourceConfig?.kind === 'money_flow'
+    || (dataSourceConfig == null && MONEY_FLOW_SOURCE_FACTOR_NAMES.has(factorName))
+}
+
+function isSectorSourceFactor(factorName: string): boolean {
+  const dataSourceConfig = getFactorDataSourceConfig(factorName)
+  return dataSourceConfig?.kind === 'sector'
+    || (dataSourceConfig == null && SECTOR_SOURCE_FACTOR_NAMES.has(factorName))
+}
+
+function getMoneyFlowSourceOptions(factorName: string): FactorDataSourceOption[] {
+  const options = getFactorDataSourceConfig(factorName)?.options
+  return options && options.length > 0 ? options : moneyFlowSourceOptions
+}
+
+function formatDataSourceOptionLabel(option: FactorDataSourceOption): string {
+  if (option.recommended) return `${option.label}（推荐）`
+  if (option.legacy) return `${option.label}（旧表）`
+  return option.label
+}
+
 function thresholdTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     absolute: '绝对值',
@@ -1105,6 +1265,21 @@ function thresholdTypeLabel(type: string): string {
     z_score: 'Z分数',
   }
   return labels[type] ?? type
+}
+
+function groupIdForRole(role: FactorRole): string | null {
+  if (role === 'primary') return 'primary_core'
+  if (role === 'confirmation') return 'confirmation'
+  if (role === 'score_only') return 'score_only'
+  return null
+}
+
+function inferRoleFromConfig(factor: Record<string, unknown>, groups: Array<Record<string, unknown>>): FactorRole {
+  const explicit = factor.role as FactorRole | undefined
+  if (explicit) return explicit
+  const groupId = factor.group_id as string | undefined
+  const matched = groups.find((group) => group.group_id === groupId)
+  return (matched?.role as FactorRole | undefined) ?? 'primary'
 }
 
 function getFactorCategory(factorName: string): string {
@@ -1146,7 +1321,20 @@ const activeStrategyName = computed(
 )
 
 // running / runError 从 store 获取，跨组件生命周期保持状态
-const { running, runError } = storeToRefs(screenerStore)
+const { running, runError, lastFactorStats, lastFactorStatsStrategyKey } = storeToRefs(screenerStore)
+
+const factorStatsForRun = computed(() => {
+  if (!lastFactorStats.value.length) return []
+  const statsStrategyKey = lastFactorStatsStrategyKey.value
+  if (activeStrategyId.value) {
+    return statsStrategyKey === activeStrategyId.value ? lastFactorStats.value : []
+  }
+  return lastFactorStats.value
+})
+
+function formatFactorStatTooltip(stat: FactorConditionStats): string {
+  return `${stat.label || stat.factor_name}：通过 ${stat.passed_count}，失败 ${stat.failed_count}，缺失 ${stat.missing_count}`
+}
 
 const showCreateDialog = ref(false)
 const newStrategyName = ref('')
@@ -1162,6 +1350,7 @@ const renaming = ref(false)
 
 const saving = ref(false)
 const saveSuccess = ref(false)
+const hydratingStrategyConfig = ref(false)
 
 const currentEnabledModules = ref<StrategyModule[]>([])
 
@@ -1195,6 +1384,12 @@ const importInputRef = ref<HTMLInputElement | null>(null)
 const config = reactive({
   logic: 'AND' as 'AND' | 'OR',
   factors: [] as FactorCondition[],
+})
+
+const groupRules = reactive({
+  confirmation_logic: 'OR' as 'AND' | 'OR' | 'AT_LEAST_N',
+  confirmation_min_pass_count: 1,
+  confirmation_blocking: true,
 })
 
 // ─── 因子使用说明面板：跟踪当前选中的因子名称 ─────────────────────────────────
@@ -1281,6 +1476,21 @@ interface VolumePriceConfig {
   large_order_ratio: number
   min_daily_amount: number
   sector_rank_top: number
+  money_flow_source: 'money_flow' | 'moneyflow_ths' | 'moneyflow_dc'
+}
+
+function isMoneyFlowSource(
+  value: unknown,
+): value is VolumePriceConfig['money_flow_source'] {
+  return value === 'money_flow' || value === 'moneyflow_ths' || value === 'moneyflow_dc'
+}
+
+function normalizeMoneyFlowSource(value: unknown): VolumePriceConfig['money_flow_source'] {
+  return isMoneyFlowSource(value) ? value : 'moneyflow_dc'
+}
+
+function onMoneyFlowSourceChange(value: string) {
+  volumePriceConfig.money_flow_source = normalizeMoneyFlowSource(value)
 }
 
 const volumePriceConfig = reactive<VolumePriceConfig>({
@@ -1291,6 +1501,7 @@ const volumePriceConfig = reactive<VolumePriceConfig>({
   large_order_ratio: 30,
   min_daily_amount: 5000,
   sector_rank_top: 30,
+  money_flow_source: 'moneyflow_dc',
 })
 
 // ─── 板块筛选配置 ──────────────────────────────────────────────────────────────
@@ -1378,21 +1589,30 @@ function onDataSourceChange(ds: string) {
   screenerStore.fetchSectorTypes(ds)
 }
 
+function strategyUsesMoneyFlowSource(factors: FactorCondition[]): boolean {
+  return factors.some((factor) => isMoneyFlowSourceFactor(factor.factor_name))
+}
+
 // ─── 策略示例 ──────────────────────────────────────────────────────────────────
 
 const showExamplesDialog = ref(false)
 
 function loadStrategyExample(ex: StrategyExample) {
   // Load factors
-  config.factors = ex.factors.map(f => ({
+    config.factors = ex.factors.map(f => ({
     type: (getFactorCategory(f.factor_name) as FactorType),
     factor_name: f.factor_name,
     operator: f.operator,
     threshold: f.threshold,
     params: { ...f.params },
     weight: Math.round((ex.weights[f.factor_name] ?? 1.0) * 100),
+    role: 'primary',
+    group_id: 'primary_core',
   }))
   config.logic = ex.logic as 'AND' | 'OR'
+  if (strategyUsesMoneyFlowSource(config.factors)) {
+    volumePriceConfig.money_flow_source = 'moneyflow_dc'
+  }
 
   // Load sector config
   if (ex.sector_config) {
@@ -1557,6 +1777,7 @@ const VOLUME_PRICE_DEFAULTS: VolumePriceConfig = {
   large_order_ratio: 30,
   min_daily_amount: 5000,
   sector_rank_top: 30,
+  money_flow_source: 'moneyflow_dc',
 }
 
 function resetToDefaults() {
@@ -1583,6 +1804,12 @@ function resetToDefaults() {
 
   // 量价资金筛选配置
   Object.assign(volumePriceConfig, { ...VOLUME_PRICE_DEFAULTS })
+
+  Object.assign(groupRules, {
+    confirmation_logic: 'OR',
+    confirmation_min_pass_count: 1,
+    confirmation_blocking: true,
+  })
 }
 
 async function selectStrategy(id: string) {
@@ -1591,12 +1818,15 @@ async function selectStrategy(id: string) {
     activeStrategyId.value = ''
     currentEnabledModules.value = []
     resetToDefaults()
+    screenerStore.clearFactorStats()
     return
   }
 
-  activeStrategyId.value = id
+  screenerStore.clearFactorStats()
+  hydratingStrategyConfig.value = true
 
   try {
+    activeStrategyId.value = id
     const res = await apiClient.get<StrategyTemplate>(`/strategies/${id}`)
     const cfg = res.data.config as Record<string, unknown>
 
@@ -1609,6 +1839,11 @@ async function selectStrategy(id: string) {
     config.logic = (cfg.logic as 'AND' | 'OR') ?? 'AND'
     const factors = (cfg.factors ?? []) as Array<Record<string, unknown>>
     const weights = (cfg.weights ?? {}) as Record<string, number>
+    const factorGroups = (cfg.factor_groups ?? []) as Array<Record<string, unknown>>
+    const confirmationGroup = factorGroups.find((group) => group.group_id === 'confirmation')
+    groupRules.confirmation_logic = (confirmationGroup?.logic as 'AND' | 'OR' | 'AT_LEAST_N') ?? 'OR'
+    groupRules.confirmation_min_pass_count = (confirmationGroup?.min_pass_count as number | null) ?? 1
+    groupRules.confirmation_blocking = (confirmationGroup?.blocking as boolean | undefined) ?? true
     config.factors = factors.map((f) => ({
       type: (f.type as FactorType) ?? inferFactorType((f.factor_name as string) ?? ''),
       factor_name: (f.factor_name as string) ?? '',
@@ -1616,6 +1851,8 @@ async function selectStrategy(id: string) {
       threshold: (f.threshold as number | null) ?? null,
       weight: Math.round(((weights[(f.factor_name as string) ?? ''] ?? 0.5) * 100)),
       params: (f.params as Record<string, unknown>) ?? {},
+      role: inferRoleFromConfig(f, factorGroups),
+      group_id: (f.group_id as string | null) ?? groupIdForRole(inferRoleFromConfig(f, factorGroups)),
     }))
 
     // 回填均线趋势配置
@@ -1673,6 +1910,7 @@ async function selectStrategy(id: string) {
         large_order_ratio: vp.large_order_ratio ?? VOLUME_PRICE_DEFAULTS.large_order_ratio,
         min_daily_amount: vp.min_daily_amount ?? VOLUME_PRICE_DEFAULTS.min_daily_amount,
         sector_rank_top: vp.sector_rank_top ?? VOLUME_PRICE_DEFAULTS.sector_rank_top,
+        money_flow_source: normalizeMoneyFlowSource(vp.money_flow_source),
       })
     } else {
       Object.assign(volumePriceConfig, { ...VOLUME_PRICE_DEFAULTS })
@@ -1699,6 +1937,8 @@ async function selectStrategy(id: string) {
     }
   } catch (e) {
     pageError.value = e instanceof Error ? e.message : '加载策略配置失败'
+  } finally {
+    hydratingStrategyConfig.value = false
   }
 }
 
@@ -1858,6 +2098,8 @@ function addFactor(type: FactorType) {
     threshold: null,
     weight: 50,
     params: {},
+    role: 'primary',
+    group_id: 'primary_core',
   })
 }
 
@@ -1866,9 +2108,15 @@ function removeFactor(idx: number) {
 }
 
 function buildStrategyConfig() {
+  const factorGroups = buildFactorGroups(config.factors)
   return {
     logic: config.logic,
-    factors: config.factors.map(({ weight: _weight, type: _type, ...f }) => f),
+    factors: config.factors.map(({ weight: _weight, type: _type, group_id: _groupId, ...f }) => ({
+      ...f,
+      group_id: groupIdForRole(f.role),
+    })),
+    factor_groups: factorGroups,
+    confirmation_mode: 'blocking',
     weights: Object.fromEntries(
       config.factors.map((f) => [f.factor_name || f.type, f.weight / 100])
     ),
@@ -1896,6 +2144,66 @@ function buildStrategyConfig() {
   }
 }
 
+function buildFactorGroups(factors: FactorCondition[]): FactorGroupConfig[] {
+  const enabled = factors.filter((f) => f.factor_name && f.role !== 'disabled')
+  const primary = enabled.filter((f) => f.role === 'primary')
+  const confirmation = enabled.filter((f) => f.role === 'confirmation')
+  const scoreOnly = enabled.filter((f) => f.role === 'score_only')
+  const groups: FactorGroupConfig[] = []
+  if (primary.length) {
+    groups.push({
+      group_id: 'primary_core',
+      label: '主条件',
+      role: 'primary',
+      logic: config.logic,
+      factor_names: primary.map((f) => f.factor_name),
+      blocking: true,
+    })
+  }
+  if (confirmation.length) {
+    groups.push({
+      group_id: 'confirmation',
+      label: '确认因子',
+      role: 'confirmation',
+      logic: groupRules.confirmation_logic,
+      factor_names: confirmation.map((f) => f.factor_name),
+      min_pass_count: groupRules.confirmation_logic === 'AT_LEAST_N'
+        ? Math.max(1, groupRules.confirmation_min_pass_count || 1)
+        : null,
+      blocking: groupRules.confirmation_blocking,
+    })
+  }
+  if (scoreOnly.length) {
+    groups.push({
+      group_id: 'score_only',
+      label: '仅加分',
+      role: 'score_only',
+      logic: 'SCORE_ONLY',
+      factor_names: scoreOnly.map((f) => f.factor_name),
+      blocking: false,
+    })
+  }
+  return groups
+}
+
+watch(
+  () => JSON.stringify({
+    activeStrategyId: activeStrategyId.value,
+    logic: config.logic,
+    factors: config.factors.map((factor) => ({
+      factor_name: factor.factor_name,
+      operator: factor.operator,
+      threshold: factor.threshold,
+      params: factor.params,
+      role: factor.role,
+    })),
+    groupRules,
+  }),
+  () => {
+    if (!hydratingStrategyConfig.value) screenerStore.clearFactorStats()
+  },
+)
+
 // ─── 执行选股 ─────────────────────────────────────────────────────────────────
 
 async function runScreen() {
@@ -1922,6 +2230,7 @@ onMounted(async () => {
   if (active) {
     await selectStrategy(active.id)
   }
+  await screenerStore.fetchResults()
   loadScheduleStatus()
   startTradingHoursCheck()
 })
@@ -2008,6 +2317,18 @@ onUnmounted(() => {
 .factor-threshold { width: 90px; flex-shrink: 0; }
 
 .weight-control { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.factor-role-select { width: 78px; flex-shrink: 0; }
+.group-rule-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.group-rule-select { width: 112px; }
+.group-min-input { width: 72px; }
+.group-blocking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #8b949e;
+  font-size: 12px;
+  white-space: nowrap;
+}
 .weight-label { font-size: 12px; color: #8b949e; white-space: nowrap; }
 .weight-slider { width: 80px; accent-color: #58a6ff; cursor: pointer; }
 .weight-value { font-size: 12px; color: #e6edf3; width: 24px; text-align: right; }
@@ -2027,11 +2348,57 @@ onUnmounted(() => {
 /* ─── 执行选股 ──────────────────────────────────────────────────────────────── */
 .run-section { }
 .run-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.run-info { flex: 1; }
+.run-info { flex: 0 1 160px; min-width: 140px; }
 .run-hint { font-size: 14px; color: #e6edf3; }
 .run-hint.muted { color: #8b949e; }
 .run-hint strong { color: #58a6ff; }
+.factor-stats-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  flex: 1 1 640px;
+  gap: 6px;
+  max-width: 920px;
+  min-width: min(100%, 360px);
+  overflow: visible;
+  padding: 2px 0;
+}
+.factor-stat-pill {
+  min-width: 0;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  background: #0d1117;
+  padding: 4px 8px;
+  font-size: 12px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.factor-stat-pill.primary { border-color: #238636; color: #d2f8d2; }
+.factor-stat-pill.confirmation { border-color: #1f6feb; color: #d8e9ff; }
+.factor-stat-pill.score_only { border-color: #8b949e; color: #d0d7de; }
 .run-error { margin-top: 10px; font-size: 13px; color: #f85149; }
+
+@media (max-width: 900px) {
+  .factor-stats-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    flex-basis: 100%;
+  }
+}
+
+@media (max-width: 520px) {
+  .run-info,
+  .factor-stats-strip,
+  .btn-run {
+    flex-basis: 100%;
+  }
+
+  .factor-stats-strip {
+    grid-template-columns: 1fr;
+    min-width: 0;
+  }
+}
 
 /* ─── 通用输入 ──────────────────────────────────────────────────────────────── */
 .input {
@@ -2137,6 +2504,7 @@ details > summary::-webkit-details-marker { display: none; }
 
 /* 数值输入 */
 .param-input { width: 120px; }
+.param-select { min-width: 160px; }
 
 /* 趋势打分滑块 */
 .slider-row { display: flex; align-items: center; gap: 10px; flex: 1; }
@@ -2274,6 +2642,34 @@ details > summary::-webkit-details-marker { display: none; }
 .range-sep { color: var(--text-secondary, #8b949e); font-size: 13px; }
 
 .factor-toggle { flex-shrink: 0; }
+
+.factor-source-selectors {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.factor-source-select { min-width: 150px; }
+.factor-source-scope {
+  font-size: 11px;
+  color: var(--text-secondary, #8b949e);
+  border: 1px solid var(--border, #30363d);
+  border-radius: 4px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.factor-source-warning {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 12px;
+  background: #3a2a1a;
+  border: 1px solid #d2992244;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #d29922;
+  line-height: 1.5;
+}
 
 .sector-selectors { display: flex; gap: 8px; align-items: center; margin-top: 4px; width: 100%; flex-wrap: wrap; }
 .sector-select { width: 100px; }

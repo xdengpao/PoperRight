@@ -30,7 +30,7 @@ from app.core.database import get_pg_session, get_ts_session
 from app.core.redis_client import get_redis
 from app.core.schemas import MarketRiskLevel
 from app.models.backtest import BacktestRun
-from app.models.kline import Kline
+from app.models.kline import Kline, KlineBar
 from app.models.stock import StockList
 from app.models.trade import Position as PositionModel, TradeOrder
 from app.services.risk_controller import (
@@ -197,6 +197,7 @@ class TotalPositionResponse(BaseModel):
 class IndexKlineItem(BaseModel):
     """指数 K 线数据条目（需求 11.3）"""
     time: str                       # 交易日期 ISO 格式
+    trade_date: str                 # 交易日
     open: float
     high: float
     low: float
@@ -214,15 +215,19 @@ async def _fetch_closes(
     session: AsyncSession, symbol: str,
 ) -> list[float]:
     """查询指定指数最近 60 个交易日的日 K 线收盘价（按时间升序）。"""
+    from app.services.data_engine.kline_normalizer import dedupe_bars_by_trade_date
+
     stmt = (
-        select(Kline.close)
-        .where(Kline.symbol == symbol, Kline.freq == "1d")
+        select(Kline)
+        .where(Kline.symbol == symbol, Kline.freq == "1d", Kline.adj_type == 0)
         .order_by(Kline.time.desc())
-        .limit(_KLINE_LIMIT)
+        .limit(_KLINE_LIMIT * 2)
     )
     result = await session.execute(stmt)
-    rows = result.scalars().all()
-    return [float(c) for c in reversed(rows) if c is not None]
+    bars = [KlineBar.from_orm(row) for row in result.scalars().all()]
+    bars = sorted(dedupe_bars_by_trade_date(bars), key=lambda bar: bar.time)
+    bars = bars[-_KLINE_LIMIT:]
+    return [float(bar.close) for bar in bars if bar.close is not None]
 
 
 def _get_stop_config_key(user_id: str) -> str:
@@ -1257,31 +1262,36 @@ async def index_kline(
     """
     # 查询最近 60 + 60 条记录（需要额外数据来计算 MA60）
     _MA_BUFFER = 60
+    from app.services.data_engine.kline_normalizer import (
+        dedupe_bars_by_trade_date,
+        derive_trade_date,
+    )
+
     stmt = (
-        select(Kline.time, Kline.open, Kline.high, Kline.low, Kline.close)
-        .where(Kline.symbol == symbol, Kline.freq == "1d")
+        select(Kline)
+        .where(Kline.symbol == symbol, Kline.freq == "1d", Kline.adj_type == 0)
         .order_by(Kline.time.desc())
         .limit(_KLINE_LIMIT + _MA_BUFFER)
     )
     result = await ts_session.execute(stmt)
-    rows = result.all()
+    bars = [KlineBar.from_orm(row) for row in result.scalars().all()]
 
-    if not rows:
+    if not bars:
         return []
 
     # 按时间升序排列
-    rows = list(reversed(rows))
+    bars = sorted(dedupe_bars_by_trade_date(bars), key=lambda bar: bar.time)
 
     # 提取收盘价序列用于计算均线
-    closes = [float(r[4]) for r in rows if r[4] is not None]
+    closes = [float(bar.close) for bar in bars if bar.close is not None]
 
     items: list[IndexKlineItem] = []
     # 只返回最近 _KLINE_LIMIT 条
-    start_idx = max(len(rows) - _KLINE_LIMIT, 0)
+    start_idx = max(len(bars) - _KLINE_LIMIT, 0)
 
-    for i in range(start_idx, len(rows)):
-        row = rows[i]
-        if row[4] is None:
+    for i in range(start_idx, len(bars)):
+        bar = bars[i]
+        if bar.close is None:
             continue
 
         # 计算 MA20：使用当前位置及之前共 20 个数据点
@@ -1299,11 +1309,12 @@ async def index_kline(
                 ma60 = round(sum(window) / 60, 4)
 
         items.append(IndexKlineItem(
-            time=row[0].isoformat() if hasattr(row[0], 'isoformat') else str(row[0]),
-            open=round(float(row[1]), 4) if row[1] is not None else 0.0,
-            high=round(float(row[2]), 4) if row[2] is not None else 0.0,
-            low=round(float(row[3]), 4) if row[3] is not None else 0.0,
-            close=round(float(row[4]), 4),
+            time=bar.time.isoformat() if hasattr(bar.time, 'isoformat') else str(bar.time),
+            trade_date=derive_trade_date(bar.time, bar.freq).isoformat(),
+            open=round(float(bar.open), 4) if bar.open is not None else 0.0,
+            high=round(float(bar.high), 4) if bar.high is not None else 0.0,
+            low=round(float(bar.low), 4) if bar.low is not None else 0.0,
+            close=round(float(bar.close), 4),
             ma20=ma20,
             ma60=ma60,
         ))

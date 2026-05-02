@@ -18,8 +18,172 @@
           <span class="token-status">专业{{ health.tokens.premium.configured ? '✅' : '❌' }}</span>
           <span class="token-status">特殊{{ health.tokens.special.configured ? '✅' : '❌' }}</span>
         </div>
-        <button class="btn btn-secondary" :disabled="healthLoading" @click="checkHealth"
-          aria-label="重新检测 Tushare 连接">{{ healthLoading ? '检测中...' : '重新检测' }}</button>
+        <div class="connection-actions">
+          <label class="workflow-mode-select">
+            <span class="date-mini-label">链路</span>
+            <select v-model="workflowMode" class="form-input workflow-mode-input" aria-label="智能选股导入链路模式"
+              @change="onWorkflowModeChange">
+              <option value="daily_fast">每日快速</option>
+              <option value="gap_repair">缺口补导</option>
+              <option value="weekly_maintenance">周维护</option>
+              <option value="full_initialize">完整初始化</option>
+            </select>
+          </label>
+          <div class="workflow-date-range" aria-label="智能选股导入日期范围">
+            <label class="date-mini-label">起始</label>
+            <input v-model="workflowStartDate" type="date" class="form-input workflow-date-input" aria-label="智能选股导入起始日期" />
+            <label class="date-mini-label">结束</label>
+            <input v-model="workflowEndDate" type="date" class="form-input workflow-date-input" aria-label="智能选股导入结束日期" />
+          </div>
+          <div class="workflow-button-grid" aria-label="智能选股工作流快捷操作">
+            <button class="btn btn-danger btn-xs" :disabled="smartWorkflowButtonDisabled" :title="smartWorkflowButtonTitle"
+              @click="openSmartWorkflowConfirm" aria-label="智能选股一键导入">一键导入</button>
+            <button class="btn btn-secondary btn-xs" :disabled="!canPauseWorkflow" @click="pauseSmartWorkflow"
+              aria-label="暂停智能选股一键导入">一键暂停</button>
+            <button class="btn btn-primary btn-xs" :disabled="!canResumeWorkflow" @click="resumeSmartWorkflow"
+              aria-label="恢复智能选股一键导入">一键恢复</button>
+            <button class="btn btn-secondary btn-xs" :disabled="!canStopWorkflow" @click="stopSmartWorkflow"
+              aria-label="停止智能选股一键导入">一键停止</button>
+          </div>
+          <button class="btn btn-secondary" :disabled="healthLoading" @click="checkHealth"
+            aria-label="重新检测 Tushare 连接">{{ healthLoading ? '检测中...' : '重新检测' }}</button>
+        </div>
+      </div>
+      <div v-if="workflowDateError" class="connection-warning">{{ workflowDateError }}</div>
+    </section>
+
+    <section v-if="showWorkflowConfirm" class="card" aria-label="智能选股一键导入确认">
+      <div class="section-header">
+        <h2 class="section-title">智能选股一键导入</h2>
+        <button class="btn btn-secondary btn-sm" @click="showWorkflowConfirm = false">关闭</button>
+      </div>
+      <div v-if="workflowDefinitionLoading" class="empty">加载工作流定义...</div>
+      <div v-else class="workflow-confirm">
+        <div class="workflow-toolbar">
+          <label class="param-field">
+            <span class="param-label">模式</span>
+            <select v-model="workflowMode" class="form-input param-input" @change="onWorkflowModeChange">
+              <option value="daily_fast">每日快速</option>
+              <option value="gap_repair">缺口补导</option>
+              <option value="weekly_maintenance">周维护</option>
+              <option value="full_initialize">完整初始化</option>
+            </select>
+          </label>
+          <span class="workflow-range-text">范围 {{ workflowStartDate }} 至 {{ workflowEndDate }}</span>
+          <span v-if="workflowBeforeCloseWarning" class="workflow-warning">当天数据可能尚未完整，通常 18:00 后导入更稳。</span>
+        </div>
+        <div class="workflow-option-row">
+          <label class="workflow-option"><input v-model="workflowOptions.include_moneyflow_ths" type="checkbox" /> THS资金流</label>
+          <label class="workflow-option"><input v-model="workflowOptions.include_ths_sector" type="checkbox" /> THS板块</label>
+          <label class="workflow-option"><input v-model="workflowOptions.include_tdx_sector" type="checkbox" /> TDX板块</label>
+          <label class="workflow-option"><input v-model="workflowOptions.include_ti_sector" type="checkbox" /> 申万行业</label>
+          <label class="workflow-option"><input v-model="workflowOptions.include_ci_sector" type="checkbox" /> 中信行业</label>
+        </div>
+        <div class="workflow-stage-list">
+          <div v-for="stage in workflowDefinition?.stages ?? []" :key="stage.key" class="workflow-stage">
+            <div class="workflow-stage-title">{{ stage.label }}</div>
+            <div class="workflow-step-list">
+              <span v-for="step in stage.steps" :key="stage.key + step.api_name" class="workflow-step-chip">
+                {{ step.api_name }}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div v-if="workflowPlan" class="workflow-plan-grid">
+          <div class="workflow-plan-panel">
+            <div class="workflow-stage-title">本次执行</div>
+            <div class="workflow-step-list">
+              <span v-for="step in workflowPlan.execute_steps" :key="'exec-' + step.priority + step.api_name" class="workflow-step-chip">
+                {{ step.api_name }} · {{ step.estimated_duration || step.reason }}
+              </span>
+            </div>
+          </div>
+          <div v-if="workflowPlan.skip_steps.length" class="workflow-plan-panel">
+            <div class="workflow-stage-title">本次跳过</div>
+            <div class="workflow-step-list">
+              <span v-for="step in workflowPlan.skip_steps" :key="'skip-' + step.api_name" class="workflow-step-chip skipped">
+                {{ step.api_name }} · {{ step.skip_reason || step.reason }}
+              </span>
+            </div>
+          </div>
+          <div v-if="workflowPlan.maintenance_suggestions.length" class="workflow-plan-panel">
+            <div class="workflow-stage-title">维护建议</div>
+            <div class="workflow-step-list">
+              <span v-for="item in workflowPlan.maintenance_suggestions" :key="'maint-' + item.api_name" class="workflow-step-chip warning">
+                {{ item.api_name }} · {{ item.reason }}
+              </span>
+            </div>
+          </div>
+        </div>
+        <div v-if="workflowStartError" class="workflow-error">{{ workflowStartError }}</div>
+        <div class="workflow-actions">
+          <button class="btn btn-primary" :disabled="workflowStarting || !!workflowDateError" @click="startSmartWorkflow">
+            {{ workflowStarting ? '启动中...' : '确认导入' }}
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="smartWorkflowStatus && smartWorkflowStatus.status !== 'unknown'" class="card" aria-label="智能选股一键导入进度">
+      <div class="section-header">
+        <h2 class="section-title">智能选股一键导入进度</h2>
+        <div class="workflow-actions">
+          <button v-if="isWorkflowRunning" class="btn btn-secondary btn-sm" @click="pauseSmartWorkflow">暂停</button>
+          <button v-else-if="canResumeWorkflow" class="btn btn-primary btn-sm" @click="resumeSmartWorkflow">继续</button>
+          <button v-if="canStopWorkflow" class="btn btn-secondary btn-sm" @click="stopSmartWorkflow">停止</button>
+        </div>
+      </div>
+      <div class="workflow-progress-summary">
+        <span class="status-badge" :class="taskStatusClass(smartWorkflowStatus.status)">
+          {{ taskStatusLabel(smartWorkflowStatus.status) }}
+        </span>
+        <span>{{ smartWorkflowStatus.completed_steps }} / {{ smartWorkflowStatus.total_steps }} 步完成</span>
+        <span v-if="smartWorkflowStatus.current_stage_label">当前阶段：{{ smartWorkflowStatus.current_stage_label }}</span>
+        <span v-if="smartWorkflowStatus.current_api_name">接口：{{ smartWorkflowStatus.current_api_name }}</span>
+      </div>
+      <div class="progress-bar-container">
+        <div class="progress-bar" :style="{ width: workflowPct + '%' }"></div>
+      </div>
+      <div v-if="smartWorkflowStatus.error_message" class="workflow-error">{{ smartWorkflowStatus.error_message }}</div>
+      <div class="workflow-child-list">
+        <div v-for="child in smartWorkflowStatus.child_tasks" :key="child.task_id || child.api_name" class="workflow-child">
+          <span class="api-name">{{ child.api_name }}</span>
+          <span class="status-badge" :class="taskStatusClass(child.status)">{{ taskStatusLabel(child.status) }}</span>
+          <span class="workflow-child-count">{{ workflowChildProgressText(child) }}</span>
+          <span v-if="child.error_message" class="workflow-error-inline">{{ child.error_message }}</span>
+        </div>
+      </div>
+      <div v-if="smartWorkflowStatus.skip_steps?.length" class="workflow-plan-panel progress-panel">
+        <div class="workflow-stage-title">已跳过</div>
+        <div class="workflow-step-list">
+          <span v-for="step in smartWorkflowStatus.skip_steps" :key="'status-skip-' + step.api_name" class="workflow-step-chip skipped">
+            {{ step.api_name }} · {{ step.skip_reason || step.reason }}
+          </span>
+        </div>
+      </div>
+      <div v-if="smartWorkflowStatus.maintenance_suggestions?.length" class="workflow-plan-panel progress-panel">
+        <div class="workflow-stage-title">维护建议</div>
+        <div class="workflow-step-list">
+          <span v-for="item in smartWorkflowStatus.maintenance_suggestions" :key="'status-maint-' + item.api_name" class="workflow-step-chip warning">
+            {{ item.api_name }} · {{ item.reason }}
+          </span>
+        </div>
+      </div>
+      <div v-if="smartWorkflowStatus.next_actions?.length" class="workflow-next-actions">
+        <button v-for="action in smartWorkflowStatus.next_actions" :key="action.mode" class="btn btn-secondary btn-sm"
+          :disabled="!action.enabled" @click="applyWorkflowNextAction(action)">
+          {{ action.label }}
+        </button>
+      </div>
+      <div v-if="smartWorkflowStatus.readiness" class="workflow-readiness">
+        <div class="workflow-stage-title">完整性摘要</div>
+        <div class="workflow-readiness-grid">
+          <div v-for="(item, key) in workflowReadinessChecks" :key="String(key)" class="workflow-readiness-item">
+            <span>{{ key }}</span>
+            <strong>{{ workflowReadinessCount(item) }}</strong>
+            <small>{{ item.latest_date ?? '无日期' }}</small>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -320,6 +484,7 @@
           <span class="task-counts">已完成 {{ task.completed }}/{{ task.total }}
             <span v-if="task.failed > 0" class="task-failed">失败 {{ task.failed }}</span></span>
           <span v-if="task.current_item" class="task-current">当前: {{ task.current_item }}</span>
+          <span v-else-if="task.status === 'pending'" class="task-current">等待 worker 空位</span>
         </div>
         <div v-if="task.status === 'failed' && task.error_message" class="task-error-message">
           {{ task.error_message }}
@@ -391,7 +556,7 @@ interface SubcategoryGroup {
 export interface ImportTask {
   task_id: string
   api_name: string
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped' | 'unknown'
   total: number
   completed: number
   failed: number
@@ -419,6 +584,99 @@ interface HealthResponse {
     advanced: { configured: boolean }
     premium: { configured: boolean }
     special: { configured: boolean }
+  }
+}
+
+interface WorkflowStep {
+  api_name: string
+  label: string
+  factor_groups: string[]
+  required_token_tier: string
+  optional: boolean
+}
+
+interface WorkflowStage {
+  key: string
+  label: string
+  description: string
+  steps: WorkflowStep[]
+}
+
+interface WorkflowDefinition {
+  workflow_key: string
+  label: string
+  mode: string
+  stages: WorkflowStage[]
+  required_token_tiers: string[]
+  dependency_summary?: Record<string, unknown>
+}
+
+type WorkflowMode = 'daily_fast' | 'gap_repair' | 'weekly_maintenance' | 'full_initialize'
+
+interface WorkflowPlanStep {
+  api_name: string
+  label?: string
+  params?: Record<string, unknown>
+  reason?: string
+  priority?: number
+  estimated_rows?: number | null
+  estimated_duration?: string | null
+  skip_reason?: string | null
+}
+
+interface WorkflowPlan {
+  mode: WorkflowMode
+  target_trade_date: string
+  execute_steps: WorkflowPlanStep[]
+  skip_steps: WorkflowPlanStep[]
+  maintenance_suggestions: Array<{ api_name: string; reason: string }>
+  estimated_cost?: { step_count?: number; slow_step_count?: number; label?: string }
+  next_actions?: Array<{ mode: WorkflowMode; label: string; enabled: boolean }>
+}
+
+interface WorkflowChildTask {
+  task_id?: string
+  log_id?: number
+  api_name: string
+  label?: string
+  status: string
+  record_count?: number
+  error_message?: string
+  progress?: {
+    total: number
+    completed: number
+    failed: number
+    status?: string
+    current_item?: string
+    error_message?: string
+    batch_mode?: string
+    updated_at?: string
+  }
+}
+
+interface WorkflowStatus {
+  workflow_task_id: string
+  workflow_key?: string
+  status: string
+  mode: string
+  date_range?: { start_date: string; end_date: string }
+  options?: Record<string, boolean>
+  current_stage_key: string | null
+  current_stage_label: string | null
+  current_api_name: string | null
+  completed_steps: number
+  failed_steps: number
+  total_steps: number
+  child_tasks: WorkflowChildTask[]
+  readiness: Record<string, unknown> | null
+  error_message: string | null
+  skip_steps?: WorkflowPlanStep[]
+  maintenance_suggestions?: Array<{ api_name: string; reason: string }>
+  next_actions?: Array<{ mode: WorkflowMode; label: string; enabled: boolean }>
+  target_trade_date?: string | null
+  actual_cost?: {
+    total_duration_seconds?: number
+    slowest_steps?: Array<{ api_name: string; duration_seconds: number; status: string; record_count?: number }>
   }
 }
 
@@ -452,14 +710,33 @@ const historyLoading = ref(false)
 const historyList = ref<ImportLog[]>([])
 const lastImportTimes = ref<Record<string, string>>({})
 
+const workflowStartDate = ref(formatLocalDate(new Date()))
+const workflowEndDate = ref(formatLocalDate(new Date()))
+const workflowMode = ref<WorkflowMode>('daily_fast')
+const showWorkflowConfirm = ref(false)
+const workflowDefinitionLoading = ref(false)
+const workflowDefinition = ref<WorkflowDefinition | null>(null)
+const workflowPlan = ref<WorkflowPlan | null>(null)
+const workflowStarting = ref(false)
+const workflowStartError = ref('')
+const smartWorkflowStatus = ref<WorkflowStatus | null>(null)
+const workflowPollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const workflowOptions = reactive({
+  include_moneyflow_ths: false,
+  include_ths_sector: false,
+  include_tdx_sector: false,
+  include_ti_sector: false,
+  include_ci_sector: false,
+})
+
 // ── 常量 ──────────────────────────────────────────────────────────────────────
 
-const todayStr = new Date().toISOString().slice(0, 10)
+const todayStr = formatLocalDate(new Date())
 const oneYearAgoStr = new Date(Date.now() - 365 * 86400000).toISOString().slice(0, 10)
 const currentMonthStr = todayStr.slice(0, 7)  // YYYY-MM 格式
 const currentYear = new Date().getFullYear().toString()
 const yearOptions = Array.from({ length: 10 }, (_, i) => (new Date().getFullYear() - i).toString())
-const TERMINAL_STATUSES = new Set(['completed', 'failed', 'stopped', 'unknown'])
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'paused', 'stopped', 'unknown'])
 const POLL_INTERVAL = 3000
 
 // ── 计算属性 ──────────────────────────────────────────────────────────────────
@@ -472,7 +749,66 @@ const indexCategories = computed<SubcategoryGroup[]>(() =>
   groupBySubcategory(registryList.value.filter(a => a.category === 'index_data')),
 )
 
+const workflowDateError = computed(() => {
+  if (!workflowStartDate.value || !workflowEndDate.value) return '请选择智能选股导入日期范围'
+  if (workflowStartDate.value > workflowEndDate.value) return '起始日期不能晚于结束日期'
+  return ''
+})
+
+const workflowBeforeCloseWarning = computed(() => {
+  const now = new Date()
+  const today = formatLocalDate(now)
+  return workflowEndDate.value === today && now.getHours() < 18
+})
+
+const smartWorkflowButtonDisabled = computed(() =>
+  healthLoading.value || !health.connected || !!workflowDateError.value || workflowStarting.value,
+)
+
+const smartWorkflowButtonTitle = computed(() => {
+  if (!health.connected) return 'Tushare 未连接'
+  if (workflowDateError.value) return workflowDateError.value
+  return '按所选日期范围一键导入智能选股所需数据'
+})
+
+const isWorkflowRunning = computed(() =>
+  smartWorkflowStatus.value?.status === 'running' || smartWorkflowStatus.value?.status === 'pending',
+)
+
+const canResumeWorkflow = computed(() =>
+  smartWorkflowStatus.value?.status === 'failed' || smartWorkflowStatus.value?.status === 'paused',
+)
+
+const canPauseWorkflow = computed(() =>
+  smartWorkflowStatus.value?.status === 'running' || smartWorkflowStatus.value?.status === 'pending',
+)
+
+const canStopWorkflow = computed(() =>
+  !!smartWorkflowStatus.value
+  && !['completed', 'stopped', 'unknown'].includes(smartWorkflowStatus.value.status),
+)
+
+const workflowPct = computed(() => {
+  const status = smartWorkflowStatus.value
+  if (!status || status.total_steps <= 0) return 0
+  return Math.min(100, Math.round((status.completed_steps / status.total_steps) * 100))
+})
+
+const workflowReadinessChecks = computed<Record<string, { coverage_count?: number | null; import_record_count?: number | null; latest_date?: string | null }>>(() => {
+  const readiness = smartWorkflowStatus.value?.readiness as { checks?: Record<string, { coverage_count?: number | null; import_record_count?: number | null; latest_date?: string | null }> } | null
+  return readiness?.checks ?? {}
+})
+
 // ── 工具函数 ──────────────────────────────────────────────────────────────────
+
+function formatLocalDate(date: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
+function toCompactDate(value: string): string {
+  return value.replace(/-/g, '')
+}
 
 function groupBySubcategory(apis: ApiItem[]): SubcategoryGroup[] {
   const map = new Map<string, ApiItem[]>()
@@ -630,11 +966,11 @@ function taskPct(t: ImportTask): number {
 }
 
 function taskStatusLabel(s: string): string {
-  return ({ pending: '等待中', running: '运行中', completed: '已完成', failed: '失败', stopped: '已停止', unknown: '已丢失' } as Record<string, string>)[s] ?? s
+  return ({ pending: '排队中', running: '运行中', completed: '已完成', failed: '失败', stale_failed: '失联失败', paused: '已暂停', stopped: '已停止', unknown: '已丢失' } as Record<string, string>)[s] ?? s
 }
 
 function taskStatusClass(s: string): string {
-  return ({ pending: 'syncing', running: 'syncing', completed: 'ok', failed: 'error', stopped: 'error' } as Record<string, string>)[s] ?? ''
+  return ({ pending: 'syncing', running: 'syncing', completed: 'ok', failed: 'error', stale_failed: 'error', paused: 'syncing', stopped: 'error' } as Record<string, string>)[s] ?? ''
 }
 
 function taskBarClass(s: string): string {
@@ -668,6 +1004,31 @@ function formatDuration(startedAt: string | null, finishedAt: string | null): st
   } catch { return '—' }
 }
 
+function workflowChildProgressText(child: WorkflowChildTask): string {
+  const progress = child.progress
+  if (progress && ['running', 'pending'].includes(child.status)) {
+    const total = progress.total || 0
+    const completed = progress.completed || 0
+    const failed = progress.failed || 0
+    const current = progress.current_item ? ` · 当前 ${progress.current_item}` : ''
+    const failedText = failed > 0 ? ` · 失败 ${failed}` : ''
+    return total > 0 ? `${completed} / ${total}${failedText}${current}` : `${completed}${failedText}${current}`
+  }
+  return `${child.record_count ?? 0} 行`
+}
+
+function workflowReadinessCount(item: { coverage_count?: number | null; import_record_count?: number | null }): string {
+  if (typeof item.coverage_count === 'number') return String(item.coverage_count)
+  return '已导入'
+}
+
+async function applyWorkflowNextAction(action: { mode: WorkflowMode; enabled: boolean }): Promise<void> {
+  if (!action.enabled) return
+  workflowMode.value = action.mode
+  showWorkflowConfirm.value = true
+  await fetchWorkflowDefinition()
+}
+
 // ── API 调用 ──────────────────────────────────────────────────────────────────
 
 async function checkHealth(): Promise<void> {
@@ -696,6 +1057,154 @@ async function fetchRegistry(): Promise<void> {
   } finally {
     registryLoading.value = false
   }
+}
+
+async function fetchWorkflowDefinition(): Promise<void> {
+  workflowDefinitionLoading.value = true
+  try {
+    const [definitionResp, planResp] = await Promise.all([
+      apiClient.get<WorkflowDefinition>('/data/tushare/workflows/smart-screening', {
+      params: { mode: workflowMode.value },
+      }),
+      apiClient.post<WorkflowPlan>('/data/tushare/workflows/smart-screening/plan', {
+        mode: workflowMode.value,
+        date_range: {
+          start_date: toCompactDate(workflowStartDate.value),
+          end_date: toCompactDate(workflowEndDate.value),
+        },
+        options: { ...workflowOptions },
+      }),
+    ])
+    workflowDefinition.value = definitionResp.data
+    workflowPlan.value = planResp.data
+  } finally {
+    workflowDefinitionLoading.value = false
+  }
+}
+
+async function openSmartWorkflowConfirm(): Promise<void> {
+  if (workflowDateError.value) return
+  workflowStartError.value = ''
+  showWorkflowConfirm.value = true
+  await fetchWorkflowDefinition()
+}
+
+async function onWorkflowModeChange(): Promise<void> {
+  if (workflowMode.value === 'full_initialize') {
+    workflowStartDate.value = oneYearAgoStr
+    workflowEndDate.value = todayStr
+  } else if (workflowMode.value === 'daily_fast') {
+    workflowStartDate.value = todayStr
+    workflowEndDate.value = todayStr
+  }
+  if (showWorkflowConfirm.value) await fetchWorkflowDefinition()
+}
+
+async function startSmartWorkflow(): Promise<void> {
+  if (workflowDateError.value) return
+  workflowStarting.value = true
+  workflowStartError.value = ''
+  try {
+    const { data } = await apiClient.post<{ workflow_task_id: string; status: string }>(
+      '/data/tushare/workflows/smart-screening/start',
+      {
+        mode: workflowMode.value,
+        date_range: {
+          start_date: toCompactDate(workflowStartDate.value),
+          end_date: toCompactDate(workflowEndDate.value),
+        },
+        options: { ...workflowOptions },
+      },
+    )
+    showWorkflowConfirm.value = false
+    smartWorkflowStatus.value = {
+      workflow_task_id: data.workflow_task_id,
+      status: data.status,
+      mode: workflowMode.value,
+      current_stage_key: null,
+      current_stage_label: null,
+      current_api_name: null,
+      completed_steps: 0,
+      failed_steps: 0,
+      total_steps: 0,
+      child_tasks: [],
+      readiness: null,
+      error_message: null,
+    }
+    startWorkflowPolling(data.workflow_task_id)
+  } catch (e: unknown) {
+    const err = e as { response?: { data?: { detail?: unknown } } }
+    const detail = err.response?.data?.detail
+    workflowStartError.value = typeof detail === 'string' ? detail : JSON.stringify(detail ?? '启动工作流失败')
+  } finally {
+    workflowStarting.value = false
+  }
+}
+
+async function fetchWorkflowStatus(workflowTaskId: string): Promise<void> {
+  try {
+    const { data } = await apiClient.get<WorkflowStatus>(`/data/tushare/workflows/status/${workflowTaskId}`)
+    smartWorkflowStatus.value = data
+    if (TERMINAL_STATUSES.has(data.status)) {
+      stopWorkflowPolling()
+      fetchHistory()
+      fetchLastImportTimes()
+    }
+  } catch {
+    stopWorkflowPolling()
+  }
+}
+
+function startWorkflowPolling(workflowTaskId: string): void {
+  stopWorkflowPolling()
+  fetchWorkflowStatus(workflowTaskId)
+  workflowPollTimer.value = setInterval(() => fetchWorkflowStatus(workflowTaskId), POLL_INTERVAL)
+}
+
+function stopWorkflowPolling(): void {
+  if (workflowPollTimer.value) {
+    clearInterval(workflowPollTimer.value)
+    workflowPollTimer.value = null
+  }
+}
+
+async function stopSmartWorkflow(): Promise<void> {
+  const id = smartWorkflowStatus.value?.workflow_task_id
+  if (!id) return
+  try {
+    await apiClient.post(`/data/tushare/workflows/stop/${id}`)
+    await fetchWorkflowStatus(id)
+  } catch { /* 轮询会更新状态 */ }
+}
+
+async function pauseSmartWorkflow(): Promise<void> {
+  const id = smartWorkflowStatus.value?.workflow_task_id
+  if (!id) return
+  try {
+    await apiClient.post(`/data/tushare/workflows/pause/${id}`)
+    await fetchWorkflowStatus(id)
+  } catch { /* 轮询会更新状态 */ }
+}
+
+async function resumeSmartWorkflow(): Promise<void> {
+  const id = smartWorkflowStatus.value?.workflow_task_id
+  if (!id) return
+  try {
+    await apiClient.post(`/data/tushare/workflows/resume/${id}`)
+    startWorkflowPolling(id)
+  } catch (e) {
+    alert(e instanceof Error ? e.message : '继续工作流失败')
+  }
+}
+
+async function restoreRunningWorkflow(): Promise<void> {
+  try {
+    const { data } = await apiClient.get<WorkflowStatus | null>('/data/tushare/workflows/running')
+    if (data?.workflow_task_id) {
+      smartWorkflowStatus.value = data
+      startWorkflowPolling(data.workflow_task_id)
+    }
+  } catch { /* 静默失败 */ }
 }
 
 async function startImport(api: ApiItem): Promise<void> {
@@ -854,10 +1363,12 @@ onMounted(() => {
   fetchHistory()
   fetchLastImportTimes()
   restoreRunningTasks()
+  restoreRunningWorkflow()
 })
 
 onUnmounted(() => {
   stopAllPolling()
+  stopWorkflowPolling()
 })
 </script>
 
@@ -887,6 +1398,7 @@ onUnmounted(() => {
   display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;
 }
 .connection-info { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.connection-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .connection-label { font-size: 14px; color: #8b949e; }
 .connection-status { font-size: 14px; font-weight: 500; }
 .connection-status.connected { color: #3fb950; }
@@ -895,6 +1407,55 @@ onUnmounted(() => {
 .token-divider { color: #30363d; }
 .token-label { font-size: 14px; color: #8b949e; }
 .token-status { font-size: 14px; color: #e6edf3; }
+.workflow-mode-select { display: flex; align-items: center; gap: 6px; }
+.workflow-mode-input { width: 118px; }
+.workflow-date-range { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.date-mini-label { font-size: 12px; color: #8b949e; }
+.workflow-date-input { width: 132px; }
+.workflow-button-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(68px, auto)); gap: 6px;
+}
+.connection-warning {
+  margin-top: 10px; color: #f85149; font-size: 13px;
+}
+.workflow-confirm { display: flex; flex-direction: column; gap: 14px; }
+.workflow-toolbar { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.workflow-option-row { display: flex; gap: 12px; flex-wrap: wrap; }
+.workflow-option { display: flex; align-items: center; gap: 5px; font-size: 13px; color: #8b949e; }
+.workflow-range-text { color: #e6edf3; font-size: 13px; padding-bottom: 7px; }
+.workflow-warning { color: #d29922; font-size: 13px; padding-bottom: 7px; }
+.workflow-error { color: #f85149; font-size: 13px; }
+.workflow-error-inline { color: #f85149; font-size: 12px; }
+.workflow-stage-list { display: grid; gap: 10px; }
+.workflow-stage { border: 1px solid #21262d; border-radius: 6px; padding: 10px; }
+.workflow-stage-title { font-size: 13px; color: #e6edf3; font-weight: 600; margin-bottom: 8px; }
+.workflow-step-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.workflow-step-chip {
+  font-family: monospace; font-size: 12px; color: #58a6ff;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 999px;
+  padding: 2px 8px;
+}
+.workflow-step-chip.skipped { color: #8b949e; background: #161b22; }
+.workflow-step-chip.warning { color: #d29922; border-color: #8a6d1d; background: #1f1a0d; }
+.workflow-plan-grid { display: grid; gap: 10px; }
+.workflow-plan-panel { border: 1px solid #21262d; border-radius: 6px; padding: 10px; }
+.workflow-plan-panel.progress-panel { margin-top: 12px; }
+.workflow-next-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.workflow-actions { display: flex; gap: 8px; align-items: center; }
+.workflow-progress-summary { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; font-size: 13px; color: #8b949e; }
+.workflow-child-list { display: grid; gap: 8px; margin-top: 12px; }
+.workflow-child { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13px; }
+.workflow-child-count { color: #8b949e; }
+.workflow-readiness { margin-top: 16px; }
+.workflow-readiness-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px;
+}
+.workflow-readiness-item {
+  background: #0d1117; border: 1px solid #21262d; border-radius: 6px;
+  padding: 8px; display: grid; gap: 2px; font-size: 12px; color: #8b949e;
+}
+.workflow-readiness-item strong { color: #e6edf3; font-size: 16px; }
+.workflow-readiness-item small { color: #484f58; }
 
 /* ── 按钮 ── */
 .btn {
@@ -909,6 +1470,7 @@ onUnmounted(() => {
 .btn-danger { background: #da3633; color: #fff; }
 .btn-danger:hover:not(:disabled) { background: #f85149; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn-xs { padding: 3px 8px; font-size: 12px; }
 .btn-import { flex-shrink: 0; align-self: flex-end; }
 .last-import-time {
   font-size: 12px; color: #484f58; white-space: nowrap; align-self: flex-end;

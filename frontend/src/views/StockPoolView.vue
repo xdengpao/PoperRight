@@ -352,7 +352,12 @@ import type { StockPool, SignalDetail, SignalCategory, EnrichedPoolStock } from 
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import ErrorBanner from '@/components/ErrorBanner.vue'
 import MinuteKlineChart from '@/components/MinuteKlineChart.vue'
-import { type AdjType, extractDateFromClick } from '@/components/minuteKlineUtils'
+import {
+  type AdjType,
+  dedupeKlineByTradeDate,
+  extractDateFromClick,
+  getKlineTradeDate,
+} from '@/components/minuteKlineUtils'
 import { apiClient } from '@/api'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -555,7 +560,7 @@ async function fetchKline(symbol: string, adjType: AdjType = 0) {
     const res = await apiClient.get(`/data/kline/${symbol}`, {
       params: { freq: '1d', start: fmt(oneYearAgo), end: fmt(today), adj_type: adjType },
     })
-    const bars = res.data?.bars ?? []
+    const bars = dedupeKlineByTradeDate(res.data?.bars ?? [])
     if (!bars.length) {
       klineError[symbol] = '暂无K线数据'
       return
@@ -577,8 +582,8 @@ function rebuildKlineOptions(symbol: string, bars: any[]) {
   const prevMarkLine = prevOpt?.series?.[0]?.markLine ?? null
 
   const lastBar = bars[bars.length - 1]
-  latestTradeDates[symbol] = lastBar.time.slice(0, 10)
-  const dates = bars.map((b: any) => b.time.slice(0, 10))
+  latestTradeDates[symbol] = getKlineTradeDate(lastBar)
+  const dates = bars.map((b: any) => getKlineTradeDate(b))
   klineDateArrays[symbol] = dates
   const ohlc = bars.map((b: any) => [+b.open, +b.close, +b.low, +b.high])
   const vols = bars.map((b: any) => b.volume)
@@ -861,19 +866,6 @@ async function handleBatchRemove(poolId: string) {
   try {
     await store.removeStocksFromPool(poolId, symbols)
     selectedSymbols.value = new Set()
-    await Promise.all([store.fetchEnrichedPoolStocks(poolId), store.fetchPools()])
-  } catch (e: any) {
-    alert(e?.response?.data?.detail || e?.message || '移除失败，请重试')
-  }
-}
-
-// ─── 单只移除 ─────────────────────────────────────────────────────────────────
-
-async function handleRemoveSingle(poolId: string, symbol: string) {
-  try {
-    await store.removeStocksFromPool(poolId, [symbol])
-    selectedSymbols.value.delete(symbol)
-    selectedSymbols.value = new Set(selectedSymbols.value)
     await Promise.all([store.fetchEnrichedPoolStocks(poolId), store.fetchPools()])
   } catch (e: any) {
     alert(e?.response?.data?.detail || e?.message || '移除失败，请重试')

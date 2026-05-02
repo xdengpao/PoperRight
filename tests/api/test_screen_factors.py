@@ -58,11 +58,11 @@ class TestListFactors:
             assert isinstance(data[cat.value], list)
 
     def test_list_all_factors_total_count(self, client: TestClient):
-        """返回的因子总数应为 19"""
+        """返回的因子总数应与注册表一致"""
         resp = client.get("/api/v1/screen/factors")
         data = resp.json()
         total = sum(len(factors) for factors in data.values())
-        assert total == 19, f"因子总数应为 19，实际为 {total}"
+        assert total == len(FACTOR_REGISTRY)
 
     def test_list_factors_by_category_technical(self, client: TestClient):
         """按 technical 类别筛选"""
@@ -122,6 +122,33 @@ class TestListFactors:
                     f"缺少字段: {missing}"
                 )
 
+    def test_money_flow_factor_serializes_data_source_config(self, client: TestClient):
+        """资金流因子应序列化可选数据源配置。"""
+        resp = client.get("/api/v1/screen/factors", params={"category": "money_flow"})
+        assert resp.status_code == 200
+        factors = resp.json()["money_flow"]
+        money_flow = next(f for f in factors if f["factor_name"] == "money_flow")
+
+        source_config = money_flow["data_source_config"]
+        assert source_config["kind"] == "money_flow"
+        assert source_config["config_path"] == "volume_price.money_flow_source"
+        assert {opt["value"] for opt in source_config["options"]} == {
+            "money_flow",
+            "moneyflow_ths",
+            "moneyflow_dc",
+        }
+
+    def test_index_factor_does_not_serialize_sector_source_config(self, client: TestClient):
+        """指数专题因子不应声明板块数据源配置。"""
+        resp = client.get("/api/v1/screen/factors", params={"category": "sector"})
+        assert resp.status_code == 200
+        factors = resp.json()["sector"]
+        index_pe = next(f for f in factors if f["factor_name"] == "index_pe")
+        sector_rank = next(f for f in factors if f["factor_name"] == "sector_rank")
+
+        assert index_pe["data_source_config"] is None
+        assert sector_rank["data_source_config"]["kind"] == "sector"
+
 
 # ---------------------------------------------------------------------------
 # GET /api/v1/screen/factors/{factor_name}/usage — 单因子使用说明
@@ -144,6 +171,7 @@ class TestGetFactorUsage:
         assert len(data["examples"]) >= 1
         assert data["threshold_type"] == "absolute"
         assert data["default_threshold"] == 80
+        assert data["data_source_config"] is None
 
     def test_get_range_type_factor_usage(self, client: TestClient):
         """查询 range 类型因子应返回 default_range"""
@@ -175,10 +203,11 @@ class TestGetFactorUsage:
 
         assert len(data["description"]) > 0
         assert len(data["examples"]) >= 1
+        assert data["data_source_config"]["kind"] == "sector"
 
     @pytest.mark.parametrize("factor_name", list(FACTOR_REGISTRY.keys()))
     def test_all_factors_accessible_via_usage_api(self, client: TestClient, factor_name: str):
-        """所有 19 个注册因子均可通过 usage API 访问"""
+        """所有注册因子均可通过 usage API 访问"""
         resp = client.get(f"/api/v1/screen/factors/{factor_name}/usage")
         assert resp.status_code == 200
         data = resp.json()

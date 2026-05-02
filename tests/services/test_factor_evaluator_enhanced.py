@@ -187,7 +187,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50, "threshold_high": 80},
         )
-        stock_data = {"rsi": 65.0}
+        stock_data = {"rsi": False, "rsi_current": 65.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is True
         assert result.value == 65.0
@@ -200,7 +200,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50, "threshold_high": 80},
         )
-        stock_data = {"rsi": 30.0}
+        stock_data = {"rsi": True, "rsi_current": 30.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is False
         assert result.value == 30.0
@@ -213,7 +213,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50, "threshold_high": 80},
         )
-        stock_data = {"rsi": 90.0}
+        stock_data = {"rsi": True, "rsi_current": 90.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is False
         assert result.value == 90.0
@@ -226,7 +226,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50, "threshold_high": 80},
         )
-        stock_data = {"rsi": 50.0}
+        stock_data = {"rsi": False, "rsi_current": 50.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is True
 
@@ -238,9 +238,35 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50, "threshold_high": 80},
         )
-        stock_data = {"rsi": 80.0}
+        stock_data = {"rsi": False, "rsi_current": 80.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is True
+
+    def test_rsi_range_ignores_boolean_signal(self):
+        """rsi RANGE 应读取 rsi_current，不使用布尔 rsi 信号。"""
+        condition = FactorCondition(
+            factor_name="rsi",
+            operator="BETWEEN",
+            threshold=None,
+            params={"threshold_low": 55, "threshold_high": 80},
+        )
+        stock_data = {"rsi": False, "rsi_current": 60.0}
+        result = FactorEvaluator.evaluate(condition, stock_data)
+        assert result.passed is True
+        assert result.value == 60.0
+
+    def test_rsi_range_missing_current_fails_even_when_signal_true(self):
+        """缺失 rsi_current 时，即使 rsi=True 也不通过。"""
+        condition = FactorCondition(
+            factor_name="rsi",
+            operator="BETWEEN",
+            threshold=None,
+            params={"threshold_low": 55, "threshold_high": 80},
+        )
+        stock_data = {"rsi": True}
+        result = FactorEvaluator.evaluate(condition, stock_data)
+        assert result.passed is False
+        assert result.value is None
 
     def test_turnover_range_evaluation(self):
         """turnover is also RANGE type — verify it works."""
@@ -263,7 +289,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_high": 80},
         )
-        stock_data = {"rsi": 65.0}
+        stock_data = {"rsi_current": 65.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is False
 
@@ -275,7 +301,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={"threshold_low": 50},
         )
-        stock_data = {"rsi": 65.0}
+        stock_data = {"rsi_current": 65.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is False
 
@@ -287,7 +313,7 @@ class TestRangeFactorEvaluation:
             threshold=None,
             params={},
         )
-        stock_data = {"rsi": 65.0}
+        stock_data = {"rsi_current": 65.0}
         result = FactorEvaluator.evaluate(condition, stock_data)
         assert result.passed is False
 

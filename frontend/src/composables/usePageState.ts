@@ -1,4 +1,4 @@
-import { reactive } from 'vue'
+import { reactive, type UnwrapRef } from 'vue'
 
 export interface PageState<T> {
   loading: boolean
@@ -13,7 +13,7 @@ export function usePageState<T>() {
     state.loading = true
     state.error = null
     try {
-      state.data = await fn()
+      state.data = await fn() as UnwrapRef<T>
     } catch (e) {
       state.error = e instanceof Error ? e.message : '请求失败，请重试'
     } finally {

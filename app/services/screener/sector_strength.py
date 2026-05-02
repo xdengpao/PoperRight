@@ -34,6 +34,7 @@ from app.models.sector import (
     SectorInfo,
     SectorKline,
 )
+from app.services.data_engine.kline_normalizer import derive_trade_date
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +132,7 @@ class SectorStrengthFilter:
             latest_data_date: date | None = None
             for _code, klines in kline_data.items():
                 for k in klines:
-                    k_date = k.time.date() if isinstance(k.time, datetime) else k.time
+                    k_date = derive_trade_date(k.time, getattr(k, "freq", "1d")) if isinstance(k.time, datetime) else k.time
                     if latest_data_date is None or k_date > latest_data_date:
                         latest_data_date = k_date
 

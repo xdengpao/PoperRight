@@ -22,6 +22,7 @@ import pytest
 from app.models.kline import KlineBar
 from app.models.money_flow import MoneyFlow
 from app.models.stock import StockInfo
+from app.models.tushare_import import MoneyflowDc, MoneyflowThs
 from app.services.screener.screen_data_provider import ScreenDataProvider
 
 
@@ -96,6 +97,50 @@ def _make_money_flow(
     return mf
 
 
+def _make_moneyflow_ths(
+    ts_code: str = "000001.SZ",
+    trade_date: str = "20240610",
+    buy_elg_amount: float | None = 5000.0,
+    sell_elg_amount: float | None = 1000.0,
+    buy_lg_amount: float | None = 3000.0,
+    sell_lg_amount: float | None = 1000.0,
+    buy_md_amount: float | None = 2000.0,
+    sell_md_amount: float | None = 500.0,
+) -> MoneyflowThs:
+    row = MoneyflowThs()
+    row.ts_code = ts_code
+    row.trade_date = trade_date
+    row.buy_sm_amount = 500.0
+    row.sell_sm_amount = 1200.0
+    row.buy_md_amount = buy_md_amount
+    row.sell_md_amount = sell_md_amount
+    row.buy_lg_amount = buy_lg_amount
+    row.sell_lg_amount = sell_lg_amount
+    row.buy_elg_amount = buy_elg_amount
+    row.sell_elg_amount = sell_elg_amount
+    row.net_mf_amount = 6500.0
+    return row
+
+
+def _make_moneyflow_dc(
+    ts_code: str = "000001.SZ",
+    trade_date: str = "20240610",
+) -> MoneyflowDc:
+    row = MoneyflowDc()
+    row.ts_code = ts_code
+    row.trade_date = trade_date
+    row.buy_sm_amount = 300.0
+    row.sell_sm_amount = 900.0
+    row.buy_md_amount = 1800.0
+    row.sell_md_amount = 500.0
+    row.buy_lg_amount = 2600.0
+    row.sell_lg_amount = 700.0
+    row.buy_elg_amount = 4200.0
+    row.sell_elg_amount = 800.0
+    row.net_mf_amount = 5600.0
+    return row
+
+
 # ---------------------------------------------------------------------------
 # _enrich_money_flow_factors 测试
 # ---------------------------------------------------------------------------
@@ -108,7 +153,9 @@ class TestEnrichMoneyFlowFactors:
     async def test_normal_load_with_signal(self):
         """正常加载：连续 2 日净流入 >= 1000 万且大单占比 > 30% 时信号为 True"""
         provider = ScreenDataProvider(
-            pg_session=MagicMock(), ts_session=MagicMock()
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "money_flow"}},
         )
 
         # 模拟连续 2 日净流入 >= 1000 万
@@ -132,6 +179,7 @@ class TestEnrichMoneyFlowFactors:
         )
 
         assert factor_dict["money_flow"] is True
+        assert factor_dict["money_flow_value"] == pytest.approx(1500.0)
         assert factor_dict["large_order"] is True
         assert factor_dict["main_net_inflow"] == pytest.approx(1500.0)
         assert factor_dict["large_order_ratio"] == pytest.approx(35.0)
@@ -140,7 +188,9 @@ class TestEnrichMoneyFlowFactors:
     async def test_normal_load_no_signal(self):
         """正常加载：净流入不满足连续条件或大单占比不足时信号为 False"""
         provider = ScreenDataProvider(
-            pg_session=MagicMock(), ts_session=MagicMock()
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "money_flow"}},
         )
 
         # 仅 1 日净流入 >= 1000 万，不满足连续 2 日条件
@@ -164,6 +214,7 @@ class TestEnrichMoneyFlowFactors:
         )
 
         assert factor_dict["money_flow"] is False
+        assert factor_dict["money_flow_value"] == pytest.approx(1500.0)
         assert factor_dict["large_order"] is False
         # 原始数值仍应写入
         assert factor_dict["main_net_inflow"] == pytest.approx(1500.0)
@@ -191,6 +242,7 @@ class TestEnrichMoneyFlowFactors:
         )
 
         assert factor_dict["main_net_inflow"] == pytest.approx(800.0)
+        assert factor_dict["money_flow_value"] == pytest.approx(800.0)
         assert factor_dict["large_order_ratio"] == pytest.approx(28.5)
 
     @pytest.mark.asyncio
@@ -210,6 +262,7 @@ class TestEnrichMoneyFlowFactors:
         assert factor_dict["money_flow"] is False
         assert factor_dict["large_order"] is False
         assert factor_dict["main_net_inflow"] is None
+        assert factor_dict["money_flow_value"] is None
         assert factor_dict["large_order_ratio"] is None
         # 验证 WARNING 日志
         assert any("600000.SH" in msg and "无数据记录" in msg for msg in caplog.messages)
@@ -233,6 +286,7 @@ class TestEnrichMoneyFlowFactors:
         assert factor_dict["money_flow"] is False
         assert factor_dict["large_order"] is False
         assert factor_dict["main_net_inflow"] is None
+        assert factor_dict["money_flow_value"] is None
         assert factor_dict["large_order_ratio"] is None
         assert any("异常" in msg for msg in caplog.messages)
 
@@ -263,7 +317,110 @@ class TestEnrichMoneyFlowFactors:
         assert factor_dict["large_order"] is False
         # 原始数值为 None
         assert factor_dict["main_net_inflow"] is None
+        assert factor_dict["money_flow_value"] is None
         assert factor_dict["large_order_ratio"] is None
+
+
+class TestSelectedMoneyFlowSource:
+    """测试资金流数据源三选一接入。"""
+
+    @pytest.mark.asyncio
+    async def test_moneyflow_ths_selected_only_queries_ths(self):
+        provider = ScreenDataProvider(
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "moneyflow_ths"}},
+        )
+        provider._query_moneyflow_ths = AsyncMock(return_value=[_make_moneyflow_ths()])
+        provider._query_moneyflow_dc = AsyncMock(return_value=[_make_moneyflow_dc()])
+
+        stocks_data = {"000001.SZ": {"money_flow": False}}
+        await provider._enrich_selected_money_flow_factors(
+            stocks_data, date(2024, 6, 10), "moneyflow_ths"
+        )
+
+        data = stocks_data["000001.SZ"]
+        assert data["money_flow"] is True
+        assert data["money_flow_value"] == pytest.approx(7500.0)
+        assert data["main_net_inflow"] == pytest.approx(7500.0)
+        provider._query_moneyflow_ths.assert_awaited_once()
+        provider._query_moneyflow_dc.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_moneyflow_dc_selected_only_queries_dc(self):
+        provider = ScreenDataProvider(
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "moneyflow_dc"}},
+        )
+        provider._query_moneyflow_ths = AsyncMock(return_value=[_make_moneyflow_ths()])
+        provider._query_moneyflow_dc = AsyncMock(return_value=[_make_moneyflow_dc()])
+
+        stocks_data = {"000001.SZ": {"money_flow": False}}
+        await provider._enrich_selected_money_flow_factors(
+            stocks_data, date(2024, 6, 10), "moneyflow_dc"
+        )
+
+        data = stocks_data["000001.SZ"]
+        assert data["money_flow"] is True
+        assert data["money_flow_value"] == pytest.approx(6600.0)
+        provider._query_moneyflow_dc.assert_awaited_once()
+        provider._query_moneyflow_ths.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_selected_source_uses_latest_available_date(self):
+        provider = ScreenDataProvider(
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "moneyflow_dc"}},
+        )
+        provider._query_moneyflow_dc = AsyncMock(side_effect=[[], [_make_moneyflow_dc()]])
+        provider._resolve_latest_moneyflow_date = AsyncMock(return_value="20260429")
+
+        rows, actual_date = await provider._query_selected_moneyflow_rows(
+            MagicMock(), "moneyflow_dc", date(2026, 4, 30), "20260430",
+        )
+
+        assert actual_date == "20260429"
+        assert len(rows) == 1
+        assert provider._query_moneyflow_dc.await_args_list[0].args[1] == "20260430"
+        assert provider._query_moneyflow_dc.await_args_list[1].args[1] == "20260429"
+
+    @pytest.mark.asyncio
+    async def test_selected_source_missing_does_not_fallback(self):
+        provider = ScreenDataProvider(
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "moneyflow_ths"}},
+        )
+        provider._query_moneyflow_ths = AsyncMock(return_value=[])
+        provider._query_moneyflow_dc = AsyncMock(return_value=[_make_moneyflow_dc()])
+        provider._resolve_latest_moneyflow_date = AsyncMock(return_value=None)
+
+        stocks_data = {"000001.SZ": {"money_flow": True, "money_flow_value": 1.0}}
+        await provider._enrich_selected_money_flow_factors(
+            stocks_data, date(2024, 6, 10), "moneyflow_ths"
+        )
+
+        data = stocks_data["000001.SZ"]
+        assert data["money_flow"] is False
+        assert data["money_flow_value"] is None
+        assert data["main_net_inflow"] is None
+        provider._query_moneyflow_ths.assert_awaited_once()
+        provider._query_moneyflow_dc.assert_not_awaited()
+
+    def test_money_flow_percentile_uses_value_not_bool(self):
+        stocks_data = {
+            "000001.SZ": {"money_flow": False, "money_flow_value": 10.0},
+            "000002.SZ": {"money_flow": True, "money_flow_value": 30.0},
+            "000003.SZ": {"money_flow": True, "money_flow_value": None},
+        }
+
+        ScreenDataProvider._compute_percentile_ranks(stocks_data, ["money_flow"])
+
+        assert stocks_data["000001.SZ"]["money_flow_pctl"] == pytest.approx(50.0)
+        assert stocks_data["000002.SZ"]["money_flow_pctl"] == pytest.approx(100.0)
+        assert stocks_data["000003.SZ"]["money_flow_pctl"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +438,9 @@ class TestLoadScreenDataMoneyFlow:
         bars = [_make_bar(symbol="000001.SZ", day_offset=i) for i in range(3)]
 
         provider = ScreenDataProvider(
-            pg_session=MagicMock(), ts_session=MagicMock()
+            pg_session=MagicMock(),
+            ts_session=MagicMock(),
+            strategy_config={"volume_price": {"money_flow_source": "money_flow"}},
         )
         provider._load_valid_stocks = AsyncMock(return_value=[stock])
 

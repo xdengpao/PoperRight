@@ -258,6 +258,11 @@ import * as echarts from 'echarts'
 import { getFundamentalColorClass, formatFundamentalValue } from './fundamentalUtils'
 import { getMoneyFlowBarColor } from './moneyFlowUtils'
 import SectorBrowserPanel from '@/components/SectorBrowserPanel.vue'
+import {
+  dedupeKlineByTradeDate,
+  getKlineTradeDate,
+  type KlineBar as ApiKlineBar,
+} from '@/components/minuteKlineUtils'
 
 // ─── TypeScript 接口 (Task 24.2.2) ──────────────────────────────────────────
 
@@ -332,6 +337,7 @@ let chartInstance: echarts.ECharts | null = null
 
 interface KlineData {
   time: string
+  trade_date?: string
   open: number
   close: number
   low: number
@@ -341,6 +347,7 @@ interface KlineData {
 
 interface KlineBar {
   time: string
+  trade_date?: string
   open: string | number
   close: string | number
   low: string | number
@@ -575,8 +582,9 @@ async function loadKline() {
     const name = resp.name || ''
     stockLabel.value = name ? `${name}（${symbol.value}）` : symbol.value
 
-    const data: KlineData[] = (resp.bars ?? []).map((b) => ({
+    const data: KlineData[] = dedupeKlineByTradeDate((resp.bars ?? []) as ApiKlineBar[]).map((b) => ({
       time: b.time,
+      trade_date: b.trade_date,
       open: Number(b.open),
       close: Number(b.close),
       low: Number(b.low),
@@ -593,7 +601,7 @@ async function loadKline() {
 
 function renderKline(data: KlineData[]) {
   if (!chartInstance || !data.length) return
-  const dates = data.map((d) => d.time.slice(0, 10))
+  const dates = data.map((d) => getKlineTradeDate(d))
   const ohlc = data.map((d) => [d.open, d.close, d.low, d.high])
   const volumes = data.map((d) => d.volume)
 
@@ -679,7 +687,7 @@ function renderSectorKline() {
   }
   sectorKlineChartInstance = echarts.init(sectorKlineChartRef.value)
 
-  const dates = data.map(d => d.time.slice(0, 10))
+  const dates = data.map(d => getKlineTradeDate(d))
   const ohlc = data.map(d => [d.open, d.close, d.low, d.high])
   const volumes = data.map(d => d.volume ?? 0)
 

@@ -34,7 +34,36 @@ export interface StrategyTemplate {
   created_at: string
 }
 
+export type FactorRole = 'primary' | 'confirmation' | 'score_only' | 'disabled'
+
+export interface FactorConditionStats {
+  factor_name: string
+  label?: string | null
+  role?: FactorRole | string | null
+  group_id?: string | null
+  evaluated_count: number
+  passed_count: number
+  failed_count: number
+  missing_count: number
+  remaining_after_count?: number | null
+}
+
 export type ThresholdType = 'absolute' | 'percentile' | 'industry_relative' | 'z_score' | 'boolean' | 'range'
+
+export interface FactorDataSourceOption {
+  value: string
+  label: string
+  description: string
+  recommended: boolean
+  legacy: boolean
+}
+
+export interface FactorDataSourceConfig {
+  kind: 'money_flow' | 'sector' | string
+  config_path: string
+  scope: 'strategy' | string
+  options: FactorDataSourceOption[]
+}
 
 export interface FactorMeta {
   factor_name: string
@@ -48,6 +77,7 @@ export interface FactorMeta {
   description: string
   examples: Record<string, unknown>[]
   default_range: [number, number] | null
+  data_source_config?: FactorDataSourceConfig | null
 }
 
 export interface SectorScreenConfig {
@@ -104,11 +134,35 @@ export const useScreenerStore = defineStore('screener', () => {
   const strategyExamples = ref<StrategyExample[]>([])
   const sectorCoverage = ref<CoverageSourceStats[]>([])
   const sectorTypes = ref<SectorTypeOption[]>([])
+  const lastFactorStats = ref<FactorConditionStats[]>([])
+  const lastFactorStatsStrategyKey = ref<string | null>(null)
 
   /** 选股执行中标志，持久化在 store 中以跨组件生命周期保持状态 */
   const running = ref(false)
   /** 选股执行错误信息 */
   const runError = ref('')
+  /** 当前选股任务 ID */
+  const runTaskId = ref<string | null>(null)
+
+  interface ScreenRunStartResponse {
+    task_id: string
+    status: 'pending' | 'running' | 'completed' | 'failed'
+    message?: string
+  }
+
+  interface ScreenRunStatusResponse {
+    task_id: string
+    status: 'pending' | 'running' | 'completed' | 'failed'
+    message?: string
+    strategy_id?: string
+    passed?: number
+    total_screened?: number
+    factor_stats?: FactorConditionStats[]
+  }
+
+  function sleep(ms: number) {
+    return new Promise(resolve => window.setTimeout(resolve, ms))
+  }
 
   /**
    * 执行一键选股
@@ -118,13 +172,38 @@ export const useScreenerStore = defineStore('screener', () => {
   async function runScreen(params: { strategyId?: string; strategyConfig?: object }) {
     running.value = true
     runError.value = ''
+    runTaskId.value = null
+    clearFactorStats()
     try {
-      await apiClient.post('/screen/run', {
+      const startRes = await apiClient.post<ScreenRunStartResponse>('/screen/run', {
         strategy_id: params.strategyId,
         strategy_config: params.strategyConfig,
         screen_type: 'EOD',
-      }, { timeout: 120_000 })
-      return { success: true }
+      }, { timeout: 15_000 })
+      runTaskId.value = startRes.data.task_id
+
+      const deadline = Date.now() + 30 * 60_000
+      while (Date.now() < deadline) {
+        const statusRes = await apiClient.get<ScreenRunStatusResponse>(
+          `/screen/run/status/${startRes.data.task_id}`,
+          { timeout: 15_000 },
+        )
+        const status = statusRes.data
+        if (status.status === 'completed') {
+          lastFactorStats.value = Array.isArray(status.factor_stats) ? status.factor_stats : []
+          lastFactorStatsStrategyKey.value = status.strategy_id ?? params.strategyId ?? null
+          await fetchResults()
+          return { success: true }
+        }
+        if (status.status === 'failed') {
+          runError.value = status.message || '选股任务执行失败'
+          return { success: false }
+        }
+        await sleep(2000)
+      }
+
+      runError.value = '选股任务执行超时，请稍后在结果页查看'
+      return { success: false }
     } catch (error: unknown) {
       runError.value = error instanceof Error ? error.message : String(error)
       return { success: false }
@@ -139,6 +218,8 @@ export const useScreenerStore = defineStore('screener', () => {
       const res = await apiClient.get('/screen/results')
       const data = res.data
       results.value = Array.isArray(data) ? data : (data.items ?? [])
+      lastFactorStats.value = Array.isArray(data.factor_stats) ? data.factor_stats : []
+      lastFactorStatsStrategyKey.value = typeof data.strategy_id === 'string' ? data.strategy_id : null
       lastUpdated.value = new Date()
     } finally {
       loading.value = false
@@ -185,6 +266,11 @@ export const useScreenerStore = defineStore('screener', () => {
     }
   }
 
+  function clearFactorStats() {
+    lastFactorStats.value = []
+    lastFactorStatsStrategyKey.value = null
+  }
+
   return {
     results,
     strategies,
@@ -194,15 +280,19 @@ export const useScreenerStore = defineStore('screener', () => {
     strategyExamples,
     running,
     runError,
+    runTaskId,
     fetchResults,
     fetchStrategies,
     activateStrategy,
     fetchFactorRegistry,
     fetchStrategyExamples,
     sectorCoverage,
+    lastFactorStats,
+    lastFactorStatsStrategyKey,
     fetchSectorCoverage,
     sectorTypes,
     fetchSectorTypes,
+    clearFactorStats,
     runScreen,
   }
 })

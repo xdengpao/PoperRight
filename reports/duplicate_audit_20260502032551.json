@@ -1,0 +1,993 @@
+[
+  {
+    "database": "pg",
+    "table": "stock_info",
+    "key": [
+      "\"symbol\""
+    ],
+    "source": "tushare_registry:stock_basic",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_premarket",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_premarket",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "trade_calendar",
+    "key": [
+      "\"exchange\"",
+      "\"cal_date\""
+    ],
+    "source": "tushare_registry:trade_cal",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stock_st",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stock_st",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "st_warning",
+    "key": [
+      "\"ts_code\"",
+      "\"imp_date\""
+    ],
+    "source": "tushare_registry:st",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stock_namechange",
+    "key": [
+      "\"ts_code\"",
+      "\"start_date\""
+    ],
+    "source": "tushare_registry:namechange",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stock_company",
+    "key": [
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:stock_company",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_managers",
+    "key": [
+      "\"ts_code\"",
+      "\"name\"",
+      "\"begin_date\""
+    ],
+    "source": "tushare_registry:stk_managers",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_rewards",
+    "key": [
+      "\"ts_code\"",
+      "\"ann_date\"",
+      "\"name\""
+    ],
+    "source": "tushare_registry:stk_rewards",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "new_share",
+    "key": [
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:new_share",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_limit",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_limit",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "suspend_info",
+    "key": [
+      "\"ts_code\"",
+      "\"suspend_date\""
+    ],
+    "source": "tushare_registry:suspend_d",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "hsgt_top10",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\"",
+      "\"market_type\""
+    ],
+    "source": "tushare_registry:hsgt_top10",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "ggt_top10",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\"",
+      "\"market_type\""
+    ],
+    "source": "tushare_registry:ggt_top10",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "ggt_daily",
+    "key": [
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:ggt_daily",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "ggt_monthly",
+    "key": [
+      "\"month\""
+    ],
+    "source": "tushare_registry:ggt_monthly",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "financial_statement",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\"",
+      "\"report_type\""
+    ],
+    "source": "tushare_registry:income",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "dividend",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\"",
+      "\"div_proc\""
+    ],
+    "source": "tushare_registry:dividend",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "forecast",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\""
+    ],
+    "source": "tushare_registry:forecast",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "express",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\""
+    ],
+    "source": "tushare_registry:express",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "fina_mainbz",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\"",
+      "\"bz_item\""
+    ],
+    "source": "tushare_registry:fina_mainbz",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "disclosure_date",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\""
+    ],
+    "source": "tushare_registry:disclosure_date",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_shock",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"shock_type\""
+    ],
+    "source": "tushare_registry:stk_shock",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_high_shock",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"shock_type\""
+    ],
+    "source": "tushare_registry:stk_high_shock",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "top_holders",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\"",
+      "\"holder_name\"",
+      "\"holder_type\""
+    ],
+    "source": "tushare_registry:top10_holders",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "pledge_stat",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\""
+    ],
+    "source": "tushare_registry:pledge_stat",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "block_trade",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"buyer\"",
+      "\"seller\""
+    ],
+    "source": "tushare_registry:block_trade",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_holdernumber",
+    "key": [
+      "\"ts_code\"",
+      "\"end_date\""
+    ],
+    "source": "tushare_registry:stk_holdernumber",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_holdertrade",
+    "key": [
+      "\"ts_code\"",
+      "\"ann_date\"",
+      "\"holder_name\""
+    ],
+    "source": "tushare_registry:stk_holdertrade",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "cyq_perf",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:cyq_perf",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_factor",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_factor_pro",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "hk_hold",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"exchange\""
+    ],
+    "source": "tushare_registry:hk_hold",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_auction_o",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_auction_o",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_auction_c",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_auction_c",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_nineturn",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"turn_type\""
+    ],
+    "source": "tushare_registry:stk_nineturn",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_ah_comparison",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_ah_comparison",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "margin_data",
+    "key": [
+      "\"trade_date\"",
+      "\"exchange_id\""
+    ],
+    "source": "tushare_registry:margin",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "margin_detail",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:margin_detail",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "slb_len",
+    "key": [
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:slb_len",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "tushare_moneyflow",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:moneyflow",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "moneyflow_ths",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:moneyflow_ths",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "moneyflow_dc",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:moneyflow_dc",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "moneyflow_ind",
+    "key": [
+      "\"trade_date\"",
+      "\"industry_name\"",
+      "\"data_source\""
+    ],
+    "source": "tushare_registry:moneyflow_ind_ths",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "moneyflow_mkt_dc",
+    "key": [
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:moneyflow_mkt_dc",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "moneyflow_hsgt",
+    "key": [
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:moneyflow_hsgt",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "top_list",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\"",
+      "\"reason\""
+    ],
+    "source": "tushare_registry:top_list",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "top_inst",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\"",
+      "\"exalter\""
+    ],
+    "source": "tushare_registry:top_inst",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "limit_list_ths",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"limit\""
+    ],
+    "source": "tushare_registry:limit_list_ths",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "limit_list",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\"",
+      "\"limit\""
+    ],
+    "source": "tushare_registry:limit_list_d",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "limit_step",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:limit_step",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "sector_info",
+    "key": [
+      "\"sector_code\"",
+      "\"data_source\""
+    ],
+    "source": "tushare_registry:ths_index",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "sector_constituent",
+    "key": [
+      "\"trade_date\"",
+      "\"sector_code\"",
+      "\"data_source\"",
+      "\"symbol\""
+    ],
+    "source": "tushare_registry:ths_member",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "stk_auction",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:stk_auction",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "hm_list",
+    "key": [
+      "\"hm_name\""
+    ],
+    "source": "tushare_registry:hm_list",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "hm_detail",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\"",
+      "\"hm_name\""
+    ],
+    "source": "tushare_registry:hm_detail",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "ths_hot",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:ths_hot",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "dc_hot",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:dc_hot",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "kpl_list",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:kpl_list",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "index_info",
+    "key": [
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:index_basic",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "index_weight",
+    "key": [
+      "\"index_code\"",
+      "\"con_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:index_weight",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "index_dailybasic",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:index_dailybasic",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "index_tech",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:idx_factor_pro",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "market_daily_info",
+    "key": [
+      "\"trade_date\"",
+      "\"exchange\"",
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:daily_info",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "sz_daily_info",
+    "key": [
+      "\"trade_date\"",
+      "\"ts_code\""
+    ],
+    "source": "tushare_registry:sz_daily_info",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  },
+  {
+    "database": "pg",
+    "table": "index_global",
+    "key": [
+      "\"ts_code\"",
+      "\"trade_date\""
+    ],
+    "source": "tushare_registry:index_global",
+    "action": "auto_delete",
+    "duplicate_groups": 0,
+    "duplicate_rows": 0,
+    "extra_rows": 0,
+    "sample_rows": [],
+    "error": null
+  }
+]

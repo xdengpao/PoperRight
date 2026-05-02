@@ -19,7 +19,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime
+from contextvars import ContextVar
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import warnings
@@ -38,8 +40,32 @@ from app.services.data_engine.tushare_registry import (
 )
 from app.tasks.base import DataSyncTask
 from app.core.symbol_utils import is_standard, to_standard
+from app.services.data_engine.kline_normalizer import (
+    normalize_kline_symbol,
+    normalize_kline_time,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WriteContext:
+    """导入写入上下文，用于按批次控制主表写入和 hook 行为。"""
+
+    batch_mode: str
+    current_trade_date: str | None = None
+    latest_market_trade_date: str | None = None
+    update_current_snapshot: bool = False
+    runtime_freq: str | None = None
+
+_BACKFILL_HOOK_INFO: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "tushare_backfill_hook_info",
+    default=None,
+)
+_SECTOR_KLINE_WRITE_INFO: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "tushare_sector_kline_write_info",
+    default=None,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -73,10 +99,142 @@ _PROGRESS_TTL = 86400  # 24h
 _MAX_NETWORK_RETRIES = 3
 _RATE_LIMIT_WAIT = 60  # 频率限制等待秒数
 
+_INTRADAY_FREQS = {
+    "1m", "5m", "15m", "30m", "60m",
+    "1min", "5min", "15min", "30min", "60min",
+    "min", "minute", "分钟",
+}
+_DATE_FREQS = {"1d", "1w", "1M", "d", "w", "m", "daily", "weekly", "monthly"}
+_INTRADAY_TIME_FIELDS = (
+    "trade_time",
+    "trade_datetime",
+    "datetime",
+    "time",
+    "timestamp",
+)
+_SECTOR_DAILY_SOURCE_BY_API = {
+    "dc_daily": "DC",
+    "ths_daily": "THS",
+    "tdx_daily": "TDX",
+    "sw_daily": "TI",
+    "ci_daily": "CI",
+}
+
 
 # ---------------------------------------------------------------------------
 # 截断检测辅助函数
 # ---------------------------------------------------------------------------
+
+def _is_intraday_freq(freq: str | None) -> bool:
+    """判断是否为分钟级/盘中频率。"""
+    if not freq:
+        return False
+    value = str(freq).strip()
+    if value in _DATE_FREQS:
+        return False
+    if value in _INTRADAY_FREQS:
+        return True
+    lower = value.lower()
+    return lower.endswith("min") or lower in _INTRADAY_FREQS
+
+
+def _parse_tushare_trade_date_utc(value: object) -> datetime | None:
+    """解析 Tushare 交易日期为 UTC 零点 aware datetime。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc)
+        return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        if len(raw) >= 10 and "-" in raw:
+            parsed_date = date.fromisoformat(raw[:10])
+        elif len(raw) >= 8 and raw[:8].isdigit():
+            date_part = raw[:8]
+            parsed_date = date(
+                int(date_part[:4]),
+                int(date_part[4:6]),
+                int(date_part[6:8]),
+            )
+        else:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return datetime.combine(parsed_date, time.min, tzinfo=timezone.utc)
+
+
+def _parse_tushare_datetime_utc(value: object) -> datetime | None:
+    """解析 Tushare 分钟/实时日期时间为 UTC aware datetime。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return (
+            value.astimezone(timezone.utc)
+            if value.tzinfo is not None
+            else value.replace(tzinfo=timezone.utc)
+        )
+    if isinstance(value, date):
+        return datetime.combine(value, time.min, tzinfo=timezone.utc)
+
+    raw = str(value).strip()
+    if not raw:
+        return None
+    normalized = raw.replace("/", "-")
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y%m%d %H:%M:%S",
+        "%Y%m%d %H:%M",
+        "%Y%m%d%H%M%S",
+        "%Y%m%d%H%M",
+    )
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        parsed = None
+        for fmt in formats:
+            try:
+                parsed = datetime.strptime(normalized, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return _parse_tushare_trade_date_utc(raw)
+    return (
+        parsed.astimezone(timezone.utc)
+        if parsed.tzinfo is not None
+        else parsed.replace(tzinfo=timezone.utc)
+    )
+
+
+def _normalize_tushare_timeseries_time(row: dict, freq: str) -> datetime | None:
+    """根据频率和行字段规范化 Tushare 时序写入时间。"""
+    if _is_intraday_freq(freq):
+        for field in _INTRADAY_TIME_FIELDS:
+            ts = _parse_tushare_datetime_utc(row.get(field))
+            if ts is not None:
+                return ts
+        ts = _parse_tushare_trade_date_utc(row.get("trade_date"))
+        if ts is not None:
+            logger.debug("分钟级 Tushare 行缺少具体时间字段，退化使用 trade_date=%s", row.get("trade_date"))
+        return ts
+    return _parse_tushare_trade_date_utc(row.get("trade_date"))
+
+
+def _to_sector_kline_db_time(ts: datetime) -> datetime:
+    """适配 sector_kline 当前无时区 timestamp 列，统一存 UTC naive 时间。"""
+    if ts.tzinfo is None:
+        return ts
+    return ts.astimezone(timezone.utc).replace(tzinfo=None)
 
 # 连续截断告警阈值
 _CONSECUTIVE_TRUNCATION_THRESHOLD = 3
@@ -257,11 +415,12 @@ def determine_batch_strategy(
 
     优先级路由：
     0. batch_by_sector → "by_sector"（按板块代码遍历，优先级最高）
-    1. batch_by_code → "by_code"（若同时 batch_by_date 且有日期范围 → "by_code_and_date"）
-    2. INDEX_CODE 且未指定 ts_code → "by_index"
-    3. batch_by_date 且有日期范围 → "by_date"
-    4. 兜底：未声明 batch_by_date 但运行时检测到 DATE_RANGE 参数且有日期范围 → "by_date_fallback"
-    5. 以上均不满足 → "single"
+    1. full_market_by_trade_date → "by_trade_date"（按交易日全市场导入）
+    2. batch_by_code → "by_code"（若同时 batch_by_date 且有日期范围 → "by_code_and_date"）
+    3. INDEX_CODE 且未指定 ts_code → "by_index"
+    4. batch_by_date 且有日期范围 → "by_date"
+    5. 兜底：未声明 batch_by_date 但运行时检测到 DATE_RANGE 参数且有日期范围 → "by_date_fallback"
+    6. 以上均不满足 → "single"
 
     Args:
         entry: 接口注册信息
@@ -269,7 +428,8 @@ def determine_batch_strategy(
 
     Returns:
         策略标识字符串：
-        "by_sector", "by_code", "by_code_and_date", "by_index", "by_date", "by_date_fallback", "single"
+        "by_sector", "by_trade_date", "by_code", "by_code_and_date",
+        "by_index", "by_date", "by_date_fallback", "single"
 
     对应需求：4.1, 4.2, sector-member-batch-import 需求 1.1
     """
@@ -279,6 +439,13 @@ def determine_batch_strategy(
     # 优先级 0（新增）：batch_by_sector — 按板块代码遍历，优先级高于所有其他策略
     if entry.batch_by_sector:
         return "by_sector"
+
+    if (
+        entry.extra_config.get("full_market_by_trade_date")
+        and has_date_params
+        and not has_ts_code
+    ):
+        return "by_trade_date"
 
     # 优先级 1：batch_by_code
     use_batch_code = entry.batch_by_code
@@ -352,12 +519,16 @@ async def _process_import(
     adapter = TushareAdapter(api_token=token)
     rate_delay = _build_rate_limit_map().get(entry.rate_limit_group, 0.18)
 
-    # 更新 Redis 进度为 running
-    await _update_progress(task_id, status="running")
-
     total_records = 0
 
     try:
+        _BACKFILL_HOOK_INFO.set([])
+        _SECTOR_KLINE_WRITE_INFO.set([])
+
+        # 更新 Redis 进度为 running。必须放在异常保护内，避免启动阶段
+        # Redis/event loop 异常绕过失败落库，导致前端长期停在 pending。
+        await _update_progress(task_id, status="running")
+
         # 使用纯函数确定分批策略
         strategy = determine_batch_strategy(entry, params)
 
@@ -371,6 +542,10 @@ async def _process_import(
             )
         elif strategy == "by_sector":
             result = await _process_batched_by_sector(
+                entry, adapter, params, task_id, log_id, rate_delay,
+            )
+        elif strategy == "by_trade_date":
+            result = await _process_batched_by_trade_date(
                 entry, adapter, params, task_id, log_id, rate_delay,
             )
         elif strategy == "by_date":
@@ -396,11 +571,37 @@ async def _process_import(
         total_records = result.get("record_count", 0)
         status = result.get("status", "completed")
         batch_stats = result.get("batch_stats")
+        batch_stats = _merge_backfill_hook_info(batch_stats)
+        sector_postcheck = await _postcheck_sector_kline_import(api_name, params, total_records)
+        if sector_postcheck:
+            batch_stats = dict(batch_stats or {})
+            batch_stats["sector_kline_postcheck"] = sector_postcheck
+            if not sector_postcheck.get("ok") and status == "completed":
+                status = "failed"
+                result["status"] = "failed"
+                result["error"] = sector_postcheck.get("message", "板块行情实表覆盖校验失败")
+        if batch_stats:
+            result["batch_stats"] = batch_stats
 
         if status == "stopped":
             await _finalize_log(log_id, "stopped", total_records, batch_stats=batch_stats)
             await _update_progress(task_id, status="stopped",
                                    total=total_records, completed=total_records)
+        elif status == "failed":
+            await _finalize_log(
+                log_id,
+                "failed",
+                total_records,
+                result.get("error"),
+                batch_stats=batch_stats,
+            )
+            await _update_progress(
+                task_id,
+                status="failed",
+                error_message=result.get("error"),
+                total=total_records,
+                completed=total_records,
+            )
         else:
             await _finalize_log(log_id, "completed", total_records, batch_stats=batch_stats)
             await _update_progress(task_id, status="completed",
@@ -468,8 +669,9 @@ async def _process_single(
     converted_rows = _convert_codes(mapped_rows, entry)
 
     # 写入数据库
+    runtime_freq = call_params.get("freq") or params.get("freq")
     if entry.storage_engine == StorageEngine.TS:
-        await _write_to_timescaledb(converted_rows, entry)
+        await _write_to_timescaledb(converted_rows, entry, runtime_freq=runtime_freq)
     else:
         await _write_to_postgresql(converted_rows, entry)
 
@@ -513,6 +715,287 @@ def _generate_date_chunks(
         stacklevel=2,
     )
     return DateBatchSplitter.split(start_date, end_date, chunk_days)
+
+
+def _parse_yyyymmdd(value: str) -> date:
+    """解析 YYYYMMDD / YYYY-MM-DD 日期字符串。"""
+    cleaned = str(value).replace("-", "")
+    return date(int(cleaned[:4]), int(cleaned[4:6]), int(cleaned[6:8]))
+
+
+def _compact_yyyymmdd(value: Any) -> str | None:
+    """压缩日期参数为 YYYYMMDD。"""
+    if value is None:
+        return None
+    cleaned = str(value).strip().replace("-", "")
+    if len(cleaned) >= 8 and cleaned[:8].isdigit():
+        return cleaned[:8]
+    return None
+
+
+def _date_range_as_yyyymmdd(start_date: str, end_date: str) -> list[str]:
+    """生成自然日日期列表，作为交易日历缺失时的保守兜底。"""
+    start = _parse_yyyymmdd(start_date)
+    end = _parse_yyyymmdd(end_date)
+    days = (end - start).days
+    if days < 0:
+        return []
+    return [
+        (start + timedelta(days=offset)).strftime("%Y%m%d")
+        for offset in range(days + 1)
+    ]
+
+
+def _sector_postcheck_date_range(params: dict[str, Any]) -> tuple[str, str] | None:
+    """从导入参数中提取板块日行情 post-check 日期范围。"""
+    trade_date = _compact_yyyymmdd(params.get("trade_date"))
+    start_date = _compact_yyyymmdd(params.get("start_date")) or trade_date
+    end_date = _compact_yyyymmdd(params.get("end_date")) or trade_date or start_date
+    if not start_date or not end_date:
+        return None
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    return start_date, end_date
+
+
+def _coerce_bool(value: Any) -> bool:
+    """将 API 参数中的布尔开关规范化。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+async def _resolve_trade_dates(start_date: str, end_date: str) -> tuple[list[str], bool]:
+    """解析导入区间内的交易日列表。
+
+    优先使用 trade_calendar 中 is_open=true 的交易日；若日历缺失，则使用
+    自然日兜底，避免漏掉数据。
+    """
+    from sqlalchemy import text
+
+    from app.core.database import AsyncSessionPG
+
+    start = _parse_yyyymmdd(start_date)
+    end = _parse_yyyymmdd(end_date)
+    async with AsyncSessionPG() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT DISTINCT cal_date
+                FROM trade_calendar
+                WHERE is_open = true
+                  AND cal_date >= :start_date
+                  AND cal_date <= :end_date
+                ORDER BY cal_date
+                """
+            ),
+            {"start_date": start, "end_date": end},
+        )
+        rows = result.scalars().all()
+
+    if rows:
+        return [
+            row.strftime("%Y%m%d") if hasattr(row, "strftime") else str(row).replace("-", "")
+            for row in rows
+        ], True
+
+    logger.warning(
+        "交易日历缺失或区间无开市日期，使用自然日兜底 start=%s end=%s",
+        start_date, end_date,
+    )
+    return _date_range_as_yyyymmdd(start_date, end_date), False
+
+
+async def _resolve_latest_market_trade_date() -> tuple[str | None, bool]:
+    """解析市场最近可用交易日，用于保护 daily_basic 当前快照。"""
+    from sqlalchemy import text
+
+    from app.core.database import AsyncSessionPG
+
+    today = date.today()
+    async with AsyncSessionPG() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT MAX(cal_date)
+                FROM trade_calendar
+                WHERE is_open = true
+                  AND cal_date <= :today
+                """
+            ),
+            {"today": today},
+        )
+        value = result.scalar_one_or_none()
+
+    if value is None:
+        logger.warning("无法从 trade_calendar 解析市场最近可用交易日，daily_basic 默认不更新 stock_info 当前指标")
+        return None, False
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y%m%d"), True
+    return str(value).replace("-", ""), True
+
+
+def _summarize_sector_kline_write_info() -> dict[str, Any] | None:
+    """汇总本次 sector_kline 写入预处理诊断。"""
+    items = _SECTOR_KLINE_WRITE_INFO.get()
+    if not items:
+        return None
+    summary = {
+        "source_batches": len(items),
+        "source_rows": 0,
+        "attempted_rows": 0,
+        "missing_time_rows": 0,
+        "invalid_time_rows": 0,
+        "missing_code_rows": 0,
+        "failed_write_rows": 0,
+    }
+    for item in items:
+        for key in summary:
+            if key == "source_batches":
+                continue
+            summary[key] += int(item.get(key, 0) or 0)
+    return summary
+
+
+async def _postcheck_sector_kline_import(
+    api_name: str,
+    params: dict[str, Any],
+    record_count: int,
+) -> dict[str, Any] | None:
+    """板块日行情导入完成后反查 sector_kline 实表覆盖。
+
+    该校验只覆盖 daily-fast 使用的板块日行情接口。Tushare API 返回行数
+    只能证明接口有响应，不能证明字段映射和 TimescaleDB 写入已成功。
+    """
+    data_source = _SECTOR_DAILY_SOURCE_BY_API.get(api_name)
+    if not data_source:
+        return None
+
+    date_range = _sector_postcheck_date_range(params)
+    if not date_range:
+        return {
+            "ok": False,
+            "api_name": api_name,
+            "data_source": data_source,
+            "reason": "missing_date_params",
+            "message": f"{api_name} 缺少 start_date/end_date/trade_date，无法反查 sector_kline 覆盖",
+            "write_summary": _summarize_sector_kline_write_info(),
+        }
+
+    start_date, end_date = date_range
+    try:
+        expected_dates, used_calendar = await _resolve_trade_dates(start_date, end_date)
+    except Exception as exc:
+        logger.warning("板块 post-check 读取交易日历失败 api=%s: %s", api_name, exc)
+        expected_dates = _date_range_as_yyyymmdd(start_date, end_date)
+        used_calendar = False
+    target_trade_date = expected_dates[-1] if expected_dates else end_date
+
+    try:
+        from sqlalchemy import text
+
+        from app.core.database import AsyncSessionTS
+
+        async with AsyncSessionTS() as session:
+            result = await session.execute(
+                text(
+                    """
+                    SELECT to_char("time", 'YYYYMMDD') AS trade_date,
+                           COUNT(DISTINCT sector_code) AS coverage_count
+                    FROM sector_kline
+                    WHERE data_source = :data_source
+                      AND freq = '1d'
+                      AND "time" >= to_date(:start_date, 'YYYYMMDD')
+                      AND "time" < to_date(:end_date, 'YYYYMMDD') + INTERVAL '1 day'
+                    GROUP BY to_char("time", 'YYYYMMDD')
+                    ORDER BY trade_date
+                    """
+                ),
+                {
+                    "data_source": data_source,
+                    "start_date": start_date,
+                    "end_date": end_date,
+                },
+            )
+            rows = result.mappings().all()
+    except Exception as exc:
+        message = f"{api_name} 导入后反查 sector_kline 失败：{str(exc)[:200]}"
+        logger.warning(message)
+        return {
+            "ok": False,
+            "api_name": api_name,
+            "data_source": data_source,
+            "reason": "postcheck_query_failed",
+            "message": message,
+            "start_date": start_date,
+            "end_date": end_date,
+            "target_trade_date": target_trade_date,
+            "record_count": int(record_count or 0),
+            "write_summary": _summarize_sector_kline_write_info(),
+        }
+
+    coverage_by_date = {
+        str(row["trade_date"]): int(row["coverage_count"] or 0)
+        for row in rows
+    }
+    missing_dates = [
+        trade_date
+        for trade_date in expected_dates
+        if coverage_by_date.get(trade_date, 0) <= 0
+    ]
+    target_coverage = int(coverage_by_date.get(target_trade_date, 0) or 0)
+    write_summary = _summarize_sector_kline_write_info()
+
+    ok = target_coverage > 0 and not missing_dates
+    if ok:
+        reason = "covered"
+        message = f"{api_name} 已写入 sector_kline，目标交易日 {target_trade_date} 覆盖 {target_coverage} 个板块"
+    elif record_count <= 0:
+        reason = "api_empty"
+        message = f"{api_name} API 返回 0 行，目标交易日 {target_trade_date} 无 sector_kline 覆盖"
+    elif target_coverage <= 0:
+        reason = "import_log_mismatch"
+        message = (
+            f"{api_name} API 返回 {record_count} 行，但 sector_kline 目标交易日 "
+            f"{target_trade_date} 覆盖为 0，疑似字段映射、日期解析或 TS 写入失败"
+        )
+    else:
+        reason = "partial_coverage"
+        message = (
+            f"{api_name} 已写入目标日 {target_trade_date}，但区间内仍缺失 "
+            f"{len(missing_dates)} 个交易日"
+        )
+
+    possible_causes: list[str] = []
+    if reason == "import_log_mismatch":
+        possible_causes = ["invalid_code_or_time", "timescale_write_failed"]
+        if write_summary:
+            if write_summary.get("missing_code_rows"):
+                possible_causes.insert(0, "field_mapping_missing_sector_code")
+            if write_summary.get("missing_time_rows") or write_summary.get("invalid_time_rows"):
+                possible_causes.insert(0, "invalid_trade_date")
+
+    return {
+        "ok": ok,
+        "api_name": api_name,
+        "data_source": data_source,
+        "reason": reason,
+        "message": message,
+        "start_date": start_date,
+        "end_date": end_date,
+        "target_trade_date": target_trade_date,
+        "used_trade_calendar": used_calendar,
+        "record_count": int(record_count or 0),
+        "target_coverage_count": target_coverage,
+        "actual_dates": sorted(coverage_by_date),
+        "coverage_by_date": coverage_by_date,
+        "missing_dates": missing_dates[:50],
+        "missing_date_count": len(missing_dates),
+        "write_summary": write_summary,
+        "possible_causes": possible_causes,
+    }
 
 
 async def _process_chunk_with_retry(
@@ -594,7 +1077,12 @@ async def _process_chunk_with_retry(
                 entry.api_name, len(rows), max_rows,
             )
             # 写入已获取的数据（尽管可能不完整）
-            records = await _write_chunk_rows(rows, entry, inject_fields)
+            records = await _write_chunk_rows_with_optional_freq(
+                rows,
+                entry,
+                inject_fields,
+                call_params.get("freq") or params.get("freq"),
+            )
             return {
                 "records": records,
                 "truncated": True,
@@ -627,7 +1115,12 @@ async def _process_chunk_with_retry(
                 "数据可能不完整。api=%s, rows=%d",
                 chunk_start, chunk_end, total_days, entry.api_name, len(rows),
             )
-            records = await _write_chunk_rows(rows, entry, inject_fields)
+            records = await _write_chunk_rows_with_optional_freq(
+                rows,
+                entry,
+                inject_fields,
+                call_params.get("freq") or params.get("freq"),
+            )
             return {
                 "records": records,
                 "truncated": True,
@@ -709,14 +1202,79 @@ async def _process_chunk_with_retry(
         }
 
     # 未截断，正常写入数据
-    records = await _write_chunk_rows(rows, entry, inject_fields)
+    records = await _write_chunk_rows_with_optional_freq(
+        rows,
+        entry,
+        inject_fields,
+        call_params.get("freq") or params.get("freq"),
+    )
     return {"records": records, "truncated": False, "retried": False, "retry_details": []}
+
+
+async def _write_rows_with_policy(
+    rows: list[dict],
+    entry: ApiEntry,
+    context: WriteContext,
+    inject_fields: dict | None = None,
+) -> dict[str, int]:
+    """按写入策略处理 rows，返回 API rows 与主表写入 rows 统计。"""
+    if not rows:
+        return {"api_rows": 0, "primary_written_rows": 0}
+
+    if inject_fields:
+        for row in rows:
+            row.update(inject_fields)
+
+    mapped_rows = _apply_field_mappings(rows, entry)
+    mapped_rows = _expand_rows(mapped_rows, entry)
+    converted_rows = _convert_codes(mapped_rows, entry)
+
+    policy = entry.extra_config.get("primary_write_policy", "always")
+    should_write_primary = True
+    if policy == "latest_market_trade_date_only":
+        should_write_primary = (
+            context.update_current_snapshot
+            or (
+                context.current_trade_date is not None
+                and context.current_trade_date == context.latest_market_trade_date
+            )
+        )
+
+    primary_written_rows = 0
+    run_hooks_with_primary = True
+
+    if should_write_primary:
+        if entry.storage_engine == StorageEngine.TS:
+            await _write_to_timescaledb(
+                converted_rows,
+                entry,
+                runtime_freq=context.runtime_freq,
+            )
+        else:
+            await _write_to_postgresql(
+                converted_rows,
+                entry,
+                run_post_hooks=run_hooks_with_primary,
+            )
+        primary_written_rows = len(converted_rows)
+    else:
+        logger.info(
+            "跳过主表写入 api=%s trade_date=%s policy=%s latest_market_trade_date=%s",
+            entry.api_name,
+            context.current_trade_date,
+            policy,
+            context.latest_market_trade_date,
+        )
+        await _run_post_write_hooks(rows, entry)
+
+    return {"api_rows": len(converted_rows), "primary_written_rows": primary_written_rows}
 
 
 async def _write_chunk_rows(
     rows: list[dict],
     entry: ApiEntry,
     inject_fields: dict | None,
+    runtime_freq: str | None = None,
 ) -> int:
     """将行数据写入数据库（字段映射 + 代码转换 + 写入）。
 
@@ -728,20 +1286,198 @@ async def _write_chunk_rows(
     Returns:
         成功写入的记录数
     """
-    if inject_fields:
-        for row in rows:
-            row.update(inject_fields)
+    stats = await _write_rows_with_policy(
+        rows,
+        entry,
+        WriteContext(
+            batch_mode="by_date",
+            update_current_snapshot=True,
+            runtime_freq=runtime_freq,
+        ),
+        inject_fields=inject_fields,
+    )
+    return stats["api_rows"]
 
-    mapped_rows = _apply_field_mappings(rows, entry)
-    mapped_rows = _expand_rows(mapped_rows, entry)
-    converted_rows = _convert_codes(mapped_rows, entry)
 
-    if entry.storage_engine == StorageEngine.TS:
-        await _write_to_timescaledb(converted_rows, entry)
-    else:
-        await _write_to_postgresql(converted_rows, entry)
+async def _write_chunk_rows_with_optional_freq(
+    rows: list[dict],
+    entry: ApiEntry,
+    inject_fields: dict | None,
+    runtime_freq: str | None,
+) -> int:
+    """兼容旧调用签名：只有运行时 freq 存在时才传给写入函数。"""
+    if runtime_freq:
+        return await _write_chunk_rows(
+            rows,
+            entry,
+            inject_fields,
+            runtime_freq=runtime_freq,
+        )
+    return await _write_chunk_rows(rows, entry, inject_fields)
 
-    return len(converted_rows)
+
+async def _process_batched_by_trade_date(
+    entry: ApiEntry,
+    adapter: TushareAdapter,
+    params: dict,
+    task_id: str,
+    log_id: int,
+    rate_delay: float,
+) -> dict:
+    """按交易日全市场导入模式。
+
+    适用于未指定 ts_code 时可按单个 trade_date 返回全市场数据的日级接口。
+    """
+    start_date = params.get("start_date", "")
+    end_date = params.get("end_date", "")
+    if not start_date or not end_date:
+        return await _process_single(entry, adapter, params, task_id, log_id, rate_delay)
+
+    trade_dates, used_calendar = await _resolve_trade_dates(start_date, end_date)
+    latest_market_trade_date, latest_date_from_calendar = await _resolve_latest_market_trade_date()
+    total = len(trade_dates)
+    if total == 0:
+        batch_stats = {
+            "batch_mode": "by_trade_date",
+            "planned_trade_dates": 0,
+            "success_trade_dates": 0,
+            "empty_trade_dates": 0,
+            "failed_trade_dates": 0,
+            "used_trade_calendar": used_calendar,
+            "api_rows": 0,
+            "primary_written_rows": 0,
+        }
+        return {"status": "completed", "record_count": 0, "batch_stats": batch_stats}
+
+    logger.info(
+        "Tushare 导入开始 api=%s batch_mode=by_trade_date dates=%d range=%s~%s used_calendar=%s",
+        entry.api_name, total, start_date, end_date, used_calendar,
+    )
+
+    await _update_progress(
+        task_id,
+        status="running",
+        total=total,
+        completed=0,
+        current_item=f"{start_date}-{end_date}",
+        batch_mode="by_trade_date",
+    )
+
+    actual_api_name = entry.extra_config.get("tushare_api_name", entry.api_name)
+    default_params = entry.extra_config.get("default_params", {})
+    inject_fields = entry.extra_config.get("inject_fields")
+    date_param = entry.extra_config.get("date_param", "trade_date")
+    max_rows = entry.extra_config.get("max_rows", _TUSHARE_MAX_ROWS)
+    update_snapshot_param = entry.extra_config.get(
+        "update_current_snapshot_param", "update_current_snapshot",
+    )
+    update_current_snapshot = _coerce_bool(params.get(update_snapshot_param))
+
+    total_api_rows = 0
+    primary_written_rows = 0
+    success_count = 0
+    empty_count = 0
+    failed_dates: list[str] = []
+    truncation_warnings: list[dict[str, Any]] = []
+
+    for index, trade_date_str in enumerate(trade_dates, start=1):
+        if await _check_stop_signal(task_id):
+            batch_stats = {
+                "batch_mode": "by_trade_date",
+                "planned_trade_dates": total,
+                "success_trade_dates": success_count,
+                "empty_trade_dates": empty_count,
+                "failed_trade_dates": len(failed_dates),
+                "failed_dates": failed_dates[:100],
+                "used_trade_calendar": used_calendar,
+                "latest_market_trade_date": latest_market_trade_date,
+                "latest_date_from_calendar": latest_date_from_calendar,
+                "api_rows": total_api_rows,
+                "primary_written_rows": primary_written_rows,
+                "truncation_count": len(truncation_warnings),
+                "truncation_details": truncation_warnings[:10],
+            }
+            return {"status": "stopped", "record_count": total_api_rows, "batch_stats": batch_stats}
+
+        call_params = {**default_params, **params}
+        call_params.pop("start_date", None)
+        call_params.pop("end_date", None)
+        call_params.pop(update_snapshot_param, None)
+        call_params[date_param] = trade_date_str
+
+        try:
+            data = await _call_api_with_retry(adapter, actual_api_name, call_params, entry)
+            rows = TushareAdapter._rows_from_data(data)
+
+            if rows:
+                if len(rows) >= max_rows:
+                    logger.warning(
+                        "交易日 %s 返回 %d 行（达到上限，数据可能被截断），api=%s, max_rows=%d",
+                        trade_date_str, len(rows), entry.api_name, max_rows,
+                    )
+                    truncation_warnings.append(
+                        {"trade_date": trade_date_str, "rows": len(rows), "max_rows": max_rows}
+                    )
+
+                stats = await _write_rows_with_policy(
+                    rows,
+                    entry,
+                    WriteContext(
+                        batch_mode="by_trade_date",
+                        current_trade_date=trade_date_str,
+                        latest_market_trade_date=latest_market_trade_date,
+                        update_current_snapshot=update_current_snapshot,
+                        runtime_freq=call_params.get("freq") or params.get("freq"),
+                    ),
+                    inject_fields=inject_fields,
+                )
+                total_api_rows += stats["api_rows"]
+                primary_written_rows += stats["primary_written_rows"]
+                success_count += 1
+            else:
+                empty_count += 1
+
+        except TushareAPIError as api_exc:
+            if api_exc.code and api_exc.code == -2001:
+                raise
+            failed_dates.append(trade_date_str)
+            logger.error(
+                "API 调用失败 api=%s trade_date=%s: %s",
+                entry.api_name, trade_date_str, api_exc,
+            )
+        except Exception as exc:
+            failed_dates.append(trade_date_str)
+            logger.error(
+                "处理失败 api=%s trade_date=%s: %s",
+                entry.api_name, trade_date_str, exc,
+            )
+
+        await _update_progress(
+            task_id,
+            status="running",
+            total=total,
+            completed=index,
+            current_item=trade_date_str,
+            batch_mode="by_trade_date",
+        )
+        await asyncio.sleep(rate_delay)
+
+    batch_stats = {
+        "batch_mode": "by_trade_date",
+        "planned_trade_dates": total,
+        "success_trade_dates": success_count,
+        "empty_trade_dates": empty_count,
+        "failed_trade_dates": len(failed_dates),
+        "failed_dates": failed_dates[:100],
+        "used_trade_calendar": used_calendar,
+        "latest_market_trade_date": latest_market_trade_date,
+        "latest_date_from_calendar": latest_date_from_calendar,
+        "api_rows": total_api_rows,
+        "primary_written_rows": primary_written_rows,
+        "truncation_count": len(truncation_warnings),
+        "truncation_details": truncation_warnings[:10],
+    }
+    return {"status": "completed", "record_count": total_api_rows, "batch_stats": batch_stats}
 
 
 async def _process_batched_by_date(
@@ -997,6 +1733,120 @@ def _build_batch_stats(
     return stats
 
 
+def _merge_backfill_hook_info(batch_stats: dict | None) -> dict | None:
+    """把导入后置回填 hook 摘要合并到 extra_info。"""
+    hook_info = _BACKFILL_HOOK_INFO.get()
+    if not hook_info:
+        return batch_stats
+    merged = dict(batch_stats or {})
+    merged["kline_aux_backfill"] = hook_info
+    merged["kline_aux_backfill_summary"] = _summarize_backfill_hook_info(hook_info)
+    errors = [item for item in hook_info if item.get("backfill_error")]
+    if errors:
+        merged["backfill_error"] = errors[-1]["backfill_error"]
+    return merged
+
+
+def _summarize_backfill_hook_info(hook_info: list[dict[str, Any]]) -> dict[str, Any]:
+    """生成紧凑的 kline 辅助字段回填汇总。"""
+    start_dates = [item.get("start_date") for item in hook_info if item.get("start_date")]
+    end_dates = [item.get("end_date") for item in hook_info if item.get("end_date")]
+    return {
+        "items": len(hook_info),
+        "errors": sum(1 for item in hook_info if item.get("backfill_error")),
+        "source_rows": sum(int(item.get("source_rows") or 0) for item in hook_info),
+        "matched_rows": sum(int(item.get("matched_rows") or 0) for item in hook_info),
+        "updated_rows": sum(int(item.get("updated_rows") or 0) for item in hook_info),
+        "skipped_rows": sum(int(item.get("skipped_rows") or 0) for item in hook_info),
+        "retry_count": sum(int(item.get("retry_count") or 0) for item in hook_info),
+        "failed_batches": sum(int(item.get("failed_batches") or 0) for item in hook_info),
+        "start_date": min(start_dates) if start_dates else None,
+        "end_date": max(end_dates) if end_dates else None,
+    }
+
+
+def _record_backfill_hook_info(info: dict[str, Any]) -> None:
+    hook_info = _BACKFILL_HOOK_INFO.get()
+    if hook_info is not None:
+        hook_info.append(info)
+
+
+def _compact_backfill_error(exc: Exception) -> str:
+    """压缩回填异常，避免完整 SQL 和大量参数进入 import_log.extra_info。"""
+    raw = str(exc)
+    lowered = raw.lower()
+    if "deadlock detected" in lowered:
+        return "DeadlockDetectedError: deadlock detected"
+    if "connection was closed" in lowered or "connectiondoesnotexisterror" in lowered:
+        return "ConnectionDoesNotExistError: connection was closed"
+    if "lock timeout" in lowered:
+        return "LockTimeoutError: lock timeout"
+    line = raw.splitlines()[0] if raw else exc.__class__.__name__
+    return line[:180]
+
+
+def _infer_backfill_date_range(rows: list[dict]) -> tuple[str | None, str | None]:
+    """从 hook rows 推断日期范围，用于失败摘要。"""
+    dates: list[str] = []
+    for row in rows:
+        value = row.get("trade_date")
+        if value is None:
+            continue
+        if isinstance(value, datetime):
+            dates.append(value.strftime("%Y-%m-%d"))
+            continue
+        if isinstance(value, date):
+            dates.append(value.isoformat())
+            continue
+        raw = str(value)
+        if len(raw) == 8 and raw.isdigit():
+            dates.append(f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}")
+        elif len(raw) >= 10 and "-" in raw:
+            dates.append(raw[:10])
+    return (min(dates), max(dates)) if dates else (None, None)
+
+
+async def _run_post_write_hooks(rows: list[dict], entry: ApiEntry) -> None:
+    """PostgreSQL 主表写入成功后的辅助回填 hook。"""
+    if entry.api_name not in {"daily_basic", "stk_limit"} or not rows:
+        return
+
+    from dataclasses import asdict
+
+    from app.services.data_engine.kline_aux_field_backfill import (
+        KlineAuxFieldBackfillService,
+    )
+
+    try:
+        service = KlineAuxFieldBackfillService()
+        if entry.api_name == "daily_basic":
+            stats = await service.backfill_daily_basic_rows(rows)
+        else:
+            stats = await service.backfill_stk_limit_rows(rows)
+        info = asdict(stats)
+        _record_backfill_hook_info(info)
+        logger.info("kline 辅助字段回填完成 api=%s stats=%s", entry.api_name, info)
+    except Exception as exc:
+        error = _compact_backfill_error(exc)
+        start_date, end_date = _infer_backfill_date_range(rows)
+        logger.warning(
+            "kline 辅助字段回填失败 api=%s: %s",
+            entry.api_name,
+            error,
+            exc_info=True,
+        )
+        _record_backfill_hook_info(
+            {
+                "source_table": entry.api_name,
+                "start_date": start_date,
+                "end_date": end_date,
+                "source_rows": len(rows),
+                "failed_batches": 1,
+                "backfill_error": error,
+            }
+        )
+
+
 # ---------------------------------------------------------------------------
 # 按代码分批处理
 # ---------------------------------------------------------------------------
@@ -1090,7 +1940,11 @@ async def _process_batched(
 
                             try:
                                 if entry.storage_engine == StorageEngine.TS:
-                                    await _write_to_timescaledb(converted_rows, entry)
+                                    await _write_to_timescaledb(
+                                        converted_rows,
+                                        entry,
+                                        runtime_freq=call_params.get("freq") or params.get("freq"),
+                                    )
                                 else:
                                     await _write_to_postgresql(converted_rows, entry)
                                 total_records += len(converted_rows)
@@ -1161,7 +2015,11 @@ async def _process_batched(
 
                         try:
                             if entry.storage_engine == StorageEngine.TS:
-                                await _write_to_timescaledb(converted_rows, entry)
+                                await _write_to_timescaledb(
+                                    converted_rows,
+                                    entry,
+                                    runtime_freq=call_params.get("freq") or params.get("freq"),
+                                )
                             else:
                                 await _write_to_postgresql(converted_rows, entry)
                             total_records += len(converted_rows)
@@ -1430,7 +2288,18 @@ async def _process_batched_index(
     rate_delay: float,
 ) -> dict:
     """按指数代码列表分批调用 API（用于 index_weekly/index_monthly 等）。"""
-    index_codes = await _get_index_list()
+    requested_index_codes = params.get("index_codes")
+    if isinstance(requested_index_codes, str):
+        index_codes = [
+            code.strip()
+            for code in requested_index_codes.split(",")
+            if code.strip()
+        ]
+    elif isinstance(requested_index_codes, list):
+        index_codes = [str(code).strip() for code in requested_index_codes if str(code).strip()]
+    else:
+        index_codes = await _get_index_list()
+
     if not index_codes:
         return {"status": "completed", "record_count": 0, "batch_stats": {
             "batch_mode": "by_index", "total_indices": 0, "failed_codes": [],
@@ -1453,6 +2322,7 @@ async def _process_batched_index(
         # 根据接口要求选择参数名：index_weight 用 index_code，其他用 ts_code
         code_param_name = "index_code" if entry.api_name == "index_weight" else "ts_code"
         call_params = {**params, code_param_name: ts_code}
+        call_params.pop("index_codes", None)
         # 仅在 use_trade_date_loop 模式下移除 start_date/end_date
         if entry.extra_config.get("use_trade_date_loop"):
             call_params.pop("start_date", None)
@@ -1474,7 +2344,11 @@ async def _process_batched_index(
 
                 try:
                     if entry.storage_engine == StorageEngine.TS:
-                        await _write_to_timescaledb(converted_rows, entry)
+                        await _write_to_timescaledb(
+                            converted_rows,
+                            entry,
+                            runtime_freq=call_params.get("freq") or params.get("freq"),
+                        )
                     else:
                         await _write_to_postgresql(converted_rows, entry)
                     total_records += len(converted_rows)
@@ -1627,7 +2501,11 @@ async def _process_batched_by_sector(
 
                 try:
                     if entry.storage_engine == StorageEngine.TS:
-                        await _write_to_timescaledb(converted_rows, entry)
+                        await _write_to_timescaledb(
+                            converted_rows,
+                            entry,
+                            runtime_freq=call_params.get("freq") or params.get("freq"),
+                        )
                     else:
                         await _write_to_postgresql(converted_rows, entry)
                     total_records += len(converted_rows)
@@ -1736,6 +2614,7 @@ async def _update_progress(
 
     # 更新字段（completed 单调递增）
     progress["status"] = status
+    progress["updated_at"] = datetime.utcnow().isoformat()
     if total is not None:
         progress["total"] = total
     if completed is not None:
@@ -1847,7 +2726,11 @@ async def _finalize_log(
 # PostgreSQL 写入
 # ---------------------------------------------------------------------------
 
-async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
+async def _write_to_postgresql(
+    rows: list[dict],
+    entry: ApiEntry,
+    run_post_hooks: bool = True,
+) -> None:
     """写入 PostgreSQL，根据 ApiEntry 的 conflict_columns 和 conflict_action 构建 SQL。
 
     - conflict_action="do_nothing" + conflict_columns 非空:
@@ -2098,6 +2981,8 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
                                 await session.rollback()
                                 continue
                 await session.commit()
+                if run_post_hooks:
+                    await _run_post_write_hooks(rows, entry)
                 return
             except Exception as exc:
                 await session.rollback()
@@ -2117,7 +3002,11 @@ async def _write_to_postgresql(rows: list[dict], entry: ApiEntry) -> None:
 # TimescaleDB 写入
 # ---------------------------------------------------------------------------
 
-async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
+async def _write_to_timescaledb(
+    rows: list[dict],
+    entry: ApiEntry,
+    runtime_freq: str | None = None,
+) -> None:
     """写入 TimescaleDB 超表（kline 或 sector_kline）。
 
     根据 entry.target_table 决定写入目标：
@@ -2133,8 +3022,8 @@ async def _write_to_timescaledb(rows: list[dict], entry: ApiEntry) -> None:
 
     from app.core.database import AsyncSessionTS
 
-    # 从 entry.extra_config 获取 freq 和 data_source 配置
-    freq = entry.extra_config.get("freq", "1d")
+    # 频率优先使用本次 API 参数，其次使用注册表配置。
+    freq = runtime_freq or entry.extra_config.get("freq", "1d")
     data_source = entry.extra_config.get("data_source", "")
 
     # 根据 target_table 选择写入目标
@@ -2167,24 +3056,20 @@ async def _write_to_kline(rows: list[dict], entry: ApiEntry, freq: str) -> None:
     # 预处理：构建参数列表，过滤无效行
     params_list = []
     for row in rows:
-        trade_date_str = row.get("trade_date", "")
-        if trade_date_str and len(str(trade_date_str)) == 8:
-            try:
-                ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
-            except ValueError:
-                continue
-        else:
+        ts = _normalize_tushare_timeseries_time(row, freq)
+        if ts is None:
+            continue
+        try:
+            ts = normalize_kline_time(ts, freq, source_trade_date=row.get("trade_date"))
+        except ValueError:
             continue
 
         symbol = row.get("symbol", "") or row.get("ts_code", "")
         if not symbol:
             continue
-        symbol = str(symbol)
-        if not is_standard(symbol):
-            try:
-                symbol = to_standard(symbol)
-            except ValueError:
-                symbol = symbol
+        symbol = normalize_kline_symbol(str(symbol))
+        if symbol is None:
+            continue
 
         params_list.append({
             "time": ts,
@@ -2247,12 +3132,9 @@ async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None
         symbol = row.get("symbol", "") or row.get("ts_code", "")
         if not symbol:
             continue
-        symbol = str(symbol)
-        if not is_standard(symbol):
-            try:
-                symbol = to_standard(symbol)
-            except ValueError:
-                symbol = symbol
+        symbol = normalize_kline_symbol(str(symbol))
+        if symbol is None:
+            continue
 
         trade_date_str = str(row.get("trade_date", ""))
         if len(trade_date_str) == 8 and trade_date_str.isdigit():
@@ -2267,7 +3149,7 @@ async def _write_to_adjustment_factor(rows: list[dict], entry: ApiEntry) -> None
         params_list.append({
             "symbol": symbol,
             "trade_date": trade_date,
-            "adj_type": 0,
+            "adj_type": int(row.get("adj_type") or 1),
             "adj_factor": row.get("adj_factor"),
         })
 
@@ -2323,20 +3205,32 @@ async def _write_to_sector_kline(
 
     # 预处理：构建参数列表，过滤无效行
     params_list = []
+    write_info = {
+        "source_rows": len(rows),
+        "attempted_rows": 0,
+        "missing_time_rows": 0,
+        "invalid_time_rows": 0,
+        "missing_code_rows": 0,
+        "failed_write_rows": 0,
+    }
     for row in rows:
-        trade_date_str = row.get("trade_date", "")
-        if trade_date_str and len(str(trade_date_str)) == 8:
-            try:
-                ts = datetime.strptime(str(trade_date_str), "%Y%m%d")
-            except ValueError:
-                continue
-        else:
+        ts = _normalize_tushare_timeseries_time(row, freq)
+        if ts is None:
+            write_info["missing_time_rows"] += 1
             continue
+        try:
+            ts = normalize_kline_time(ts, freq, source_trade_date=row.get("trade_date"))
+        except ValueError:
+            write_info["invalid_time_rows"] += 1
+            continue
+        ts = _to_sector_kline_db_time(ts)
 
-        sector_code = row.get("ts_code", "")
+        sector_code = row.get("sector_code") or row.get("ts_code", "")
         if not sector_code:
+            write_info["missing_code_rows"] += 1
             continue
 
+        write_info["attempted_rows"] += 1
         params_list.append({
             "time": ts,
             "sector_code": str(sector_code),
@@ -2351,6 +3245,10 @@ async def _write_to_sector_kline(
             "turnover": row.get("turnover_rate") or row.get("turnover"),
             "change_pct": row.get("pct_change") or row.get("change_pct"),
         })
+
+    write_items = _SECTOR_KLINE_WRITE_INFO.get()
+    if write_items is not None:
+        write_items.append(write_info)
 
     if not params_list:
         return
@@ -2372,6 +3270,7 @@ async def _write_to_sector_kline(
                         try:
                             await session.execute(sql, p)
                         except Exception:
+                            write_info["failed_write_rows"] += 1
                             await session.rollback()
                             continue
             await session.commit()

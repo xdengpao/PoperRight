@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from app.core.schemas import FactorCondition, StrategyConfig
+from app.core.schemas import FactorCondition, FactorGroupConfig, StrategyConfig
 from app.services.screener.strategy_engine import (
     MAX_STRATEGIES_PER_USER,
     FactorEvaluator,
@@ -177,8 +177,8 @@ class TestStrategyEngine:
         )
         result = StrategyEngine.evaluate(config, {"ma_trend": 90.0, "rsi": 60.0})
         assert result.passed is True
-        # weighted_score = (90*2 + 60*1) / (2+1) = 240/3 = 80
-        assert result.weighted_score == pytest.approx(80.0)
+        # weighted_score 使用归一化分数，不直接使用原始因子值。
+        assert result.weighted_score == pytest.approx(66.0)
 
     def test_four_category_factors(self):
         """四类因子（技术/资金/基本面/板块）自由组合"""
@@ -225,6 +225,71 @@ class TestStrategyEngine:
         ])
         assert StrategyEngine.evaluate(config, {"macd": True, "rsi": 65.0}).passed is True
         assert StrategyEngine.evaluate(config, {"macd": False, "rsi": 65.0}).passed is False
+
+    def test_grouped_primary_and_confirmation_or_passes(self):
+        """主条件 AND + 确认因子 OR：主条件和任一确认因子通过即通过。"""
+        config = StrategyConfig(
+            factors=[
+                FactorCondition("ma_trend", ">=", 75, role="primary", group_id="primary_core"),
+                FactorCondition("breakout", "==", None, role="primary", group_id="primary_core"),
+                FactorCondition("macd", "==", None, role="confirmation", group_id="confirmation"),
+                FactorCondition("rsi", "BETWEEN", None, {"threshold_low": 55, "threshold_high": 80}, role="confirmation", group_id="confirmation"),
+            ],
+            factor_groups=[
+                FactorGroupConfig("primary_core", "主条件", "primary", "AND", ["ma_trend", "breakout"], blocking=True),
+                FactorGroupConfig("confirmation", "确认因子", "confirmation", "OR", ["macd", "rsi"], blocking=True),
+            ],
+        )
+
+        result = StrategyEngine.evaluate(
+            config,
+            {"ma_trend": 80, "breakout": True, "macd": False, "rsi_current": 60},
+        )
+
+        assert result.passed is True
+        assert result.logic == "GROUPED"
+        assert {r.group_id for r in result.factor_results} == {"primary_core", "confirmation"}
+
+    def test_grouped_confirmation_blocks_when_all_fail(self):
+        """确认因子为阻塞组时，主条件通过但确认组全失败仍不通过。"""
+        config = StrategyConfig(
+            factors=[
+                FactorCondition("ma_trend", ">=", 75, role="primary", group_id="primary_core"),
+                FactorCondition("macd", "==", None, role="confirmation", group_id="confirmation"),
+                FactorCondition("money_flow", ">=", 80, role="confirmation", group_id="confirmation"),
+            ],
+            factor_groups=[
+                FactorGroupConfig("primary_core", "主条件", "primary", "AND", ["ma_trend"], blocking=True),
+                FactorGroupConfig("confirmation", "确认因子", "confirmation", "OR", ["macd", "money_flow"], blocking=True),
+            ],
+        )
+
+        result = StrategyEngine.evaluate(
+            config,
+            {"ma_trend": 85, "macd": False, "money_flow_pctl": 60},
+        )
+
+        assert result.passed is False
+        assert any(g["group_id"] == "confirmation" and not g["passed"] for g in result.group_results)
+
+    def test_grouped_confirmation_score_only_does_not_block(self):
+        """confirmation_mode=score_only 时确认因子不作为硬性拦截。"""
+        config = StrategyConfig(
+            factors=[
+                FactorCondition("ma_trend", ">=", 75, role="primary", group_id="primary_core"),
+                FactorCondition("macd", "==", None, role="confirmation", group_id="confirmation"),
+            ],
+            factor_groups=[
+                FactorGroupConfig("primary_core", "主条件", "primary", "AND", ["ma_trend"], blocking=True),
+                FactorGroupConfig("confirmation", "确认因子", "confirmation", "OR", ["macd"], blocking=True),
+            ],
+            confirmation_mode="score_only",
+        )
+
+        result = StrategyEngine.evaluate(config, {"ma_trend": 85, "macd": False})
+
+        assert result.passed is True
+        assert any(g["group_id"] == "confirmation" and not g["blocking"] for g in result.group_results)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +446,28 @@ class TestStrategyTemplateManager:
             assert rest.operator == orig.operator
             assert rest.threshold == orig.threshold
             assert rest.params == orig.params
+
+    def test_grouped_config_serialization_round_trip(self):
+        """分组策略配置可完整序列化和恢复。"""
+        config = StrategyConfig(
+            factors=[
+                FactorCondition("ma_trend", ">=", 75, role="primary", group_id="primary_core"),
+                FactorCondition("macd", "==", None, role="confirmation", group_id="confirmation"),
+            ],
+            factor_groups=[
+                FactorGroupConfig("primary_core", "主条件", "primary", "AND", ["ma_trend"], blocking=True),
+                FactorGroupConfig("confirmation", "确认因子", "confirmation", "OR", ["macd"], blocking=True),
+            ],
+            confirmation_mode="blocking",
+        )
+
+        restored = StrategyConfig.from_dict(config.to_dict())
+
+        assert restored.factors[0].role == "primary"
+        assert restored.factors[1].group_id == "confirmation"
+        assert restored.factor_groups[0].group_id == "primary_core"
+        assert restored.factor_groups[1].logic == "OR"
+        assert restored.confirmation_mode == "blocking"
 
     def test_switch_active(self):
         """一键切换活跃策略"""

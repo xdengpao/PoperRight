@@ -22,6 +22,11 @@ vi.mock('@/api', () => ({
   },
 }))
 
+vi.mock('vue-router', () => ({
+  useRoute: () => ({ name: 'DataOnlineTushare' }),
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
 // ── 测试数据 ──────────────────────────────────────────────────────────────────
 
 const healthConnected = {
@@ -29,6 +34,7 @@ const healthConnected = {
   tokens: {
     basic: { configured: true },
     advanced: { configured: true },
+    premium: { configured: false },
     special: { configured: false },
   },
 }
@@ -38,6 +44,7 @@ const healthDisconnected = {
   tokens: {
     basic: { configured: false },
     advanced: { configured: false },
+    premium: { configured: false },
     special: { configured: false },
   },
 }
@@ -106,6 +113,85 @@ const sampleHistory = [
   },
 ]
 
+const sampleWorkflowDefinition = {
+  workflow_key: 'smart-screening',
+  label: '智能选股数据一键导入',
+  mode: 'daily_fast',
+  stages: [
+    {
+      key: 'foundation',
+      label: '基础数据',
+      description: '股票基础信息和交易日历',
+      steps: [
+        {
+          api_name: 'stock_basic',
+          label: '股票基础列表',
+          factor_groups: [],
+          required_token_tier: 'basic',
+          optional: false,
+        },
+      ],
+    },
+  ],
+  required_token_tiers: ['basic'],
+}
+
+const sampleWorkflowPlan = {
+  mode: 'daily_fast',
+  target_trade_date: '20260430',
+  execute_steps: [
+    {
+      api_name: 'daily',
+      label: '日线行情',
+      params: { start_date: '20260430', end_date: '20260430' },
+      reason: '每日选股核心依赖',
+      priority: 1,
+      estimated_duration: '快：按目标交易日',
+    },
+  ],
+  skip_steps: [
+    { api_name: 'stock_basic', reason: '静态基础表不在每日快速默认链路中', skip_reason: '静态基础表不在每日快速默认链路中' },
+  ],
+  maintenance_suggestions: [
+    { api_name: 'dc_member', reason: '板块成分超过 TTL 时执行周维护' },
+  ],
+  estimated_cost: { step_count: 1, slow_step_count: 0, label: '预计较快' },
+  next_actions: [],
+}
+
+const runningWorkflowStatus = {
+  workflow_task_id: 'workflow-1',
+  workflow_key: 'smart-screening',
+  status: 'running',
+  mode: 'daily_fast',
+  date_range: { start_date: '20260410', end_date: '20260430' },
+  options: {
+    include_moneyflow_ths: true,
+    include_ths_sector: true,
+    include_tdx_sector: true,
+    include_ti_sector: true,
+    include_ci_sector: true,
+  },
+  current_stage_key: 'kline',
+  current_stage_label: '股票日线主行情和复权',
+  current_api_name: 'daily',
+  completed_steps: 2,
+  failed_steps: 0,
+  total_steps: 32,
+  child_tasks: [],
+  readiness: null,
+  error_message: null,
+  skip_steps: [
+    { api_name: 'stock_basic', skip_reason: '静态基础表不在每日快速默认链路中' },
+  ],
+  maintenance_suggestions: [
+    { api_name: 'dc_member', reason: '板块成分超过 TTL 时执行周维护' },
+  ],
+  next_actions: [
+    { mode: 'gap_repair', label: '补齐缺口', enabled: true },
+  ],
+}
+
 // ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
 function setupMocks(
@@ -123,6 +209,12 @@ function setupMocks(
     if (url.startsWith('/data/tushare/import/history')) {
       return Promise.resolve({ data: history })
     }
+    if (url === '/data/tushare/import/last-times') {
+      return Promise.resolve({ data: {} })
+    }
+    if (url === '/data/tushare/import/running') {
+      return Promise.resolve({ data: [] })
+    }
     if (url.startsWith('/data/tushare/import/status/')) {
       return Promise.resolve({
         data: {
@@ -136,8 +228,30 @@ function setupMocks(
         },
       })
     }
+    if (url === '/data/tushare/workflows/running') {
+      return Promise.resolve({ data: null })
+    }
+    if (url.startsWith('/data/tushare/workflows/status/')) {
+      return Promise.resolve({ data: runningWorkflowStatus })
+    }
+    if (url === '/data/tushare/workflows/smart-screening') {
+      return Promise.resolve({ data: sampleWorkflowDefinition })
+    }
     return Promise.resolve({ data: {} })
   })
+  mockPost.mockImplementation((url: string) => {
+    if (url === '/data/tushare/workflows/smart-screening/plan') {
+      return Promise.resolve({ data: sampleWorkflowPlan })
+    }
+    if (url === '/data/tushare/workflows/smart-screening/start') {
+      return Promise.resolve({ data: { workflow_task_id: 'workflow-1', status: 'pending' } })
+    }
+    return Promise.resolve({ data: { status: 'ok' } })
+  })
+}
+
+function getButton(wrapper: ReturnType<typeof mount>, ariaLabel: string) {
+  return wrapper.find(`button[aria-label="${ariaLabel}"]`)
 }
 
 // ── 测试 ──────────────────────────────────────────────────────────────────────
@@ -146,6 +260,7 @@ describe('TushareImportView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 3, 30, 17, 0, 0))
   })
 
   afterEach(() => {
@@ -371,6 +486,261 @@ describe('TushareImportView', () => {
     wrapper.unmount()
   })
 
+  // ── 6. 智能选股一键导入工作流 ───────────────────────────────────────────
+
+  it('显示智能选股工作流日期控件和四个快捷按钮', async () => {
+    setupMocks()
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    expect(wrapper.find('[aria-label="智能选股导入日期范围"]').exists()).toBe(true)
+    expect(wrapper.find('select[aria-label="智能选股导入链路模式"]').exists()).toBe(true)
+    expect((wrapper.find('select[aria-label="智能选股导入链路模式"]').element as HTMLSelectElement).value).toBe('daily_fast')
+    expect(getButton(wrapper, '智能选股一键导入').text()).toBe('一键导入')
+    expect(getButton(wrapper, '暂停智能选股一键导入').text()).toBe('一键暂停')
+    expect(getButton(wrapper, '恢复智能选股一键导入').text()).toBe('一键恢复')
+    expect(getButton(wrapper, '停止智能选股一键导入').text()).toBe('一键停止')
+
+    wrapper.unmount()
+  })
+
+  it('切换链路后按新模式加载工作流定义和计划', async () => {
+    setupMocks()
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    await wrapper.find('select[aria-label="智能选股导入链路模式"]').setValue('weekly_maintenance')
+    await getButton(wrapper, '智能选股一键导入').trigger('click')
+    await flushPromises()
+
+    expect(mockGet).toHaveBeenCalledWith(
+      '/data/tushare/workflows/smart-screening',
+      expect.objectContaining({ params: { mode: 'weekly_maintenance' } }),
+    )
+    expect(mockPost).toHaveBeenCalledWith(
+      '/data/tushare/workflows/smart-screening/plan',
+      expect.objectContaining({ mode: 'weekly_maintenance' }),
+    )
+
+    wrapper.unmount()
+  })
+
+  it('智能选股导入日期默认最近一天', async () => {
+    setupMocks()
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    const startInput = wrapper.find<HTMLInputElement>('input[aria-label="智能选股导入起始日期"]')
+    const endInput = wrapper.find<HTMLInputElement>('input[aria-label="智能选股导入结束日期"]')
+    expect(startInput.element.value).toBe('2026-04-30')
+    expect(endInput.element.value).toBe('2026-04-30')
+
+    wrapper.unmount()
+  })
+
+  it('智能选股日期范围不合法时禁用一键导入', async () => {
+    setupMocks()
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    await wrapper.find('input[aria-label="智能选股导入起始日期"]').setValue('2026-04-30')
+    await wrapper.find('input[aria-label="智能选股导入结束日期"]').setValue('2026-04-10')
+    await flushPromises()
+
+    const importButton = getButton(wrapper, '智能选股一键导入')
+    expect((importButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.text()).toContain('起始日期不能晚于结束日期')
+
+    wrapper.unmount()
+  })
+
+  it('Tushare 未连接时禁用智能选股一键导入', async () => {
+    setupMocks(healthDisconnected)
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    const importButton = getButton(wrapper, '智能选股一键导入')
+    expect((importButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect(importButton.attributes('title')).toBe('Tushare 未连接')
+
+    wrapper.unmount()
+  })
+
+  it('确认智能选股一键导入时提交所选日期范围', async () => {
+    setupMocks()
+    mockPost.mockImplementation((url: string) => {
+      if (url === '/data/tushare/workflows/smart-screening/plan') {
+        return Promise.resolve({ data: sampleWorkflowPlan })
+      }
+      if (url === '/data/tushare/workflows/smart-screening/start') {
+        return Promise.resolve({ data: { workflow_task_id: 'workflow-1', status: 'pending' } })
+      }
+      return Promise.resolve({ data: { status: 'ok' } })
+    })
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    await wrapper.find('input[aria-label="智能选股导入起始日期"]').setValue('2026-04-10')
+    await wrapper.find('input[aria-label="智能选股导入结束日期"]').setValue('2026-04-30')
+    await getButton(wrapper, '智能选股一键导入').trigger('click')
+    await flushPromises()
+
+    expect(mockGet).toHaveBeenCalledWith(
+      '/data/tushare/workflows/smart-screening',
+      expect.objectContaining({ params: { mode: 'daily_fast' } }),
+    )
+    expect(wrapper.text()).toContain('基础数据')
+    expect(wrapper.text()).toContain('stock_basic')
+    expect(wrapper.text()).toContain('本次执行')
+    expect(wrapper.text()).toContain('本次跳过')
+
+    await wrapper.find('.workflow-actions .btn-primary').trigger('click')
+    await flushPromises()
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/data/tushare/workflows/smart-screening/start',
+      expect.objectContaining({
+        mode: 'daily_fast',
+        date_range: { start_date: '20260410', end_date: '20260430' },
+      }),
+    )
+
+    wrapper.unmount()
+  })
+
+  it('运行中工作流启用暂停和停止并调用对应接口', async () => {
+    setupMocks()
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data/tushare/workflows/running') return Promise.resolve({ data: runningWorkflowStatus })
+      if (url.startsWith('/data/tushare/workflows/status/')) return Promise.resolve({ data: runningWorkflowStatus })
+      if (url === '/data/tushare/health') return Promise.resolve({ data: healthConnected })
+      if (url === '/data/tushare/registry') return Promise.resolve({ data: sampleRegistry })
+      if (url.startsWith('/data/tushare/import/history')) return Promise.resolve({ data: sampleHistory })
+      if (url === '/data/tushare/import/last-times') return Promise.resolve({ data: {} })
+      if (url === '/data/tushare/import/running') return Promise.resolve({ data: [] })
+      return Promise.resolve({ data: {} })
+    })
+    mockPost.mockResolvedValue({ data: { status: 'ok' } })
+
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    const pauseButton = getButton(wrapper, '暂停智能选股一键导入')
+    const resumeButton = getButton(wrapper, '恢复智能选股一键导入')
+    const stopButton = getButton(wrapper, '停止智能选股一键导入')
+    expect((pauseButton.element as HTMLButtonElement).disabled).toBe(false)
+    expect((resumeButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect((stopButton.element as HTMLButtonElement).disabled).toBe(false)
+
+    await pauseButton.trigger('click')
+    await stopButton.trigger('click')
+    await flushPromises()
+
+    expect(mockPost).toHaveBeenCalledWith('/data/tushare/workflows/pause/workflow-1')
+    expect(mockPost).toHaveBeenCalledWith('/data/tushare/workflows/stop/workflow-1')
+
+    wrapper.unmount()
+  })
+
+  it('工作流子接口运行中显示 Redis 进度而不是 0 行', async () => {
+    const statusWithChildProgress = {
+      ...runningWorkflowStatus,
+      child_tasks: [
+        {
+          task_id: 'child-1',
+          api_name: 'daily',
+          status: 'running',
+          record_count: 0,
+          progress: {
+            total: 100,
+            completed: 42,
+            failed: 1,
+            current_item: '600000.SH',
+          },
+        },
+      ],
+    }
+    setupMocks()
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data/tushare/workflows/running') return Promise.resolve({ data: statusWithChildProgress })
+      if (url.startsWith('/data/tushare/workflows/status/')) return Promise.resolve({ data: statusWithChildProgress })
+      if (url === '/data/tushare/health') return Promise.resolve({ data: healthConnected })
+      if (url === '/data/tushare/registry') return Promise.resolve({ data: sampleRegistry })
+      if (url.startsWith('/data/tushare/import/history')) return Promise.resolve({ data: sampleHistory })
+      if (url === '/data/tushare/import/last-times') return Promise.resolve({ data: {} })
+      if (url === '/data/tushare/import/running') return Promise.resolve({ data: [] })
+      return Promise.resolve({ data: {} })
+    })
+
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('42 / 100')
+    expect(wrapper.text()).toContain('当前 600000.SH')
+    expect(wrapper.text()).not.toContain('daily运行中0 行')
+
+    wrapper.unmount()
+  })
+
+  it('工作流进度区展示跳过接口维护建议和下一步动作', async () => {
+    setupMocks()
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data/tushare/workflows/running') return Promise.resolve({ data: runningWorkflowStatus })
+      if (url.startsWith('/data/tushare/workflows/status/')) return Promise.resolve({ data: runningWorkflowStatus })
+      if (url === '/data/tushare/health') return Promise.resolve({ data: healthConnected })
+      if (url === '/data/tushare/registry') return Promise.resolve({ data: sampleRegistry })
+      if (url.startsWith('/data/tushare/import/history')) return Promise.resolve({ data: sampleHistory })
+      if (url === '/data/tushare/import/last-times') return Promise.resolve({ data: {} })
+      if (url === '/data/tushare/import/running') return Promise.resolve({ data: [] })
+      if (url === '/data/tushare/workflows/smart-screening') return Promise.resolve({ data: sampleWorkflowDefinition })
+      return Promise.resolve({ data: {} })
+    })
+
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已跳过')
+    expect(wrapper.text()).toContain('stock_basic')
+    expect(wrapper.text()).toContain('维护建议')
+    expect(wrapper.text()).toContain('dc_member')
+    expect(wrapper.text()).toContain('补齐缺口')
+
+    wrapper.unmount()
+  })
+
+  it('已暂停工作流启用恢复并调用恢复接口', async () => {
+    const pausedWorkflowStatus = { ...runningWorkflowStatus, status: 'paused' }
+    setupMocks()
+    mockGet.mockImplementation((url: string) => {
+      if (url === '/data/tushare/workflows/running') return Promise.resolve({ data: pausedWorkflowStatus })
+      if (url.startsWith('/data/tushare/workflows/status/')) return Promise.resolve({ data: pausedWorkflowStatus })
+      if (url === '/data/tushare/health') return Promise.resolve({ data: healthConnected })
+      if (url === '/data/tushare/registry') return Promise.resolve({ data: sampleRegistry })
+      if (url.startsWith('/data/tushare/import/history')) return Promise.resolve({ data: sampleHistory })
+      if (url === '/data/tushare/import/last-times') return Promise.resolve({ data: {} })
+      if (url === '/data/tushare/import/running') return Promise.resolve({ data: [] })
+      return Promise.resolve({ data: {} })
+    })
+    mockPost.mockResolvedValue({ data: { status: 'running' } })
+
+    const wrapper = mount(TushareImportView)
+    await flushPromises()
+
+    const pauseButton = getButton(wrapper, '暂停智能选股一键导入')
+    const resumeButton = getButton(wrapper, '恢复智能选股一键导入')
+    const stopButton = getButton(wrapper, '停止智能选股一键导入')
+    expect((pauseButton.element as HTMLButtonElement).disabled).toBe(true)
+    expect((resumeButton.element as HTMLButtonElement).disabled).toBe(false)
+    expect((stopButton.element as HTMLButtonElement).disabled).toBe(false)
+
+    await resumeButton.trigger('click')
+    await flushPromises()
+
+    expect(mockPost).toHaveBeenCalledWith('/data/tushare/workflows/resume/workflow-1')
+
+    wrapper.unmount()
+  })
+
   it('导入启动后显示活跃任务区域', async () => {
     setupMocks()
     mockPost.mockResolvedValue({
@@ -408,7 +778,7 @@ describe('TushareImportView', () => {
     await flushPromises()
 
     // 应有停止按钮
-    const stopBtn = wrapper.find('.btn-danger')
+    const stopBtn = wrapper.find('.active-task .btn-danger')
     expect(stopBtn.exists()).toBe(true)
     expect(stopBtn.text()).toContain('停止导入')
     wrapper.unmount()
@@ -433,7 +803,7 @@ describe('TushareImportView', () => {
     await flushPromises()
 
     // 点击停止
-    const stopBtn = wrapper.find('.btn-danger')
+    const stopBtn = wrapper.find('.active-task .btn-danger')
     await stopBtn.trigger('click')
     await flushPromises()
 
@@ -441,7 +811,7 @@ describe('TushareImportView', () => {
     wrapper.unmount()
   })
 
-  // ── 6. 进度更新 ─────────────────────────────────────────────────────────
+  // ── 7. 进度更新 ─────────────────────────────────────────────────────────
 
   it('每 3 秒轮询进度接口', async () => {
     setupMocks()
@@ -501,7 +871,7 @@ describe('TushareImportView', () => {
     wrapper.unmount()
   })
 
-  // ── 7. 历史记录显示 ─────────────────────────────────────────────────────
+  // ── 8. 历史记录显示 ─────────────────────────────────────────────────────
 
   it('页面加载时获取导入历史', async () => {
     setupMocks()

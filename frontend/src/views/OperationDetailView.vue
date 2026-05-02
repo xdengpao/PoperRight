@@ -3,8 +3,8 @@
     <div class="detail-header">
       <button class="btn-back" @click="$router.push('/operations')">&larr; 返回</button>
       <h2>{{ planDetail?.name || '加载中...' }}</h2>
-      <span v-if="planDetail" class="status-badge" :class="planDetail.status.toLowerCase()">
-        {{ statusLabel(planDetail.status) }}
+      <span v-if="planDetail" class="status-badge" :class="planStatus.toLowerCase()">
+        {{ statusLabel(planStatus) }}
       </span>
     </div>
 
@@ -144,7 +144,13 @@ const route = useRoute()
 const store = useOperationsStore()
 const planId = route.params.planId as string
 const activeTab = ref('candidates')
-const planDetail = ref<Record<string, unknown> | null>(null)
+interface OperationPlanDetail {
+  name?: string
+  status: string
+  [key: string]: unknown
+}
+
+const planDetail = ref<OperationPlanDetail | null>(null)
 
 const tabs = computed(() => [
   { key: 'candidates', label: '候选股', badge: store.candidates.length || undefined },
@@ -153,6 +159,8 @@ const tabs = computed(() => [
   { key: 'checklist', label: '复盘' },
   { key: 'settings', label: '设置' },
 ])
+
+const planStatus = computed(() => planDetail.value?.status ?? '')
 
 onMounted(async () => {
   const { data } = await apiClient.get(`/operations/plans/${planId}`)

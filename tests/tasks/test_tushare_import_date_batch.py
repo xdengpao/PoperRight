@@ -287,6 +287,7 @@ class TestFallbackRoutingWarning:
              patch("app.tasks.tushare_import._finalize_log", new_callable=AsyncMock), \
              patch("app.tasks.tushare_import._redis_delete", new_callable=AsyncMock):
 
+            mock_adapter_cls.return_value.close = AsyncMock()
             mock_pbd.return_value = {"status": "completed", "record_count": 100}
 
             with caplog.at_level(logging.WARNING):
@@ -880,31 +881,33 @@ class TestProgressUpdateIntegration:
 
 
 class TestRateLimitFromConfig:
-    """_RATE_LIMIT_MAP 使用 settings 值。
+    """_build_rate_limit_map 使用 settings 值。
 
     对应需求：5.1, 5.3
     """
 
     def test_rate_limit_map_uses_settings_values(self):
-        """_RATE_LIMIT_MAP 的值应与 settings 中的频率限制配置一致（需求 5.3）"""
+        """频率限制映射的值应与 settings 中的配置一致（需求 5.3）"""
         from app.core.config import settings
-        from app.tasks.tushare_import import _RATE_LIMIT_MAP
+        from app.tasks.tushare_import import _build_rate_limit_map
 
-        assert _RATE_LIMIT_MAP[RateLimitGroup.KLINE] == settings.rate_limit_kline
-        assert _RATE_LIMIT_MAP[RateLimitGroup.FUNDAMENTALS] == settings.rate_limit_fundamentals
-        assert _RATE_LIMIT_MAP[RateLimitGroup.MONEY_FLOW] == settings.rate_limit_money_flow
+        rate_limit_map = _build_rate_limit_map()
+        assert rate_limit_map[RateLimitGroup.KLINE] == settings.rate_limit_kline
+        assert rate_limit_map[RateLimitGroup.FUNDAMENTALS] == settings.rate_limit_fundamentals
+        assert rate_limit_map[RateLimitGroup.MONEY_FLOW] == settings.rate_limit_money_flow
 
     def test_rate_limit_map_covers_all_groups(self):
-        """_RATE_LIMIT_MAP 应覆盖所有 RateLimitGroup 枚举值"""
-        from app.tasks.tushare_import import _RATE_LIMIT_MAP
+        """频率限制映射应覆盖所有 RateLimitGroup 枚举值"""
+        from app.tasks.tushare_import import _build_rate_limit_map
 
+        rate_limit_map = _build_rate_limit_map()
         for group in RateLimitGroup:
-            assert group in _RATE_LIMIT_MAP, \
-                f"_RATE_LIMIT_MAP 缺少 {group.value} 的频率限制配置"
+            assert group in rate_limit_map, \
+                f"频率限制映射缺少 {group.value} 的配置"
 
     def test_rate_limit_map_values_are_positive(self):
         """频率限制值应为正数"""
-        from app.tasks.tushare_import import _RATE_LIMIT_MAP
+        from app.tasks.tushare_import import _build_rate_limit_map
 
-        for group, delay in _RATE_LIMIT_MAP.items():
+        for group, delay in _build_rate_limit_map().items():
             assert delay > 0, f"{group.value} 的频率限制应为正数，实际: {delay}"

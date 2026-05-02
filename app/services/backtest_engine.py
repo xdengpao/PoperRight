@@ -26,9 +26,15 @@ from app.core.schemas import (
     ScreenResult, StrategyConfig, RiskLevel, ExitConditionConfig,
     HoldingContext,
 )
+from app.services.data_engine.kline_normalizer import derive_trade_date
 from app.services.screener.screen_executor import ScreenExecutor
 
 logger = logging.getLogger(__name__)
+
+
+def _bar_trade_date(bar: KlineBar) -> date:
+    """按 K 线频率推导交易日，避免 UTC 存储时间造成日期偏移。"""
+    return derive_trade_date(bar.time, bar.freq)
 
 
 # ---------------------------------------------------------------------------
@@ -764,7 +770,7 @@ def _build_minute_day_ranges(
     for symbol, bars in daily_klines.items():
         date_set: dict[date, int] = {}
         for bar in bars:
-            d = bar.time.date()
+            d = _bar_trade_date(bar)
             date_set[d] = 0  # just collecting unique dates
         daily_sorted_dates[symbol] = sorted(date_set.keys())
 
@@ -794,7 +800,7 @@ def _build_minute_day_ranges(
             # Minute bars are assumed to be in chronological order.
             minute_date_ranges: dict[date, tuple[int, int]] = {}
             for idx, bar in enumerate(bars):
-                d = bar.time.date()
+                d = _bar_trade_date(bar)
                 if d not in minute_date_ranges:
                     minute_date_ranges[d] = (idx, idx)
                 else:
@@ -843,7 +849,7 @@ def _build_date_index(
         date_to_idx: dict[date, int] = {}
 
         for i, bar in enumerate(bars):
-            d = bar.time.date()
+            d = _bar_trade_date(bar)
             date_to_idx[d] = i  # 重复日期：后出现的覆盖先出现的
 
         # sorted_dates 从 date_to_idx 的键构建，保证唯一且严格递增
@@ -1282,7 +1288,7 @@ class BacktestEngine:
                     continue
                 filtered = bars[:end_idx + 1]
             else:
-                filtered = [b for b in bars if b.time.date() <= trade_date]
+                filtered = [b for b in bars if _bar_trade_date(b) <= trade_date]
                 if not filtered:
                     continue
             closes = [float(b.close) for b in filtered]
@@ -1347,7 +1353,7 @@ class BacktestEngine:
         # 构建因子字典
         stocks_data: dict[str, dict[str, Any]] = {}
         for symbol, bars in kline_data.items():
-            filtered = [b for b in bars if b.time.date() <= trade_date]
+            filtered = [b for b in bars if _bar_trade_date(b) <= trade_date]
             if not filtered:
                 continue
 
@@ -1502,7 +1508,7 @@ class BacktestEngine:
             bars = kline_data.get(item.symbol)
             if not bars:
                 continue
-            day_bars = [b for b in bars if b.time.date() <= trade_date]
+            day_bars = [b for b in bars if _bar_trade_date(b) <= trade_date]
             if len(day_bars) < 2:
                 filtered_items.append(item)
                 continue
@@ -1742,13 +1748,13 @@ class BacktestEngine:
                 return None
             day_bars = bars[: end_idx + 1]
         else:
-            day_bars = [b for b in bars if b.time.date() <= trade_date]
+            day_bars = [b for b in bars if _bar_trade_date(b) <= trade_date]
             if not day_bars:
                 return None
 
         # 检查当日是否有数据（停牌检测）
         latest_bar = day_bars[-1]
-        if latest_bar.time.date() != trade_date:
+        if _bar_trade_date(latest_bar) != trade_date:
             return None  # 停牌
 
         close = latest_bar.close
@@ -1837,7 +1843,7 @@ class BacktestEngine:
                         if bars:
                             bar_index = -1
                             for i, b in enumerate(bars):
-                                if b.time.date() <= trade_date:
+                                if _bar_trade_date(b) <= trade_date:
                                     bar_index = i
                             # bar_index is the last bar <= trade_date
                         else:
@@ -2023,13 +2029,13 @@ class BacktestEngine:
                 prev_close = bars[end_idx].close
             else:
                 # 找 trade_date 之后的第一个交易日 bar（T+1 执行）
-                next_day_bars = [b for b in bars if b.time.date() > trade_date]
+                next_day_bars = [b for b in bars if _bar_trade_date(b) > trade_date]
                 if not next_day_bars:
                     continue  # 停牌或无后续数据
                 next_day_bar = next_day_bars[0]
 
                 # 获取 trade_date 当日收盘价计算涨跌停
-                day_bars = [b for b in bars if b.time.date() <= trade_date]
+                day_bars = [b for b in bars if _bar_trade_date(b) <= trade_date]
                 if not day_bars:
                     continue
                 prev_close = day_bars[-1].close
@@ -2074,7 +2080,7 @@ class BacktestEngine:
                 symbol=symbol,
                 quantity=shares,
                 cost_price=open_price,
-                buy_date=next_day_bar.time.date(),
+                buy_date=_bar_trade_date(next_day_bar),
                 buy_trade_day_index=state.trade_day_index + 1,  # 实际买入执行日（T+1）
                 highest_close=open_price,
                 lowest_close=open_price,
@@ -2082,7 +2088,7 @@ class BacktestEngine:
             )
 
             record = _TradeRecord(
-                date=next_day_bar.time.date(),
+                date=_bar_trade_date(next_day_bar),
                 symbol=symbol,
                 action="BUY",
                 price=open_price,
@@ -2145,14 +2151,14 @@ class BacktestEngine:
                 prev_close = bars[end_idx].close
             else:
                 # 找 trade_date 之后的第一个交易日 bar
-                next_day_bars = [b for b in bars if b.time.date() > trade_date]
+                next_day_bars = [b for b in bars if _bar_trade_date(b) > trade_date]
                 if not next_day_bars:
                     position.pending_sell = signal
                     continue
                 next_day_bar = next_day_bars[0]
 
                 # 获取 trade_date 当日收盘价计算跌停价
-                day_bars = [b for b in bars if b.time.date() <= trade_date]
+                day_bars = [b for b in bars if _bar_trade_date(b) <= trade_date]
                 if not day_bars:
                     position.pending_sell = signal
                     continue
@@ -2174,7 +2180,7 @@ class BacktestEngine:
             state.frozen_cash += proceeds
 
             record = _TradeRecord(
-                date=next_day_bar.time.date(),
+                date=_bar_trade_date(next_day_bar),
                 symbol=symbol,
                 action="SELL",
                 price=open_price,
@@ -2220,7 +2226,7 @@ class BacktestEngine:
         all_dates: set[date] = set()
         for bars in kline_data.values():
             for b in bars:
-                all_dates.add(b.time.date())
+                all_dates.add(_bar_trade_date(b))
         trade_dates = sorted(
             d for d in all_dates
             if config.start_date <= d <= config.end_date
@@ -2350,7 +2356,7 @@ class BacktestEngine:
                         else:
                             position_value += pos.cost_price * pos.quantity
                     else:
-                        day_bars = [b for b in pos_bars if b.time.date() <= trade_date]
+                        day_bars = [b for b in pos_bars if _bar_trade_date(b) <= trade_date]
                         if day_bars:
                             position_value += day_bars[-1].close * pos.quantity
                         else:

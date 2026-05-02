@@ -263,13 +263,18 @@ interface StrategyReport {
   risk_metrics: RiskMetrics
 }
 
+type TooltipAxisPoint = {
+  axisValue?: string | number
+  value?: unknown
+}
+
 // ─── 周期选项 ─────────────────────────────────────────────────────────────────
 
 const periodOptions = [
   { value: 'daily', label: '日报' },
   { value: 'weekly', label: '周报' },
   { value: 'monthly', label: '月报' },
-]
+] as const
 
 // ─── 状态 ─────────────────────────────────────────────────────────────────────
 
@@ -451,7 +456,7 @@ function renderStrategyCharts() {
         textStyle: { color: '#e6edf3', fontSize: 12 },
         formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
           if (!Array.isArray(params) || !params[0]) return ''
-          const p = params[0]
+          const p = params[0] as TooltipAxisPoint
           const val = typeof p.value === 'number' ? p.value.toFixed(2) : p.value
           return `<div style="color:#8b949e">${p.axisValue}</div><div>收益率: <b style="color:${Number(val) >= 0 ? '#f85149' : '#3fb950'}">${val}%</b></div>`
         },
@@ -489,7 +494,7 @@ function renderStrategyCharts() {
         textStyle: { color: '#e6edf3', fontSize: 12 },
         formatter: (params: echarts.TooltipComponentFormatterCallbackParams) => {
           if (!Array.isArray(params) || !params[0]) return ''
-          const p = params[0]
+          const p = params[0] as TooltipAxisPoint
           return `<div style="color:#8b949e">${p.axisValue}</div><div>累计收益: <b style="color:#58a6ff">${p.value}%</b></div>`
         },
       },

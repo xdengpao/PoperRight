@@ -7,6 +7,11 @@
 
     <div v-if="store.loading" class="loading-state">加载中...</div>
 
+    <div v-else-if="store.error" class="error-state">
+      <p>{{ store.error }}</p>
+      <button class="btn-secondary" @click="store.fetchPlans()">重试</button>
+    </div>
+
     <div v-else-if="store.plans.length === 0" class="empty-state">
       <p>暂无交易计划，点击「新建交易计划」开始</p>
     </div>
@@ -341,15 +346,9 @@ const strategyFactors = computed(() => {
 
 const canNext = computed(() => {
   if (step.value === 0) {
-    const ok = !!selectedName.value && !!selectedStrategyId.value
-    console.log('[canNext step0]', { name: selectedName.value, sid: selectedStrategyId.value, ok })
-    return ok
+    return !!selectedName.value && !!selectedStrategyId.value
   }
   return true
-})
-
-watch([selectedName, selectedStrategyId], () => {
-  console.log('[watch] name:', selectedName.value, 'sid:', selectedStrategyId.value)
 })
 
 // 选择策略后自动填充计划名称（如果名称为空）
@@ -409,6 +408,8 @@ async function handleCreate() {
       },
     })
     showCreateDialog.value = false
+  } catch (e: any) {
+    alert(`创建交易计划失败：${e.message || store.error || '未知错误'}`)
   } finally {
     creating.value = false
   }
@@ -430,6 +431,10 @@ async function handleRunScreening(planId: string, planName: string) {
     alert(`选股失败：${e.response?.data?.detail || e.message}`)
   }
 }
+
+onMounted(() => {
+  store.fetchPlans()
+})
 </script>
 
 <style scoped>
@@ -458,7 +463,8 @@ async function handleRunScreening(planId: string, planName: string) {
 .btn-sm { font-size: 0.8rem; padding: 4px 8px; border: 1px solid #ddd; border-radius: 4px; cursor: pointer; background: #fff; }
 .btn-sm.btn-primary { background: #1976d2; color: #fff; border-color: #1976d2; }
 .btn-danger { color: #d32f2f; border-color: #d32f2f; }
-.empty-state, .loading-state { text-align: center; padding: 48px; color: #666; }
+.empty-state, .loading-state, .error-state { text-align: center; padding: 48px; color: #666; }
+.error-state { color: #d32f2f; }
 .dialog-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .dialog { background: #fff; border-radius: 8px; padding: 24px; min-width: 400px; }
 .dialog-wide { min-width: 560px; max-width: 680px; max-height: 85vh; overflow-y: auto; }

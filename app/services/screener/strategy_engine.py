@@ -20,9 +20,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from app.core.schemas import FactorCondition, StrategyConfig
+from app.core.schemas import (
+    FactorCondition,
+    FactorConditionStats,
+    FactorGroupConfig,
+    StrategyConfig,
+)
 from app.services.screener.factor_registry import (
-    FACTOR_REGISTRY,
     ThresholdType,
     get_factor_meta,
 )
@@ -110,6 +114,8 @@ class FactorEvalResult:
     value: float | None = None      # 因子实际值
     weight: float = 1.0             # 因子权重
     normalized_score: float = 0.0   # 归一化分数 [0, 100]
+    role: str | None = None         # primary / confirmation / score_only
+    group_id: str | None = None     # 所属分组 ID
 
 
 @dataclass
@@ -119,6 +125,33 @@ class StrategyEvalResult:
     logic: str                      # "AND" 或 "OR"
     factor_results: list[FactorEvalResult] = field(default_factory=list)
     weighted_score: float = 0.0     # 加权得分
+    group_results: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FactorGroupEvaluation:
+    """单个因子分组的评估结果。"""
+    group_id: str
+    label: str
+    role: str
+    logic: str
+    blocking: bool
+    passed: bool
+    passed_count: int
+    total_count: int
+    factor_results: list[FactorEvalResult] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "group_id": self.group_id,
+            "label": self.label,
+            "role": self.role,
+            "logic": self.logic,
+            "blocking": self.blocking,
+            "passed": self.passed,
+            "passed_count": self.passed_count,
+            "total_count": self.total_count,
+        }
 
 
 @dataclass
@@ -163,6 +196,33 @@ class FactorEvaluator:
         "!=": lambda v, t: v != t,
     }
 
+    @staticmethod
+    def resolve_threshold_type(condition: FactorCondition) -> ThresholdType:
+        """解析因子阈值类型，支持 condition.params 覆盖注册表。"""
+        override_type = condition.params.get("threshold_type")
+        if override_type:
+            try:
+                return ThresholdType(override_type)
+            except ValueError:
+                return ThresholdType.ABSOLUTE
+
+        meta = get_factor_meta(condition.factor_name)
+        return meta.threshold_type if meta else ThresholdType.ABSOLUTE
+
+    @staticmethod
+    def resolve_field_name(
+        factor_name: str,
+        threshold_type: ThresholdType,
+    ) -> str:
+        """根据阈值类型解析实际读取字段。"""
+        if factor_name == "rsi" and threshold_type == ThresholdType.RANGE:
+            return "rsi_current"
+        if threshold_type == ThresholdType.PERCENTILE:
+            return f"{factor_name}_pctl"
+        if threshold_type == ThresholdType.INDUSTRY_RELATIVE:
+            return f"{factor_name}_ind_rel"
+        return factor_name
+
     @classmethod
     def evaluate(
         cls,
@@ -192,23 +252,10 @@ class FactorEvaluator:
         factor_name = condition.factor_name
 
         # 1. 确定 threshold_type：先检查 params 覆盖，再查 FACTOR_REGISTRY，最后默认 ABSOLUTE
-        override_type = condition.params.get("threshold_type")
-        if override_type:
-            try:
-                threshold_type = ThresholdType(override_type)
-            except ValueError:
-                threshold_type = ThresholdType.ABSOLUTE
-        else:
-            meta = get_factor_meta(factor_name)
-            threshold_type = meta.threshold_type if meta else ThresholdType.ABSOLUTE
+        threshold_type = cls.resolve_threshold_type(condition)
 
         # 2. 根据 threshold_type 确定读取字段
-        if threshold_type == ThresholdType.PERCENTILE:
-            field_name = f"{factor_name}_pctl"
-        elif threshold_type == ThresholdType.INDUSTRY_RELATIVE:
-            field_name = f"{factor_name}_ind_rel"
-        else:
-            field_name = factor_name
+        field_name = cls.resolve_field_name(factor_name, threshold_type)
 
         # 3. 读取值
         value = stock_data.get(field_name)
@@ -311,6 +358,123 @@ class StrategyEngine:
     """
 
     @staticmethod
+    def _evaluate_group(
+        group: FactorGroupConfig,
+        factor_results: list[FactorEvalResult],
+        confirmation_mode: str,
+    ) -> FactorGroupEvaluation:
+        """按组内逻辑评估一个因子分组。"""
+        passed_count = sum(1 for r in factor_results if r.passed)
+        total_count = len(factor_results)
+
+        if group.logic == "OR":
+            passed = passed_count > 0
+        elif group.logic == "AT_LEAST_N":
+            min_pass_count = group.min_pass_count or 1
+            passed = passed_count >= min_pass_count
+        elif group.logic == "SCORE_ONLY":
+            passed = True
+        else:
+            passed = all(r.passed for r in factor_results) if factor_results else True
+
+        blocking = group.blocking
+        if group.role == "score_only" or group.logic == "SCORE_ONLY":
+            blocking = False
+        if group.role == "confirmation" and confirmation_mode == "score_only":
+            blocking = False
+
+        return FactorGroupEvaluation(
+            group_id=group.group_id,
+            label=group.label,
+            role=group.role,
+            logic=group.logic,
+            blocking=blocking,
+            passed=passed,
+            passed_count=passed_count,
+            total_count=total_count,
+            factor_results=factor_results,
+        )
+
+    @staticmethod
+    def _evaluate_grouped(
+        config: StrategyConfig,
+        stock_data: dict[str, Any],
+    ) -> StrategyEvalResult:
+        """按主条件/确认因子分组评估单只股票。"""
+        factor_by_group: dict[str, list[FactorEvalResult]] = {
+            group.group_id: [] for group in config.factor_groups
+        }
+        group_by_factor: dict[str, FactorGroupConfig] = {}
+        group_by_id = {group.group_id: group for group in config.factor_groups}
+        for group in config.factor_groups:
+            for factor_name in group.factor_names:
+                group_by_factor[factor_name] = group
+
+        factor_results: list[FactorEvalResult] = []
+        implicit_results: list[FactorEvalResult] = []
+        total_weight = 0.0
+        weighted_sum = 0.0
+
+        for condition in config.factors:
+            group = group_by_id.get(condition.group_id or "") or group_by_factor.get(condition.factor_name)
+            role = condition.role or (group.role if group else "primary")
+            if role == "disabled":
+                continue
+
+            weight = config.weights.get(condition.factor_name, 1.0)
+            result = FactorEvaluator.evaluate(condition, stock_data, weight)
+            result.role = role
+            result.group_id = condition.group_id or (group.group_id if group else None)
+            factor_results.append(result)
+
+            if result.passed or role == "score_only":
+                total_weight += weight
+                weighted_sum += result.normalized_score * weight
+
+            if result.group_id and result.group_id in factor_by_group:
+                factor_by_group[result.group_id].append(result)
+            else:
+                implicit_results.append(result)
+
+        group_evals = [
+            StrategyEngine._evaluate_group(
+                group,
+                factor_by_group.get(group.group_id, []),
+                config.confirmation_mode,
+            )
+            for group in config.factor_groups
+        ]
+
+        if implicit_results:
+            implicit_group = FactorGroupConfig(
+                group_id="implicit_primary",
+                label="未分组主条件",
+                role="primary",
+                logic=config.logic,
+                factor_names=[],
+                blocking=True,
+            )
+            group_evals.append(
+                StrategyEngine._evaluate_group(
+                    implicit_group,
+                    implicit_results,
+                    config.confirmation_mode,
+                )
+            )
+
+        passed = all(g.passed for g in group_evals if g.blocking)
+        weighted_score = (weighted_sum / total_weight) if total_weight > 0 else 0.0
+        weighted_score = max(0.0, min(100.0, weighted_score))
+
+        return StrategyEvalResult(
+            passed=passed,
+            logic="GROUPED",
+            factor_results=factor_results,
+            weighted_score=weighted_score,
+            group_results=[g.to_dict() for g in group_evals],
+        )
+
+    @staticmethod
     def evaluate(
         config: StrategyConfig,
         stock_data: dict[str, Any],
@@ -330,6 +494,9 @@ class StrategyEngine:
         Returns:
             StrategyEvalResult
         """
+        if config.factor_groups:
+            return StrategyEngine._evaluate_grouped(config, stock_data)
+
         if not config.factors:
             return StrategyEvalResult(
                 passed=True,
@@ -345,6 +512,8 @@ class StrategyEngine:
         for condition in config.factors:
             weight = config.weights.get(condition.factor_name, 1.0)
             result = FactorEvaluator.evaluate(condition, stock_data, weight)
+            result.role = condition.role
+            result.group_id = condition.group_id
             factor_results.append(result)
 
             total_weight += weight
@@ -391,6 +560,93 @@ class StrategyEngine:
         # 按加权得分降序排列
         results.sort(key=lambda x: x[1].weighted_score, reverse=True)
         return results
+
+
+def summarize_factor_failures(
+    config: StrategyConfig,
+    stocks_data: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    """统计每个因子的通过、缺失和失败数量（旧日志兼容结构）。"""
+    summary: dict[str, dict[str, int]] = {}
+    for stat in summarize_factor_condition_stats(config, stocks_data):
+        counts = summary.setdefault(
+            stat.factor_name,
+            {"passed": 0, "missing": 0, "failed": 0},
+        )
+        counts["passed"] += stat.passed_count
+        counts["missing"] += stat.missing_count
+        counts["failed"] += stat.failed_count
+    return summary
+
+
+def summarize_factor_condition_stats(
+    config: StrategyConfig,
+    stocks_data: dict[str, dict[str, Any]],
+) -> list[FactorConditionStats]:
+    """统计每个启用条件因子的通过、失败、缺失数量。"""
+    stats: list[FactorConditionStats] = []
+    remaining_symbols = set(stocks_data.keys())
+    group_by_id = {group.group_id: group for group in config.factor_groups}
+    group_by_factor: dict[str, FactorGroupConfig] = {}
+    for group in config.factor_groups:
+        for factor_name in group.factor_names:
+            group_by_factor[factor_name] = group
+
+    for condition in config.factors:
+        group = group_by_id.get(condition.group_id or "") or group_by_factor.get(condition.factor_name)
+        role = condition.role or (group.role if group else None)
+        group_id = condition.group_id or (group.group_id if group else None)
+        if role == "disabled":
+            continue
+
+        factor_name = condition.factor_name
+        threshold_type = FactorEvaluator.resolve_threshold_type(condition)
+        field_name = FactorEvaluator.resolve_field_name(factor_name, threshold_type)
+        passed_count = 0
+        missing_count = 0
+        failed_count = 0
+        passed_symbols: set[str] = set()
+
+        for symbol, stock_data in stocks_data.items():
+            value = stock_data.get(field_name)
+            is_missing = value is None
+            # breakout=None 是“未触发形态突破”的正常信号值，不是行情数据缺失。
+            # 只有突破字段完全不存在时，才按缺失统计。
+            if factor_name == "breakout" and (
+                field_name in stock_data or "breakout_list" in stock_data
+            ):
+                is_missing = False
+
+            if is_missing:
+                missing_count += 1
+                continue
+            result = FactorEvaluator.evaluate(condition, stock_data)
+            if result.passed:
+                passed_count += 1
+                passed_symbols.add(symbol)
+            else:
+                failed_count += 1
+
+        if not config.factor_groups and config.logic == "AND":
+            remaining_symbols &= passed_symbols
+            remaining_after_count: int | None = len(remaining_symbols)
+        else:
+            remaining_after_count = None
+
+        meta = get_factor_meta(factor_name)
+        stats.append(FactorConditionStats(
+            factor_name=factor_name,
+            label=meta.label if meta else None,
+            role=role,
+            group_id=group_id,
+            evaluated_count=passed_count + failed_count,
+            passed_count=passed_count,
+            failed_count=failed_count,
+            missing_count=missing_count,
+            remaining_after_count=remaining_after_count,
+        ))
+
+    return stats
 
 
 # ---------------------------------------------------------------------------

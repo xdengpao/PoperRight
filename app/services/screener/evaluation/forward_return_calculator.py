@@ -14,6 +14,7 @@ from typing import Any
 
 from app.core.schemas import ScreenItem
 from app.services.data_engine.kline_repository import KlineRepository
+from app.services.data_engine.kline_normalizer import derive_trade_date
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,7 @@ class ForwardReturnCalculator:
 
         bar_map: dict[date, Any] = {}
         for b in bars:
-            bd = b.time.date() if hasattr(b.time, 'date') else b.time
+            bd = derive_trade_date(b.time, getattr(b, "freq", "1d")) if hasattr(b.time, 'date') else b.time
             bar_map[bd] = b
 
         t1_date = forward_dates[0]

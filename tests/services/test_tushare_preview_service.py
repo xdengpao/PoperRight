@@ -521,7 +521,7 @@ class TestScopeFilter:
     """共享表作用域过滤测试。"""
 
     def test_scope_filter_kline_by_freq(self) -> None:
-        """kline 表应按 extra_config.freq 生成 freq 过滤条件。"""
+        """股票 kline 表应按 freq 和股票代码域生成过滤条件。"""
         entry = _make_entry(
             target_table="kline",
             extra_config={"freq": "1d"},
@@ -531,10 +531,26 @@ class TestScopeFilter:
         assert len(conditions) >= 1
         clauses = [c[0] for c in conditions]
         assert "freq = :scope_freq" in clauses
+        assert any("000%.SZ" in clause for clause in clauses)
         # 验证参数值
         for clause, params in conditions:
             if clause == "freq = :scope_freq":
                 assert params["scope_freq"] == "1d"
+
+    def test_scope_filter_kline_index_excludes_stock_symbols(self) -> None:
+        """指数 kline 预览应排除股票代码域，避免与 daily 混表展示。"""
+        entry = _make_entry(
+            api_name="index_daily",
+            category="index_data",
+            target_table="kline",
+            code_format=CodeFormat.INDEX_CODE,
+            extra_config={"freq": "1d"},
+        )
+        conditions = TusharePreviewService._build_scope_filter_pure(entry)
+
+        clauses = [c[0] for c in conditions]
+        assert "freq = :scope_freq" in clauses
+        assert any(clause.startswith("NOT ") and "000%.SZ" in clause for clause in clauses)
 
     def test_scope_filter_kline_weekly(self) -> None:
         """kline 表 weekly 接口应生成 freq='1w' 过滤条件。"""
@@ -550,6 +566,18 @@ class TestScopeFilter:
         for clause, params in conditions:
             if clause == "freq = :scope_freq":
                 assert params["scope_freq"] == "1w"
+
+    def test_query_sql_kline_code_filter_uses_symbol_column(self) -> None:
+        """kline 表代码过滤应使用 symbol，而不是不存在的 ts_code。"""
+        sql = TusharePreviewService._build_query_sql_pure(
+            "kline",
+            "time",
+            [("freq = :scope_freq", {"scope_freq": "1d"})],
+            ts_code="000001.SZ",
+        )
+
+        assert "symbol = :ts_code" in sql
+        assert "ts_code = :ts_code" not in sql
 
     def test_scope_filter_financial_by_report_type(self) -> None:
         """financial_statement 表应按 inject_fields.report_type 生成过滤条件。"""

@@ -31,6 +31,7 @@ from app.core.database import AsyncSessionPG, AsyncSessionTS
 from app.models.tushare_import import TushareImportLog
 from app.services.data_engine.tushare_registry import (
     ApiEntry,
+    CodeFormat,
     FieldMapping,
     StorageEngine,
     TUSHARE_API_REGISTRY,
@@ -277,6 +278,18 @@ _TIME_FIELD_PRIORITY: list[str] = [
 
 # K 线表集合（优先级最高，展示 K 线图）
 KLINE_TABLES: set[str] = {"kline", "sector_kline"}
+
+# 股票/指数接口共享 kline 表，预览时必须补充代码域过滤。
+_STOCK_KLINE_SYMBOL_SCOPE = """(
+    symbol LIKE '000%.SZ' OR symbol LIKE '001%.SZ' OR symbol LIKE '002%.SZ' OR
+    symbol LIKE '003%.SZ' OR symbol LIKE '300%.SZ' OR symbol LIKE '301%.SZ' OR
+    symbol LIKE '600%.SH' OR symbol LIKE '601%.SH' OR symbol LIKE '603%.SH' OR
+    symbol LIKE '605%.SH' OR symbol LIKE '688%.SH' OR
+    symbol LIKE '43%.BJ' OR symbol LIKE '82%.BJ' OR symbol LIKE '83%.BJ' OR
+    symbol LIKE '87%.BJ' OR symbol LIKE '88%.BJ' OR symbol LIKE '92%.BJ'
+)"""
+_INDEX_KLINE_SYMBOL_SCOPE = f"NOT {_STOCK_KLINE_SYMBOL_SCOPE}"
+_KLINE_PREVIEW_MAX_OFFSET = 10_000
 
 # 资金流向子分类（保留向后兼容）
 MONEYFLOW_SUBCATEGORY: str = "资金流向数据"
@@ -526,6 +539,10 @@ class TusharePreviewService:
                 "freq = :scope_freq",
                 {"scope_freq": entry.extra_config["freq"]},
             ))
+            if entry.code_format == CodeFormat.STOCK_SYMBOL:
+                conditions.append((_STOCK_KLINE_SYMBOL_SCOPE, {}))
+            elif entry.code_format == CodeFormat.INDEX_CODE:
+                conditions.append((_INDEX_KLINE_SYMBOL_SCOPE, {}))
 
         # 2. financial_statement 表：按 report_type 过滤
         inject = entry.extra_config.get("inject_fields", {})
@@ -635,9 +652,10 @@ class TusharePreviewService:
         if time_field and data_time_end:
             where_clauses.append(f"{time_field} <= :data_time_end")
 
-        # 股票代码过滤
+        # 股票代码过滤。kline/sector_kline 的代码列是 symbol，其余多代码表是 ts_code。
         if ts_code:
-            where_clauses.append("ts_code = :ts_code")
+            code_column = "symbol" if target_table in ("kline", "sector_kline") else "ts_code"
+            where_clauses.append(f"{code_column} = :ts_code")
 
         if where_clauses:
             sql += " WHERE " + " AND ".join(where_clauses)
@@ -804,6 +822,26 @@ class TusharePreviewService:
         if limit is None:
             return 250
         return max(1, min(500, limit))
+
+    @staticmethod
+    def _bounded_preview_total_pure(page: int, page_size: int, row_count: int) -> int:
+        """共享大表预览的保守分页总数。
+
+        kline 超表没有便宜的按作用域精确总数；返回当前页已知边界，避免
+        前端生成数亿级深分页 OFFSET。
+        """
+        current_offset = (page - 1) * page_size
+        if row_count >= page_size:
+            return current_offset + row_count + page_size
+        return current_offset + row_count
+
+    @staticmethod
+    def _clamp_scope_only_page_pure(page: int, page_size: int) -> int:
+        """限制共享大表无用户过滤时的深分页。"""
+        offset = (page - 1) * page_size
+        if offset > _KLINE_PREVIEW_MAX_OFFSET:
+            return 1
+        return page
 
 
     @staticmethod
@@ -1060,6 +1098,23 @@ class TusharePreviewService:
         if ts_code_filter:
             bind_params["ts_code"] = ts_code_filter
 
+        # 查询总记录数：优先尝试 reltuples 估算，大表跳过精确 COUNT(*)
+        # scope_filters 是系统自动添加的作用域过滤（如 kline 表的 freq 过滤），
+        # 不算用户指定的过滤条件，仍可使用估算
+        has_user_filters = bool(
+            (time_field and effective_data_time_start)
+            or (time_field and effective_data_time_end)
+            or ts_code_filter
+        )
+        # scope_only: 仅有系统作用域过滤，无用户过滤条件
+        scope_only = bool(scope_filters) and not has_user_filters
+        bounded_scope_total = entry.target_table in KLINE_TABLES and scope_only
+        effective_page = clamped_page
+        if bounded_scope_total:
+            effective_page = self._clamp_scope_only_page_pure(
+                clamped_page, clamped_page_size
+            )
+
         # 7. 构建 SQL 并执行查询
         SessionFactory = self._get_session(entry.storage_engine)
 
@@ -1071,20 +1126,9 @@ class TusharePreviewService:
             data_time_start=effective_data_time_start,
             data_time_end=effective_data_time_end,
             ts_code=ts_code_filter,
-            page=clamped_page,
+            page=effective_page,
             page_size=clamped_page_size,
         )
-
-        # 查询总记录数：优先尝试 reltuples 估算，大表跳过精确 COUNT(*)
-        # scope_filters 是系统自动添加的作用域过滤（如 kline 表的 freq 过滤），
-        # 不算用户指定的过滤条件，仍可使用估算
-        has_user_filters = bool(
-            (time_field and effective_data_time_start)
-            or (time_field and effective_data_time_end)
-            or ts_code_filter
-        )
-        # scope_only: 仅有系统作用域过滤，无用户过滤条件
-        scope_only = bool(scope_filters) and not has_user_filters
 
         count_sql = self._build_query_sql_pure(
             entry.target_table,
@@ -1112,7 +1156,9 @@ class TusharePreviewService:
                         {"table_name": entry.target_table},
                     )
                     rel_row = rel_result.scalar()
-                    if rel_row is not None and float(rel_row) > 0:
+                    if bounded_scope_total:
+                        use_estimate = True
+                    elif rel_row is not None and float(rel_row) > 0:
                         use_estimate, estimated_count = (
                             self._estimate_count_pure(float(rel_row))
                         )
@@ -1181,6 +1227,10 @@ class TusharePreviewService:
             data_result = await session.execute(text(data_sql), bind_params)
             rows_raw = data_result.mappings().all()
             rows = [dict(r) for r in rows_raw]
+            if bounded_scope_total:
+                total = self._bounded_preview_total_pure(
+                    effective_page, clamped_page_size, len(rows)
+                )
 
             # 获取列名（从结果集或空查询）
             if rows_raw:
@@ -1232,7 +1282,7 @@ class TusharePreviewService:
             columns=columns,
             rows=serialized_rows,
             total=total,
-            page=clamped_page,
+            page=effective_page,
             page_size=clamped_page_size,
             time_field=time_field,
             chart_type=chart_type,

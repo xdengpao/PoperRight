@@ -470,6 +470,14 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={
+        "full_market_by_trade_date": True,
+        "date_param": "trade_date",
+        "max_rows": 10000,
+        "estimated_daily_rows": 5500,
+        "primary_write_policy": "latest_market_trade_date_only",
+        "update_current_snapshot_param": "update_current_snapshot",
+    },
     field_mappings=[
         FieldMapping(source="total_mv", target="market_cap"),
     ],
@@ -491,6 +499,12 @@ register(ApiEntry(
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={
+        "full_market_by_trade_date": True,
+        "date_param": "trade_date",
+        "max_rows": 10000,
+        "estimated_daily_rows": 5500,
+    },
 ))
 
 register(ApiEntry(
@@ -1243,12 +1257,19 @@ register(ApiEntry(
     conflict_columns=["ts_code", "trade_date"],
     conflict_action="do_update",
     update_columns=["close", "macd_dif", "macd_dea", "macd", "kdj_k", "kdj_d", "kdj_j",
-                     "rsi_6", "rsi_12", "rsi_24", "boll_upper", "boll_mid", "boll_lower", "cci"],
+                     "rsi_6", "rsi_12", "rsi_24", "boll_upper", "boll_mid", "boll_lower", "cci",
+                     "wr", "dmi", "trix", "bias"],
     required_params=[ParamType.DATE_RANGE],
     optional_params=[ParamType.STOCK_CODE],
     rate_limit_group=RateLimitGroup.KLINE,
     batch_by_date=True,
     date_chunk_days=1,
+    extra_config={
+        "full_market_by_trade_date": True,
+        "date_param": "trade_date",
+        "max_rows": 10000,
+        "estimated_daily_rows": 5500,
+    },
     field_mappings=[
         FieldMapping(source="macd_dif_bfq", target="macd_dif"),
         FieldMapping(source="macd_dea_bfq", target="macd_dea"),

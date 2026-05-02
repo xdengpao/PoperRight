@@ -39,24 +39,33 @@ class TestVolumePriceConfigNewFields:
         cfg = VolumePriceConfig()
         assert cfg.relative_threshold_pct == 5.0
 
+    def test_default_money_flow_source(self):
+        """默认资金流数据源应为覆盖更完整的 moneyflow_dc。"""
+        cfg = VolumePriceConfig()
+        assert cfg.money_flow_source == "moneyflow_dc"
+
     def test_to_dict_includes_new_fields(self):
         """to_dict 应包含 money_flow_mode 和 relative_threshold_pct（Req 6.6）"""
         cfg = VolumePriceConfig()
         d = cfg.to_dict()
         assert "money_flow_mode" in d
         assert "relative_threshold_pct" in d
+        assert "money_flow_source" in d
         assert d["money_flow_mode"] == "relative"
         assert d["relative_threshold_pct"] == 5.0
+        assert d["money_flow_source"] == "moneyflow_dc"
 
     def test_to_dict_custom_values(self):
         """自定义新字段值应正确序列化（Req 6.6）"""
         cfg = VolumePriceConfig(
             money_flow_mode="absolute",
             relative_threshold_pct=8.0,
+            money_flow_source="moneyflow_ths",
         )
         d = cfg.to_dict()
         assert d["money_flow_mode"] == "absolute"
         assert d["relative_threshold_pct"] == 8.0
+        assert d["money_flow_source"] == "moneyflow_ths"
 
     def test_from_dict_with_new_fields(self):
         """from_dict 应正确解析新字段（Req 6.6）"""
@@ -64,10 +73,12 @@ class TestVolumePriceConfigNewFields:
             "turnover_rate_min": 3.0,
             "money_flow_mode": "absolute",
             "relative_threshold_pct": 10.0,
+            "money_flow_source": "moneyflow_dc",
         }
         cfg = VolumePriceConfig.from_dict(data)
         assert cfg.money_flow_mode == "absolute"
         assert cfg.relative_threshold_pct == 10.0
+        assert cfg.money_flow_source == "moneyflow_dc"
 
     def test_from_dict_legacy_missing_new_fields(self):
         """旧配置缺少新字段时应使用默认值（向后兼容，Req 6.6）"""
@@ -83,6 +94,7 @@ class TestVolumePriceConfigNewFields:
         cfg = VolumePriceConfig.from_dict(legacy_data)
         assert cfg.money_flow_mode == "relative"
         assert cfg.relative_threshold_pct == 5.0
+        assert cfg.money_flow_source == "moneyflow_dc"
         # 原有字段应正确解析
         assert cfg.turnover_rate_min == 3.0
         assert cfg.main_flow_threshold == 1000.0
@@ -92,7 +104,19 @@ class TestVolumePriceConfigNewFields:
         cfg = VolumePriceConfig.from_dict({})
         assert cfg.money_flow_mode == "relative"
         assert cfg.relative_threshold_pct == 5.0
+        assert cfg.money_flow_source == "moneyflow_dc"
         assert cfg.turnover_rate_min == 3.0
+
+    @pytest.mark.parametrize("source", ["money_flow", "moneyflow_ths", "moneyflow_dc"])
+    def test_from_dict_accepts_valid_money_flow_sources(self, source):
+        """from_dict 应接受三种资金流数据源。"""
+        cfg = VolumePriceConfig.from_dict({"money_flow_source": source})
+        assert cfg.money_flow_source == source
+
+    def test_from_dict_invalid_money_flow_source_falls_back(self):
+        """非法资金流数据源应回退到覆盖更完整的 moneyflow_dc。"""
+        cfg = VolumePriceConfig.from_dict({"money_flow_source": "unknown"})
+        assert cfg.money_flow_source == "moneyflow_dc"
 
     def test_round_trip_with_new_fields(self):
         """to_dict → from_dict 往返应保持新字段等价（Req 6.6）"""
@@ -100,10 +124,12 @@ class TestVolumePriceConfigNewFields:
             turnover_rate_min=4.0,
             money_flow_mode="absolute",
             relative_threshold_pct=7.5,
+            money_flow_source="moneyflow_dc",
         )
         restored = VolumePriceConfig.from_dict(original.to_dict())
         assert restored.money_flow_mode == original.money_flow_mode
         assert restored.relative_threshold_pct == original.relative_threshold_pct
+        assert restored.money_flow_source == original.money_flow_source
         assert restored.turnover_rate_min == original.turnover_rate_min
 
     def test_to_dict_preserves_all_fields(self):
@@ -116,6 +142,7 @@ class TestVolumePriceConfigNewFields:
             "large_order_ratio", "min_daily_amount",
             "sector_rank_top",
             "money_flow_mode", "relative_threshold_pct",
+            "money_flow_source",
         }
         assert set(d.keys()) == expected_keys
 

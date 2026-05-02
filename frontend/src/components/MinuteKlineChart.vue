@@ -50,7 +50,14 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import { apiClient } from '@/api'
-import { type KlineBar, type AdjType, minuteKlineCache, buildCacheKey, buildRequestParams } from './minuteKlineUtils'
+import {
+  type KlineBar,
+  type AdjType,
+  minuteKlineCache,
+  buildCacheKey,
+  buildRequestParams,
+  getKlineDisplayTime,
+} from './minuteKlineUtils'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CandlestickChart, BarChart } from 'echarts/charts'
@@ -100,7 +107,7 @@ const dateLabel = computed(() => `${displayDate.value} 分钟K线`)
 const chartOption = computed(() => {
   if (!bars.value.length) return {}
 
-  const times = bars.value.map((b) => b.time.slice(11, 16)) // HH:mm
+  const times = bars.value.map((b) => getKlineDisplayTime(b))
   const ohlc = bars.value.map((b) => [+b.open, +b.close, +b.low, +b.high])
   const vols = bars.value.map((b) => b.volume)
 
@@ -186,9 +193,9 @@ async function loadMinuteKline() {
       params: buildRequestParams(freq.value, date, adjType.value),
     })
     const raw: KlineBar[] = res.data?.bars ?? []
-    // 过滤掉非日内数据（time 不含 HH:mm 或为 T00:00:00 的是日K线误入）
+    // 过滤掉非日内数据（无本地交易时间或 00:00 的是日K线误入）
     const data = raw.filter((b) => {
-      const timePart = b.time.slice(11, 16)
+      const timePart = getKlineDisplayTime(b)
       return timePart && timePart !== '00:00'
     })
     minuteKlineCache.set(key, data)

@@ -90,14 +90,21 @@ export const useOperationsStore = defineStore('operations', () => {
   const loading = ref(false)
   const error = ref<string | null>(null)
 
+  function getErrorMessage(e: unknown, fallback: string) {
+    if (e instanceof Error) return e.message
+    const maybeAxiosError = e as { response?: { data?: { detail?: string } } }
+    return maybeAxiosError.response?.data?.detail || fallback
+  }
+
   async function fetchPlans() {
     loading.value = true
     error.value = null
     try {
       const { data } = await apiClient.get('/operations/plans')
-      plans.value = data.items
-    } catch (e: any) {
-      error.value = e.response?.data?.detail || '加载失败'
+      plans.value = data.items || []
+    } catch (e: unknown) {
+      plans.value = []
+      error.value = getErrorMessage(e, '加载交易计划失败')
     } finally {
       loading.value = false
     }
@@ -111,9 +118,15 @@ export const useOperationsStore = defineStore('operations', () => {
     position_control?: Record<string, unknown>
     market_profile?: Record<string, unknown>
   }) {
-    const { data } = await apiClient.post('/operations/plans', payload)
-    await fetchPlans()
-    return data
+    error.value = null
+    try {
+      const { data } = await apiClient.post('/operations/plans', payload)
+      await fetchPlans()
+      return data
+    } catch (e: unknown) {
+      error.value = getErrorMessage(e, '创建交易计划失败')
+      throw e
+    }
   }
 
   async function updatePlanStatus(planId: string, status: string) {

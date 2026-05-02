@@ -17,6 +17,7 @@ from app.tasks.tushare_import import (
     check_chunk_config,
     check_truncation,
 )
+from app.services.data_engine.tushare_registry import get_entry
 
 
 # ---------------------------------------------------------------------------
@@ -91,6 +92,13 @@ class TestCheckChunkConfig:
             estimated_daily_rows=50, api_name="idx_factor_pro",
         )
         assert result is False
+
+    def test_stk_factor_pro_registry_uses_10000_max_rows(self):
+        """stk_factor_pro 使用接口级 10000 行截断上限。"""
+        entry = get_entry("stk_factor_pro")
+        assert entry is not None
+        assert entry.extra_config["max_rows"] == 10000
+        assert entry.extra_config["estimated_daily_rows"] == 5500
 
     def test_warning_includes_all_details(self, caplog):
         """WARNING 日志包含所有关键信息。"""

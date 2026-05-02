@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.screener.screen_data_provider import ScreenDataProvider
+from app.services.screener.screen_data_provider import (
+    ScreenDataProvider,
+    _get_industry_sector_type_values,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +31,27 @@ from app.services.screener.screen_data_provider import ScreenDataProvider
 def _stocks(mapping: dict[str, dict]) -> dict[str, dict]:
     """Shortcut: return the mapping as-is (for readability)."""
     return mapping
+
+
+class TestIndustrySectorTypeValues:
+    """行业板块类型按数据源原始编码适配。"""
+
+    @pytest.mark.parametrize(
+        ("data_source", "expected_values"),
+        [
+            ("DC", ("行业板块", "INDUSTRY")),
+            ("TDX", ("行业板块", "INDUSTRY")),
+            ("THS", ("I", "INDUSTRY")),
+            ("TI", ("L1", "L2", "L3", "INDUSTRY")),
+        ],
+    )
+    def test_industry_sector_type_values_are_source_specific(
+        self,
+        data_source: str,
+        expected_values: tuple[str, ...],
+    ):
+        """智能选股查询行业板块时不要求 sector_type 全局归一化。"""
+        assert _get_industry_sector_type_values(data_source) == expected_values
 
 
 # ---------------------------------------------------------------------------

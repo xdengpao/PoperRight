@@ -30,19 +30,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import AsyncSessionPG, AsyncSessionTS, get_pg_session
 from app.core.redis_client import cache_get, cache_set, get_redis
-from app.core.schemas import ScreenType, StrategyConfig
+from app.core.schemas import StrategyConfig
 from app.models.strategy import StrategyTemplate
 from app.services.csv_exporter import build_csv_content, build_export_filename
 from app.services.screener.factor_registry import (
     FACTOR_REGISTRY,
     FactorCategory,
+    FactorDataSourceConfig,
     FactorMeta,
     get_factor_meta,
     get_factors_by_category,
 )
-from app.services.screener.screen_data_provider import ScreenDataProvider
-from app.services.screener.screen_executor import ScreenExecutor
 from app.services.screener.strategy_examples import STRATEGY_EXAMPLES
+from app.tasks.screening import run_manual_screening
 
 router = APIRouter(tags=["选股"])
 
@@ -50,9 +50,6 @@ logger = logging.getLogger(__name__)
 
 # Placeholder user_id (real auth would inject this)
 _DEFAULT_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
-
-# 数据源代码 → API 字段名映射（需求 9）
-_SOURCE_TO_API_KEY = {"DC": "eastmoney", "TI": "tonghuashun", "TDX": "tongdaxin"}
 
 # 信号维度分类映射：SignalCategory.value → 维度中文名（需求 10）
 # 将 10 种信号分类归入四个分析维度，用于前端按维度分组展示触发信号
@@ -80,6 +77,18 @@ class FactorConditionIn(BaseModel):
     operator: str
     threshold: float | None = None
     params: dict = Field(default_factory=dict)
+    role: Literal["primary", "confirmation", "score_only", "disabled"] | None = None
+    group_id: str | None = None
+
+
+class FactorGroupConfigIn(BaseModel):
+    group_id: str
+    label: str
+    role: Literal["primary", "confirmation", "score_only", "disabled"]
+    logic: Literal["AND", "OR", "AT_LEAST_N", "SCORE_ONLY"] = "AND"
+    factor_names: list[str] = Field(default_factory=list)
+    min_pass_count: int | None = None
+    blocking: bool = True
 
 
 class MaTrendConfigIn(BaseModel):
@@ -134,6 +143,9 @@ class VolumePriceConfigIn(BaseModel):
     large_order_ratio: float = 30.0
     min_daily_amount: float = 5000.0
     sector_rank_top: int = 30
+    money_flow_mode: str = "relative"
+    relative_threshold_pct: float = 5.0
+    money_flow_source: Literal["money_flow", "moneyflow_ths", "moneyflow_dc"] = "moneyflow_dc"
 
 
 class SectorScreenConfigIn(BaseModel):
@@ -150,6 +162,8 @@ class SectorScreenConfigIn(BaseModel):
 class StrategyConfigIn(BaseModel):
     factors: list[FactorConditionIn] = Field(default_factory=list)
     logic: Literal["AND", "OR"] = "AND"
+    factor_groups: list[FactorGroupConfigIn] = Field(default_factory=list)
+    confirmation_mode: Literal["blocking", "score_only"] = "blocking"
     weights: dict[str, float] = Field(default_factory=dict)
     ma_periods: list[int] = Field(default_factory=lambda: [5, 10, 20, 60, 120, 250])
     indicator_params: IndicatorParamsConfigIn = Field(default_factory=IndicatorParamsConfigIn)
@@ -292,18 +306,36 @@ _BUILTIN_TEMPLATES: list[dict] = [
         "enabled_modules": ["factor_editor", "ma_trend", "breakout", "indicator_params", "volume_price"],
         "config": {
             "factors": [
-                {"factor_name": "ma_trend", "operator": ">=", "threshold": 75, "params": {}},
-                {"factor_name": "breakout", "operator": "==", "threshold": None, "params": {}},
-                {"factor_name": "sector_rank", "operator": "<=", "threshold": 25, "params": {}},
-                {"factor_name": "sector_trend", "operator": "==", "threshold": None, "params": {}},
-                {"factor_name": "macd", "operator": "==", "threshold": None, "params": {}},
+                {"factor_name": "ma_trend", "operator": ">=", "threshold": 75, "params": {},
+                 "role": "primary", "group_id": "primary_core"},
+                {"factor_name": "breakout", "operator": "==", "threshold": None, "params": {},
+                 "role": "primary", "group_id": "primary_core"},
+                {"factor_name": "sector_rank", "operator": "<=", "threshold": 25, "params": {},
+                 "role": "primary", "group_id": "primary_core"},
+                {"factor_name": "sector_trend", "operator": "==", "threshold": None, "params": {},
+                 "role": "primary", "group_id": "primary_core"},
+                {"factor_name": "macd", "operator": "==", "threshold": None, "params": {},
+                 "role": "confirmation", "group_id": "confirmation"},
                 {"factor_name": "turnover", "operator": "BETWEEN", "threshold": None,
-                 "params": {"threshold_low": 3.0, "threshold_high": 15.0}},
-                {"factor_name": "money_flow", "operator": ">=", "threshold": 75, "params": {}},
+                 "params": {"threshold_low": 3.0, "threshold_high": 15.0},
+                 "role": "score_only", "group_id": "score_only"},
+                {"factor_name": "money_flow", "operator": ">=", "threshold": 75, "params": {},
+                 "role": "confirmation", "group_id": "confirmation"},
                 {"factor_name": "rsi", "operator": "BETWEEN", "threshold": None,
-                 "params": {"threshold_low": 55, "threshold_high": 80}},
+                 "params": {"threshold_low": 55, "threshold_high": 80},
+                 "role": "confirmation", "group_id": "confirmation"},
             ],
             "logic": "AND",
+            "factor_groups": [
+                {"group_id": "primary_core", "label": "主条件", "role": "primary",
+                 "logic": "AND", "factor_names": ["ma_trend", "breakout", "sector_rank", "sector_trend"],
+                 "blocking": True},
+                {"group_id": "confirmation", "label": "确认因子", "role": "confirmation",
+                 "logic": "OR", "factor_names": ["macd", "rsi", "money_flow"], "blocking": True},
+                {"group_id": "score_only", "label": "仅加分", "role": "score_only",
+                 "logic": "SCORE_ONLY", "factor_names": ["turnover"], "blocking": False},
+            ],
+            "confirmation_mode": "blocking",
             "weights": {
                 "ma_trend": 0.20, "breakout": 0.20, "sector_rank": 0.12,
                 "sector_trend": 0.08, "macd": 0.12, "turnover": 0.08,
@@ -320,7 +352,7 @@ _BUILTIN_TEMPLATES: list[dict] = [
             "volume_price": {"turnover_rate_min": 3.0, "turnover_rate_max": 15.0,
                              "main_flow_threshold": 1000.0, "main_flow_days": 2,
                              "large_order_ratio": 30.0, "min_daily_amount": 5000.0,
-                             "sector_rank_top": 25},
+                             "sector_rank_top": 25, "money_flow_source": "moneyflow_dc"},
             "sector_config": {"sector_data_source": "DC", "sector_period": 3, "sector_top_n": 25},
         },
     },
@@ -340,8 +372,24 @@ def _strategy_to_dict(s: StrategyTemplate) -> dict:
     }
 
 
+def _should_refresh_builtin_config(row: StrategyTemplate, tpl: dict) -> bool:
+    """仅刷新旧版内置策略配置，避免覆盖已带分组或交易员已调整的配置。"""
+    if not row.is_builtin:
+        return False
+    if row.created_at and row.updated_at and row.updated_at > row.created_at:
+        return False
+    current_config = row.config or {}
+    if current_config.get("factor_groups"):
+        return False
+    current_factors = current_config.get("factors", [])
+    template_factors = tpl.get("config", {}).get("factors", [])
+    current_names = [f.get("factor_name") for f in current_factors if isinstance(f, dict)]
+    template_names = [f.get("factor_name") for f in template_factors if isinstance(f, dict)]
+    return current_names == template_names
+
+
 async def _seed_builtin_templates(session: AsyncSession) -> None:
-    """将内置策略模板写入数据库，已存在的则同步更新配置。"""
+    """将内置策略模板写入数据库，已存在的仅刷新旧版内置配置。"""
     for tpl in _BUILTIN_TEMPLATES:
         existing = await session.execute(
             select(StrategyTemplate).where(StrategyTemplate.id == UUID(tpl["id"]))
@@ -360,9 +408,9 @@ async def _seed_builtin_templates(session: AsyncSession) -> None:
             session.add(entry)
         else:
             row.name = tpl["name"]
-            row.config = tpl["config"]
-            row.is_active = tpl["is_active"]
-            row.enabled_modules = tpl["enabled_modules"]
+            if _should_refresh_builtin_config(row, tpl):
+                row.config = tpl["config"]
+                row.enabled_modules = tpl["enabled_modules"]
     await session.flush()
 
 
@@ -420,9 +468,9 @@ def _next_weekday_1530(now: datetime) -> datetime:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/screen/run")
+@router.post("/screen/run", status_code=202)
 async def run_screen(body: ScreenRunRequest) -> dict:
-    """执行选股（盘后/实时）。"""
+    """提交异步选股任务（盘后/实时）。"""
     strategy_id_str: str | None = None
     config_dict: dict | None = None
     enabled_modules: list[str] | None = None
@@ -455,93 +503,42 @@ async def run_screen(body: ScreenRunRequest) -> dict:
     strategy_config = StrategyConfig.from_dict(config_dict)
 
     logger.info(
-        "选股请求: strategy_id=%s, enabled_modules=%s, factors=%d",
+        "提交异步选股请求: strategy_id=%s, enabled_modules=%s, factors=%d",
         strategy_id_str, enabled_modules, len(strategy_config.factors),
     )
 
-    async with AsyncSessionPG() as pg_session, AsyncSessionTS() as ts_session:
-        provider = ScreenDataProvider(
-            pg_session=pg_session, ts_session=ts_session, strategy_config=config_dict,
-        )
-        stocks_data = await provider.load_screen_data()
-
-    logger.info("数据加载完成: stocks_data 共 %d 只股票", len(stocks_data))
-
-    if stocks_data:
-        sample_sym = next(iter(stocks_data))
-        sample_data = stocks_data[sample_sym]
-        derived_keys = ["ma_trend", "ma_support", "macd", "boll", "rsi", "dma", "breakout",
-                        "turnover_check", "money_flow", "large_order"]
-        sample_factors = {k: sample_data.get(k, "MISSING") for k in derived_keys}
-        logger.info("抽样股票 %s 派生因子: %s, bars数量(closes): %d",
-                     sample_sym, sample_factors, len(sample_data.get("closes", [])))
-
-    if not stocks_data:
-        return {
+    task_id = str(uuid4())
+    pending_state = {
+        "task_id": task_id,
+        "status": "pending",
+        "message": "选股任务已提交",
+        "strategy_id": strategy_id_str,
+        "screen_type": body.screen_type,
+        "created_at": datetime.now().isoformat(),
+    }
+    await cache_set(f"screen:task:{task_id}", json.dumps(pending_state), ex=86400)
+    run_manual_screening.apply_async(
+        kwargs={
+            "task_id": task_id,
             "strategy_id": strategy_id_str,
+            "config_dict": config_dict,
+            "enabled_modules": enabled_modules,
             "screen_type": body.screen_type,
-            "screen_time": datetime.now().isoformat(),
-            "items": [],
-            "is_complete": True,
-        }
-
-    executor = ScreenExecutor(
-        strategy_config=strategy_config, strategy_id=strategy_id_str,
-        enabled_modules=enabled_modules, raw_config=config_dict,
+        },
+        task_id=task_id,
+        queue="screening",
     )
 
-    screen_type = ScreenType(body.screen_type)
-    if screen_type == ScreenType.EOD:
-        result = executor.run_eod_screen(stocks_data)
-    else:
-        result = executor.run_realtime_screen(stocks_data)
+    return pending_state
 
-    logger.info("选股完成: 共 %d 只股票入选", len(result.items))
 
-    screen_time_str = result.screen_time.isoformat()
-    response = {
-        "strategy_id": str(result.strategy_id),
-        "screen_type": result.screen_type.value,
-        "screen_time": screen_time_str,
-        "items": [
-            {
-                "symbol": item.symbol,
-                "name": stocks_data.get(item.symbol, {}).get("name", item.symbol),
-                "ref_buy_price": float(item.ref_buy_price),
-                "trend_score": item.trend_score,
-                "risk_level": item.risk_level.value,
-                "signals": [
-                    {
-                        "category": s.category.value,
-                        "label": s.label,
-                        "is_fake_breakout": s.is_fake_breakout,
-                        "strength": s.strength.value,
-                        "freshness": s.freshness.value,
-                        "description": s.description,
-                        "dimension": _SIGNAL_DIMENSION_MAP.get(s.category.value, "其他"),
-                    }
-                    for s in item.signals
-                ],
-                "has_fake_breakout": item.has_fake_breakout,
-                "sector_classifications": {
-                    _SOURCE_TO_API_KEY[src]: names
-                    for src, names in stocks_data.get(item.symbol, {})
-                        .get("sector_classifications", {"DC": [], "TI": [], "TDX": []})
-                        .items()
-                    if src in _SOURCE_TO_API_KEY
-                },
-                "screen_time": screen_time_str,
-            }
-            for item in result.items
-        ],
-        "is_complete": result.is_complete,
-    }
-
-    cache_key = f"screen:results:{strategy_id_str}"
-    await cache_set(cache_key, json.dumps(response), ex=86400)
-    await cache_set("screen:results:latest", json.dumps(response), ex=86400)
-
-    return response
+@router.get("/screen/run/status/{task_id}")
+async def get_screen_run_status(task_id: str) -> dict:
+    """查询异步选股任务状态。"""
+    raw = await cache_get(f"screen:task:{task_id}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="选股任务不存在或已过期")
+    return json.loads(raw)
 
 
 @router.get("/screen/results")
@@ -582,6 +579,8 @@ async def get_screen_results(
         "total": total, "page": page, "page_size": page_size, "items": paged_items,
         "strategy_id": data.get("strategy_id"), "screen_type": data.get("screen_type"),
         "screen_time": data.get("screen_time"),
+        "factor_stats": data.get("factor_stats", []),
+        "group_stats": data.get("group_stats", []),
     }
 
 
@@ -758,6 +757,27 @@ async def get_eod_schedule_status(redis: Redis = Depends(get_redis)) -> EodSched
 # ---------------------------------------------------------------------------
 
 
+def _factor_data_source_config_to_dict(config: FactorDataSourceConfig | None) -> dict | None:
+    """将因子数据源配置序列化为 JSON 兼容的 dict。"""
+    if config is None:
+        return None
+    return {
+        "kind": config.kind,
+        "config_path": config.config_path,
+        "scope": config.scope,
+        "options": [
+            {
+                "value": option.value,
+                "label": option.label,
+                "description": option.description,
+                "recommended": option.recommended,
+                "legacy": option.legacy,
+            }
+            for option in config.options
+        ],
+    }
+
+
 def _factor_meta_to_dict(meta: FactorMeta) -> dict:
     """将 FactorMeta 数据类序列化为 JSON 兼容的 dict。"""
     return {
@@ -772,6 +792,7 @@ def _factor_meta_to_dict(meta: FactorMeta) -> dict:
         "description": meta.description,
         "examples": meta.examples,
         "default_range": list(meta.default_range) if meta.default_range else None,
+        "data_source_config": _factor_data_source_config_to_dict(meta.data_source_config),
     }
 
 
@@ -848,6 +869,7 @@ async def get_factor_usage(factor_name: str) -> dict:
         "default_range": list(meta.default_range) if meta.default_range else None,
         "unit": meta.unit,
         "threshold_type": meta.threshold_type.value,
+        "data_source_config": _factor_data_source_config_to_dict(meta.data_source_config),
     }
 
 

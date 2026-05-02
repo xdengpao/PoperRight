@@ -108,9 +108,9 @@ class TestRateLimitGroupEnumCompleteness:
         assert RateLimitGroup.LIMIT_UP.value == "limit_up"
 
     def test_all_enum_values_count(self):
-        """枚举值总数 = 原有 4 个 + 新增 4 个 = 8 个。"""
+        """枚举值总数 = 原有 4 个 + 官方频率层级 5 个 = 9 个。"""
         all_values = list(RateLimitGroup)
-        assert len(all_values) == 8
+        assert len(all_values) == 9
 
 
 class TestBuildRateLimitMapCoverage:
